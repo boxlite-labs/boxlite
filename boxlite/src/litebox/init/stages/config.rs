@@ -51,7 +51,8 @@ pub async fn run(input: ConfigInput<'_>) -> BoxliteResult<ConfigOutput> {
         init_rootfs: input.init_rootfs.clone(),
         network_backend_endpoint: network_backend.as_ref().map(|b| b.endpoint()).transpose()?,
         home_dir: input.home_dir.clone(),
-        console_output: Some(input.layout.console_output_path()),
+        // console_output: Some(input.layout.console_output_path()),
+        console_output: None,
     };
 
     Ok(ConfigOutput {

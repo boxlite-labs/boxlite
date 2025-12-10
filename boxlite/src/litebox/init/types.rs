@@ -9,9 +9,10 @@ use crate::portal::GuestSession;
 use crate::runtime::RuntimeInner;
 use crate::runtime::initrf::InitRootfs;
 use crate::runtime::layout::BoxFilesystemLayout;
-use crate::runtime::options::BoxOptions;
+use crate::runtime::options::{BoxOptions, VolumeSpec};
 use crate::vmm::VmmController;
 use crate::volumes::Disk;
+use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
@@ -20,6 +21,63 @@ use tokio::sync::OnceCell;
 /// - true: overlayfs (allows COW writes, keeps layers separate)
 /// - false: merged rootfs (all layers merged on host)
 pub const USE_OVERLAYFS: bool = true;
+
+/// User-specified volume with resolved paths and generated tag.
+#[derive(Debug, Clone)]
+pub struct ResolvedVolume {
+    pub tag: String,
+    pub host_path: PathBuf,
+    pub guest_path: String,
+    pub read_only: bool,
+}
+
+pub fn resolve_user_volumes(volumes: &[VolumeSpec]) -> BoxliteResult<Vec<ResolvedVolume>> {
+    let mut resolved = Vec::with_capacity(volumes.len());
+
+    for (i, vol) in volumes.iter().enumerate() {
+        let host_path = PathBuf::from(&vol.host_path);
+
+        if !host_path.exists() {
+            return Err(BoxliteError::Config(format!(
+                "Volume host path does not exist: {}",
+                vol.host_path
+            )));
+        }
+
+        let resolved_path = host_path.canonicalize().map_err(|e| {
+            BoxliteError::Config(format!(
+                "Failed to resolve volume path '{}': {}",
+                vol.host_path, e
+            ))
+        })?;
+
+        if !resolved_path.is_dir() {
+            return Err(BoxliteError::Config(format!(
+                "Volume host path is not a directory: {}",
+                vol.host_path
+            )));
+        }
+
+        let tag = format!("uservol{}", i);
+
+        tracing::debug!(
+            tag = %tag,
+            host_path = %resolved_path.display(),
+            guest_path = %vol.guest_path,
+            read_only = vol.read_only,
+            "Resolved user volume"
+        );
+
+        resolved.push(ResolvedVolume {
+            tag,
+            host_path: resolved_path,
+            guest_path: vol.guest_path.clone(),
+            read_only: vol.read_only,
+        });
+    }
+
+    Ok(resolved)
+}
 
 /// Result of rootfs preparation - either merged or separate layers.
 #[derive(Debug)]
@@ -108,6 +166,7 @@ pub struct ConfigOutput {
     pub network_backend: Option<Box<dyn NetworkBackend>>,
     pub disk: Disk,
     pub is_cow_child: bool,
+    pub user_volumes: Vec<ResolvedVolume>,
 }
 
 /// Input for spawn stage.
@@ -128,6 +187,7 @@ pub struct GuestInput {
     pub rootfs_result: RootfsPrepResult,
     pub container_config: ContainerConfig,
     pub is_cow_child: bool,
+    pub user_volumes: Vec<ResolvedVolume>,
 }
 
 /// Output from guest initialization stage.

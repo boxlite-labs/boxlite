@@ -59,18 +59,34 @@ pub trait VmmController: Send {
 ///
 /// Encapsulates virtiofs mounts that expose host directories to the guest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MountConfig {
+    pub tag: String,
+    pub host_path: PathBuf,
+    pub read_only: bool,
+}
+
+/// Volume configuration for host-to-guest file sharing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Mounts {
-    mounts: Vec<(String, PathBuf)>,
+    mounts: Vec<MountConfig>,
 }
 
 impl Mounts {
     /// Create a new volume configuration
-    pub fn new(mounts: Vec<(String, PathBuf)>) -> Self {
-        Self { mounts }
+    pub fn new() -> Self {
+        Self { mounts: Vec::new() }
     }
 
-    /// Get all mounts as virtiofs (tag, path) pairs
-    pub fn mounts(&self) -> &[(String, PathBuf)] {
+    pub fn add(&mut self, tag: impl Into<String>, path: PathBuf, read_only: bool) {
+        self.mounts.push(MountConfig {
+            tag: tag.into(),
+            host_path: path,
+            read_only,
+        });
+    }
+
+    // Get all mounts
+    pub fn mounts(&self) -> &[MountConfig] {
         &self.mounts
     }
 }

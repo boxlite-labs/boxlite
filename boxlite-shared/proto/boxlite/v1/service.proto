@@ -86,7 +86,8 @@ message Volume {
 
 // Virtiofs volume source
 message VirtiofsSource {
-  string tag = 1; // virtiofs tag name
+  string tag = 1;         // virtiofs tag name
+  bool read_only = 2;     // read only in guest
 }
 
 // Block device volume source

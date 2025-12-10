@@ -2,7 +2,7 @@
 //!
 //! Sends init configuration to guest and starts container.
 
-use crate::litebox::init::types::{GuestInput, GuestOutput, RootfsPrepResult};
+use crate::litebox::init::types::{GuestInput, GuestOutput, ResolvedVolume, RootfsPrepResult};
 use crate::portal::interfaces::{
     GuestInitConfig, NetworkInitConfig, RootfsInitConfig, VolumeConfig as GuestVolumeConfig,
 };
@@ -15,7 +15,11 @@ use boxlite_shared::errors::BoxliteResult;
 /// **Single Responsibility**: Guest RPC calls.
 pub async fn run(input: GuestInput) -> BoxliteResult<GuestOutput> {
     // Build guest init config
-    let guest_init_config = build_guest_init_config(&input.rootfs_result, input.is_cow_child)?;
+    let guest_init_config = build_guest_init_config(
+        &input.rootfs_result,
+        input.is_cow_child,
+        &input.user_volumes,
+    )?;
 
     // Step 1: Guest Init
     tracing::info!("Sending guest initialization request");
@@ -44,11 +48,13 @@ pub async fn run(input: GuestInput) -> BoxliteResult<GuestOutput> {
 fn build_guest_init_config(
     rootfs_result: &RootfsPrepResult,
     is_cow_child: bool,
+    user_volumes: &[ResolvedVolume],
 ) -> BoxliteResult<GuestInitConfig> {
     // RW volume (always present)
     let mut volumes = vec![GuestVolumeConfig::virtiofs(
         mount_tags::RW,
         guest_paths::RW_DIR,
+        false,
     )];
 
     // Block device for writable layer
@@ -69,6 +75,7 @@ fn build_guest_init_config(
             volumes.push(GuestVolumeConfig::virtiofs(
                 mount_tags::ROOTFS,
                 guest_paths::ROOTFS,
+                false,
             ));
             RootfsInitConfig::Merged {
                 path: guest_paths::ROOTFS.to_string(),
@@ -87,6 +94,7 @@ fn build_guest_init_config(
                 volumes.push(GuestVolumeConfig::virtiofs(
                     mount_tags::LAYERS,
                     guest_paths::LAYERS_DIR,
+                    false,
                 ));
                 let dirs: Vec<String> = layer_names
                     .iter()
@@ -104,6 +112,14 @@ fn build_guest_init_config(
             }
         }
     };
+
+    for vol in user_volumes {
+        volumes.push(GuestVolumeConfig::virtiofs(
+            &vol.tag,
+            &vol.guest_path,
+            vol.read_only,
+        ));
+    }
 
     // Network configuration
     let network = Some(NetworkInitConfig {

@@ -16,7 +16,7 @@ pub fn mount_volume(vol: &Volume) -> BoxliteResult<()> {
 
     match &vol.source {
         Some(volume::Source::Virtiofs(virtiofs)) => {
-            VirtiofsMount::mount(&virtiofs.tag, mount_point)
+            VirtiofsMount::mount(&virtiofs.tag, mount_point, virtiofs.read_only)
         }
         Some(volume::Source::BlockDevice(block)) => {
             let filesystem = Filesystem::try_from(block.filesystem).unwrap_or(Filesystem::Ext4);

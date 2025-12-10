@@ -1,19 +1,21 @@
 //! Virtiofs mount helper.
-//!
-//! Mounts virtiofs filesystems shared from the host.
 
 use std::path::Path;
 
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 use nix::mount::{mount, MsFlags};
 
-/// Mounts virtiofs filesystems.
 pub struct VirtiofsMount;
 
 impl VirtiofsMount {
     /// Mount virtiofs tag to mount point.
-    pub fn mount(tag: &str, mount_point: &Path) -> BoxliteResult<()> {
-        tracing::info!("Mounting virtiofs: {} → {}", tag, mount_point.display());
+    pub fn mount(tag: &str, mount_point: &Path, read_only: bool) -> BoxliteResult<()> {
+        tracing::info!(
+            "Mounting virtiofs: {} → {} ({})",
+            tag,
+            mount_point.display(),
+            if read_only { "ro" } else { "rw" }
+        );
 
         // Create mount point
         std::fs::create_dir_all(mount_point).map_err(|e| {
@@ -24,12 +26,16 @@ impl VirtiofsMount {
             ))
         })?;
 
-        // Mount using nix
+        let mut flags = MsFlags::empty();
+        if read_only {
+            flags |= MsFlags::MS_RDONLY;
+        }
+
         mount(
             Some(tag),
             mount_point,
             Some("virtiofs"),
-            MsFlags::empty(),
+            flags,
             None::<&str>,
         )
         .map_err(|e| {
@@ -41,7 +47,12 @@ impl VirtiofsMount {
             ))
         })?;
 
-        tracing::info!("Mounted virtiofs: {} → {}", tag, mount_point.display());
+        tracing::info!(
+            "Mounted virtiofs: {} → {} ({})",
+            tag,
+            mount_point.display(),
+            if read_only { "ro" } else { "rw" }
+        );
         Ok(())
     }
 }

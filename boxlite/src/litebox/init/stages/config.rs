@@ -3,7 +3,9 @@
 //! Builds InstanceSpec from prepared components.
 //! Includes disk creation (minimal I/O).
 
-use crate::litebox::init::types::{ConfigInput, ConfigOutput, RootfsPrepResult};
+use crate::litebox::init::types::{
+    ConfigInput, ConfigOutput, ResolvedVolume, RootfsPrepResult, resolve_user_volumes,
+};
 use crate::net::{NetworkBackendConfig, NetworkBackendFactory};
 use crate::rootfs::operations::fix_rootfs_permissions;
 use crate::runtime::constants::{guest_paths, mount_tags};
@@ -21,8 +23,9 @@ pub async fn run(input: ConfigInput<'_>) -> BoxliteResult<ConfigOutput> {
     let transport = Transport::unix(input.layout.socket_path());
     let ready_transport = Transport::unix(input.layout.ready_socket_path());
 
-    // Volume configuration
-    let volumes = build_volume_config(input.layout, &input.rootfs.rootfs_result)?;
+    let user_volumes = resolve_user_volumes(&input.options.volumes)?;
+
+    let volumes = build_volume_config(input.layout, &input.rootfs.rootfs_result, &user_volumes)?;
 
     // Guest entrypoint
     let guest_entrypoint = build_guest_entrypoint(
@@ -60,28 +63,36 @@ pub async fn run(input: ConfigInput<'_>) -> BoxliteResult<ConfigOutput> {
         network_backend,
         disk,
         is_cow_child,
+        user_volumes,
     })
 }
 
 fn build_volume_config(
     layout: &crate::runtime::layout::BoxFilesystemLayout,
     rootfs_result: &RootfsPrepResult,
+    user_volumes: &[ResolvedVolume],
 ) -> BoxliteResult<Mounts> {
     let rw_dir = layout.rw_dir();
     fix_rootfs_permissions(&rw_dir)?;
 
-    let mut mounts = vec![(mount_tags::RW.to_string(), rw_dir)];
+    let mut mounts = Mounts::new();
+
+    mounts.add(mount_tags::RW, rw_dir, false);
 
     match rootfs_result {
         RootfsPrepResult::Merged(path) => {
-            mounts.push((mount_tags::ROOTFS.to_string(), path.clone()));
+            mounts.add(mount_tags::ROOTFS, path.clone(), false);
         }
         RootfsPrepResult::Layers { layers_dir, .. } => {
-            mounts.push((mount_tags::LAYERS.to_string(), layers_dir.clone()));
+            mounts.add(mount_tags::LAYERS, layers_dir.clone(), true);
         }
     }
 
-    Ok(Mounts::new(mounts))
+    for vol in user_volumes {
+        mounts.add(&vol.tag, vol.host_path.clone(), vol.read_only);
+    }
+
+    Ok(mounts)
 }
 
 fn build_guest_entrypoint(

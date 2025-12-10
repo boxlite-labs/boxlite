@@ -96,6 +96,7 @@ pub enum VolumeConfig {
         tag: String,
         /// Mount point in guest
         mount_point: String,
+        read_only: bool,
     },
     /// Block device mount
     BlockDevice {
@@ -110,10 +111,15 @@ pub enum VolumeConfig {
 
 impl VolumeConfig {
     /// Create virtiofs volume config.
-    pub fn virtiofs(tag: impl Into<String>, mount_point: impl Into<String>) -> Self {
+    pub fn virtiofs(
+        tag: impl Into<String>,
+        mount_point: impl Into<String>,
+        read_only: bool,
+    ) -> Self {
         Self::Virtiofs {
             tag: tag.into(),
             mount_point: mount_point.into(),
+            read_only,
         }
     }
 
@@ -132,10 +138,15 @@ impl VolumeConfig {
 
     fn into_proto(self) -> Volume {
         match self {
-            VolumeConfig::Virtiofs { tag, mount_point } => Volume {
+            VolumeConfig::Virtiofs {
+                tag,
+                mount_point,
+                read_only,
+            } => Volume {
                 mount_point,
                 source: Some(boxlite_shared::volume::Source::Virtiofs(VirtiofsSource {
                     tag,
+                    read_only,
                 })),
             },
             VolumeConfig::BlockDevice {

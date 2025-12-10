@@ -196,15 +196,20 @@ impl Vmm for Krun {
         tracing::trace!("Step into Krun::create");
 
         // Validate volume mount directories exist
-        for (tag, path) in config.volumes.mounts() {
-            if !path.exists() {
+        for mount in config.volumes.mounts() {
+            if !mount.host_path.exists() {
                 return Err(BoxliteError::Engine(format!(
                     "Volume mount directory '{}' not found: {}",
-                    tag,
-                    path.display()
+                    mount.tag,
+                    mount.host_path.display()
                 )));
             }
-            tracing::debug!(tag, path = %path.display(), "Validated volume mount directory");
+            tracing::debug!(
+                tag = %mount.tag,
+                path = %mount.host_path.display(),
+                read_only = mount.read_only,
+                "Validated volume mount directory"
+            );
         }
 
         // Validate disk images exist
@@ -341,13 +346,18 @@ impl Vmm for Krun {
             // Mount volume directories via virtiofs
             // With host-side rootfs preparation, only 2 mounts: "bin" and "rootfs"
             tracing::info!("Mounting volumes via virtiofs:");
-            for (tag, path) in config.volumes.mounts() {
-                let path_str = path.to_str().ok_or_else(|| {
-                    BoxliteError::Engine(format!("Invalid path: {}", path.display()))
+            for mount in config.volumes.mounts() {
+                let path_str = mount.host_path.to_str().ok_or_else(|| {
+                    BoxliteError::Engine(format!("Invalid path: {}", mount.host_path.display()))
                 })?;
 
-                tracing::info!("  {} → {}", tag, path.display());
-                ctx.add_virtiofs(tag, path_str)?;
+                tracing::info!(
+                    "  {} → {} ({})",
+                    mount.tag,
+                    mount.host_path.display(),
+                    if mount.read_only { "ro" } else { "rw" }
+                );
+                ctx.add_virtiofs(&mount.tag, path_str)?;
             }
 
             // Attach disk images via virtio-blk

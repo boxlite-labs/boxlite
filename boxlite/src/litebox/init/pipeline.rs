@@ -222,6 +222,7 @@ impl InitPipeline {
             rootfs_result: rootfs_output.rootfs_result,
             container_config: rootfs_output.container_config,
             is_cow_child: config_output.is_cow_child,
+            user_volumes: config_output.user_volumes,
         })
         .await?;
         let stage_container_init_ms = stage6_start.elapsed().as_millis();

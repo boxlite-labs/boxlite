@@ -27,11 +27,6 @@ brew_installed() {
     brew list "$1" &>/dev/null
 }
 
-# Check if a Homebrew tap is tapped
-brew_tapped() {
-    brew tap | grep -q "^$1$"
-}
-
 # Check and install Homebrew
 setup_homebrew() {
     print_step "Checking for Homebrew... "
@@ -52,10 +47,12 @@ setup_homebrew() {
     fi
 }
 
-# Update Homebrew
+# Update Homebrew (non-fatal if it fails)
 update_homebrew() {
     print_section "🔄 Updating Homebrew..."
-    brew update
+    if ! brew update; then
+        print_warning "Homebrew update failed (network issue?), continuing anyway..."
+    fi
     echo ""
 }
 
@@ -88,41 +85,28 @@ install_musl_cross() {
     echo ""
 }
 
-# Tap slp/krun repository
-tap_krun_repo() {
-    print_step "Checking for slp/krun tap... "
-    if brew_tapped "slp/krun"; then
-        print_success "Already tapped"
+# Install dtc (device tree compiler) - required for building libkrun
+install_dtc() {
+    print_step "Checking for dtc... "
+    if brew_installed "dtc"; then
+        print_success "Already installed"
     else
-        echo -e "${YELLOW}Tapping...${NC}"
-        brew tap slp/krun
-        print_success "slp/krun tapped"
+        echo -e "${YELLOW}Installing...${NC}"
+        brew install dtc
+        print_success "dtc installed"
     fi
     echo ""
 }
 
-# Install libkrun
-install_libkrun() {
-    print_step "Checking for libkrun... "
-    if brew_installed "libkrun"; then
+# Install lld (LLVM linker) - required for cross-compiling init binary on macOS
+install_lld() {
+    print_step "Checking for lld... "
+    if brew_installed "lld"; then
         print_success "Already installed"
     else
         echo -e "${YELLOW}Installing...${NC}"
-        brew install libkrun
-        print_success "libkrun installed"
-    fi
-    echo ""
-}
-
-# Install libkrunfw
-install_libkrunfw() {
-    print_step "Checking for libkrunfw... "
-    if brew_installed "libkrunfw"; then
-        print_success "Already installed"
-    else
-        echo -e "${YELLOW}Installing...${NC}"
-        brew install libkrunfw
-        print_success "libkrunfw installed"
+        brew install lld
+        print_success "lld installed"
     fi
     echo ""
 }
@@ -173,35 +157,6 @@ setup_go() {
     echo ""
 }
 
-# Verify library installation
-verify_libraries() {
-    print_section "🔍 Verifying library installation..."
-    echo ""
-
-    print_step "Checking pkg-config for libkrun... "
-    if pkg-config --exists libkrun; then
-        local libkrun_version=$(pkg-config --modversion libkrun)
-        print_success "Found (version $libkrun_version)"
-    else
-        print_error "Not found via pkg-config"
-        print_warning "This might cause build issues"
-    fi
-
-    print_step "Checking pkg-config for libkrunfw... "
-    if pkg-config --exists libkrunfw; then
-        local libkrunfw_version=$(pkg-config --modversion libkrunfw)
-        print_success "Found (version $libkrunfw_version)"
-    else
-        # libkrunfw might not have a .pc file, check via Homebrew instead
-        if brew_installed "libkrunfw"; then
-            echo -e "${YELLOW}✓ Installed via Homebrew (no .pc file)${NC}"
-        else
-            print_error "Not found"
-        fi
-    fi
-    echo ""
-}
-
 # Main installation flow
 main() {
     print_header "BoxLite Development Setup for macOS"
@@ -224,11 +179,9 @@ main() {
 
     install_musl_cross
 
-    tap_krun_repo
+    install_dtc
 
-    install_libkrun
-
-    install_libkrunfw
+    install_lld
 
     install_dylibbundler
 
@@ -238,9 +191,9 @@ main() {
 
     setup_go
 
-    verify_libraries
-
     print_header "Setup Complete"
+    echo ""
+    echo "Note: libkrun and libkrunfw will be built from source during cargo build."
 }
 
 main "$@"

@@ -1,10 +1,59 @@
 use std::collections::HashMap;
 use std::env;
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+// libkrunfw prebuilt tarball configuration (contains kernel.c)
+const LIBKRUNFW_VERSION: &str = "4.10.0";
+const LIBKRUNFW_PREBUILT_URL: &str = "https://github.com/containers/libkrunfw/releases/download/v4.10.0/libkrunfw-4.10.0-prebuilt-aarch64.tar.gz";
+const LIBKRUNFW_SHA256: &str = "6732e0424ce90fa246a4a75bb5f3357a883546dbca095fee07a7d587e82d94b0";
+
+// Cross-compilation patch for building init binary on macOS (vendored locally)
+const LIBKRUN_PATCH_FILE: &str = "patches/macos-cross-compile.patch";
+
+// libkrun build features (NET=1 BLK=1 enables network and block device support)
+const LIBKRUN_BUILD_FEATURES: &[(&str, &str)] = &[("NET", "1"), ("BLK", "1")];
+
+// Library directory name differs by platform
+#[cfg(target_os = "macos")]
+const LIB_DIR: &str = "lib";
+#[cfg(target_os = "linux")]
+const LIB_DIR: &str = "lib64";
+
+/// Returns libkrun build environment with features enabled.
+fn libkrun_build_env(libkrunfw_install: &Path) -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    env.insert(
+        "PKG_CONFIG_PATH".to_string(),
+        format!("{}/{}/pkgconfig", libkrunfw_install.display(), LIB_DIR),
+    );
+    for (key, value) in LIBKRUN_BUILD_FEATURES {
+        env.insert(key.to_string(), value.to_string());
+    }
+    env
+}
+
+/// Verifies vendored sources exist.
+fn verify_vendored_sources(manifest_dir: &Path, require_libkrunfw: bool) {
+    let libkrun_src = manifest_dir.join("vendor/libkrun");
+    let libkrunfw_src = manifest_dir.join("vendor/libkrunfw");
+
+    let missing_libkrun = !libkrun_src.exists();
+    let missing_libkrunfw = require_libkrunfw && !libkrunfw_src.exists();
+
+    if missing_libkrun || missing_libkrunfw {
+        eprintln!("ERROR: Vendored sources not found");
+        eprintln!();
+        eprintln!("Initialize git submodules:");
+        eprintln!("  git submodule update --init --recursive");
+        std::process::exit(1);
+    }
+}
+
 fn main() {
-    // Rebuild if vendored sources change (Linux only)
+    // Rebuild if vendored sources change
     println!("cargo:rerun-if-changed=vendor/libkrun");
     println!("cargo:rerun-if-changed=vendor/libkrunfw");
 
@@ -160,98 +209,6 @@ fn fix_install_name(lib_name: &str, lib_path: &Path) {
     }
 }
 
-/// Copies libraries from Homebrew to OUT_DIR and fixes install_name to use @rpath
-#[cfg(target_os = "macos")]
-fn copy_and_fix_macos_libs(src_dir: &Path, out_dir: &Path, lib_prefix: &str) -> Result<(), String> {
-    use std::collections::HashMap;
-    use std::fs;
-
-    // Remove old directory if it exists (clean slate)
-    if out_dir.exists() {
-        fs::remove_dir_all(out_dir)
-            .map_err(|e| format!("Failed to remove old directory: {}", e))?;
-    }
-
-    fs::create_dir_all(out_dir).map_err(|e| format!("Failed to create output directory: {}", e))?;
-
-    // Track symlinks to recreate them after copying real files
-    let mut symlinks_to_create: HashMap<String, String> = HashMap::new();
-
-    // First pass: copy regular files and record symlinks
-    for entry in
-        fs::read_dir(src_dir).map_err(|e| format!("Failed to read source directory: {}", e))?
-    {
-        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
-        let path = entry.path();
-        let filename = path.file_name().unwrap().to_string_lossy().to_string();
-
-        if filename.starts_with(lib_prefix) && filename.contains(".dylib") {
-            let dest = out_dir.join(&filename);
-
-            // Check if it's a symlink
-            let metadata = fs::symlink_metadata(&path)
-                .map_err(|e| format!("Failed to get metadata: {}", e))?;
-
-            if metadata.file_type().is_symlink() {
-                // Record symlink for later creation
-                let target =
-                    fs::read_link(&path).map_err(|e| format!("Failed to read symlink: {}", e))?;
-                let target_name = target
-                    .file_name()
-                    .ok_or("Symlink target has no filename")?
-                    .to_string_lossy()
-                    .to_string();
-                symlinks_to_create.insert(filename.clone(), target_name);
-                println!(
-                    "cargo:warning=Recorded symlink: {} -> {}",
-                    filename,
-                    target.display()
-                );
-            } else {
-                // Copy regular file
-                fs::copy(&path, &dest).map_err(|e| format!("Failed to copy file: {}", e))?;
-                println!("cargo:warning=Copied library: {}", filename);
-
-                // Fix install_name to use @rpath (only for non-symlinks)
-                fix_install_name(&filename, &dest);
-
-                // Re-sign after modifying (install_name_tool invalidates signature)
-                let sign_status = Command::new("codesign")
-                    .arg("-s")
-                    .arg("-")
-                    .arg("--force")
-                    .arg(&dest)
-                    .status()
-                    .map_err(|e| format!("Failed to run codesign: {}", e))?;
-
-                if !sign_status.success() {
-                    return Err(format!("codesign failed for {}", filename));
-                }
-                println!("cargo:warning=Re-signed {}", filename);
-            }
-        }
-    }
-
-    // Second pass: recreate symlinks in OUT_DIR
-    for (link_name, target_name) in symlinks_to_create {
-        let link_path = out_dir.join(&link_name);
-        let target_path = PathBuf::from(&target_name);
-
-        std::os::unix::fs::symlink(&target_path, &link_path).map_err(|e| {
-            format!(
-                "Failed to create symlink {} -> {}: {}",
-                link_name, target_name, e
-            )
-        })?;
-        println!(
-            "cargo:warning=Created symlink: {} -> {}",
-            link_name, target_name
-        );
-    }
-
-    Ok(())
-}
-
 /// Extract SONAME from versioned library filename
 /// e.g., libkrunfw.so.4.9.0 -> Some("libkrunfw.so.4")
 ///       libkrun.so.1.15.1 -> Some("libkrun.so.1")
@@ -315,71 +272,268 @@ fn fix_linux_libs(src_dir: &Path, lib_prefix: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// macOS: Copy Homebrew libraries to OUT_DIR and fix install names
+/// Downloads a file from URL to the specified path.
 #[cfg(target_os = "macos")]
-fn build() {
-    println!("cargo:warning=Configuring libkrun-sys for macOS (copying from Homebrew)");
+fn download_file(url: &str, dest: &Path) -> io::Result<()> {
+    println!("cargo:warning=Downloading {}...", url);
 
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let libkrun_out = out_dir.join("libkrun").join("lib");
-    let libkrunfw_out = out_dir.join("libkrunfw").join("lib");
-
-    // Find libkrun via pkg-config
-    let libkrun_info = pkg_config::probe_library("libkrun").unwrap_or_else(|e| {
-        eprintln!("ERROR: Failed to find libkrun via pkg-config: {}", e);
-        eprintln!();
-        eprintln!("Install libkrun using Homebrew:");
-        eprintln!("  brew tap slp/krun && brew install libkrun");
-        std::process::exit(1);
-    });
-
-    println!("cargo:warning=Found libkrun via pkg-config");
-
-    // Find libkrun library directory
-    let libkrun_src = libkrun_info
-        .link_paths
-        .iter()
-        .find(|path| has_library(path, "libkrun."))
-        .unwrap_or_else(|| {
-            panic!("libkrun library not found in pkg-config link paths");
-        });
-
-    // Find libkrunfw via Homebrew
-    let output = Command::new("brew")
-        .args(["--prefix", "libkrunfw"])
-        .output()
-        .expect("Failed to run 'brew --prefix libkrunfw'");
+    let output = Command::new("curl")
+        .args(["-fsSL", "-o", dest.to_str().unwrap(), url])
+        .output()?;
 
     if !output.status.success() {
-        eprintln!("ERROR: Failed to find libkrunfw via Homebrew");
-        eprintln!();
-        eprintln!("Install libkrunfw using Homebrew:");
-        eprintln!("  brew tap slp/krun && brew install libkrunfw");
-        std::process::exit(1);
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("curl failed: {}", String::from_utf8_lossy(&output.stderr)),
+        ));
     }
 
-    let prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let libkrunfw_src = PathBuf::from(prefix).join("lib");
+    Ok(())
+}
 
-    // Verify libkrunfw library exists
-    if !has_library(&libkrunfw_src, "libkrunfw.") {
-        panic!("libkrunfw library not found at {}", libkrunfw_src.display());
+/// Verifies SHA256 checksum of a file.
+#[cfg(target_os = "macos")]
+fn verify_sha256(file: &Path, expected: &str) -> io::Result<()> {
+    let output = Command::new("shasum")
+        .args(["-a", "256", file.to_str().unwrap()])
+        .output()?;
+
+    if !output.status.success() {
+        return Err(io::Error::new(io::ErrorKind::Other, "shasum failed"));
     }
 
-    println!(
-        "cargo:warning=Found libkrunfw at {}",
-        libkrunfw_src.display()
+    let actual = String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string();
+
+    if actual != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("SHA256 mismatch: expected {}, got {}", expected, actual),
+        ));
+    }
+
+    println!("cargo:warning=SHA256 verified: {}", expected);
+    Ok(())
+}
+
+/// Extracts a tarball to the specified directory.
+#[cfg(target_os = "macos")]
+fn extract_tarball(tarball: &Path, dest: &Path) -> io::Result<()> {
+    fs::create_dir_all(dest)?;
+
+    let status = Command::new("tar")
+        .args([
+            "-xzf",
+            tarball.to_str().unwrap(),
+            "-C",
+            dest.to_str().unwrap(),
+        ])
+        .status()?;
+
+    if !status.success() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "tar extraction failed",
+        ));
+    }
+
+    Ok(())
+}
+
+/// Downloads and extracts the prebuilt libkrunfw tarball.
+/// Returns the path to the extracted source directory.
+#[cfg(target_os = "macos")]
+fn download_libkrunfw_prebuilt(out_dir: &Path) -> PathBuf {
+    let tarball_path = out_dir.join("libkrunfw-prebuilt.tar.gz");
+    let extract_dir = out_dir.join("libkrunfw-src");
+    let src_dir = extract_dir.join(format!("libkrunfw-{}", LIBKRUNFW_VERSION));
+
+    // Check if already extracted
+    if src_dir.join("kernel.c").exists() {
+        println!("cargo:warning=Using cached libkrunfw source");
+        return src_dir;
+    }
+
+    // Download if not cached
+    if !tarball_path.exists() {
+        download_file(LIBKRUNFW_PREBUILT_URL, &tarball_path)
+            .unwrap_or_else(|e| panic!("Failed to download libkrunfw: {}", e));
+
+        verify_sha256(&tarball_path, LIBKRUNFW_SHA256)
+            .unwrap_or_else(|e| panic!("Failed to verify libkrunfw checksum: {}", e));
+    }
+
+    // Extract
+    if extract_dir.exists() {
+        fs::remove_dir_all(&extract_dir).ok();
+    }
+    extract_tarball(&tarball_path, &extract_dir)
+        .unwrap_or_else(|e| panic!("Failed to extract libkrunfw: {}", e));
+
+    println!("cargo:warning=Extracted libkrunfw to {}", src_dir.display());
+    src_dir
+}
+
+/// Builds libkrunfw from the prebuilt source.
+#[cfg(target_os = "macos")]
+fn build_libkrunfw_macos(src_dir: &Path, install_dir: &Path) {
+    build_with_make(src_dir, install_dir, "libkrunfw", HashMap::new());
+}
+
+/// Applies the cross-compilation patch to libkrun from vendored patch file.
+/// Copy from https://github.com/slp/homebrew-krun
+#[cfg(target_os = "macos")]
+fn apply_libkrun_patch(src_dir: &Path, manifest_dir: &Path) {
+    let patch_path = manifest_dir.join(LIBKRUN_PATCH_FILE);
+    let patch_marker = src_dir.join(".patch_applied");
+
+    // Skip if patch already applied
+    if patch_marker.exists() {
+        println!("cargo:warning=Cross-compile patch already applied");
+        return;
+    }
+
+    // Verify patch file exists
+    if !patch_path.exists() {
+        panic!(
+            "Cross-compilation patch not found at {}",
+            patch_path.display()
+        );
+    }
+
+    // Apply patch with git apply (works better than patch for git-style diffs)
+    println!("cargo:warning=Applying cross-compilation patch...");
+    let status = Command::new("git")
+        .args(["apply", "--check", patch_path.to_str().unwrap()])
+        .current_dir(src_dir)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status();
+
+    // Check if patch can be applied (might already be partially applied)
+    if status.is_ok() && status.unwrap().success() {
+        let status = Command::new("git")
+            .args(["apply", patch_path.to_str().unwrap()])
+            .current_dir(src_dir)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .expect("Failed to apply patch");
+
+        if !status.success() {
+            panic!("Failed to apply cross-compilation patch");
+        }
+        println!("cargo:warning=Cross-compilation patch applied successfully");
+    } else {
+        println!("cargo:warning=Patch already applied or not needed");
+    }
+
+    // Create marker file
+    fs::write(&patch_marker, "applied").ok();
+}
+
+/// Builds libkrun from vendored source with cross-compilation support.
+#[cfg(target_os = "macos")]
+fn build_libkrun_macos(
+    src_dir: &Path,
+    install_dir: &Path,
+    libkrunfw_install: &Path,
+    manifest_dir: &Path,
+) {
+    // Apply cross-compilation patch from vendored patch file
+    apply_libkrun_patch(src_dir, manifest_dir);
+
+    // Build with common helper using shared build environment
+    build_with_make(
+        src_dir,
+        install_dir,
+        "libkrun",
+        libkrun_build_env(libkrunfw_install),
+    );
+}
+
+/// Fixes install names and re-signs libraries in a directory.
+#[cfg(target_os = "macos")]
+fn fix_macos_libs(lib_dir: &Path, lib_prefix: &str) -> Result<(), String> {
+    for entry in fs::read_dir(lib_dir).map_err(|e| format!("Failed to read lib dir: {}", e))? {
+        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+        let path = entry.path();
+        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+
+        if filename.starts_with(lib_prefix) && filename.contains(".dylib") {
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|e| format!("Failed to get metadata: {}", e))?;
+
+            // Skip symlinks
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+
+            // Fix install_name to use @rpath
+            fix_install_name(&filename, &path);
+
+            // Re-sign after modifying
+            let sign_status = Command::new("codesign")
+                .args(["-s", "-", "--force"])
+                .arg(&path)
+                .status()
+                .map_err(|e| format!("Failed to run codesign: {}", e))?;
+
+            if !sign_status.success() {
+                return Err(format!("codesign failed for {}", filename));
+            }
+
+            println!("cargo:warning=Fixed and signed {}", filename);
+        }
+    }
+
+    Ok(())
+}
+
+/// macOS: Build libkrun and libkrunfw from source
+#[cfg(target_os = "macos")]
+fn build() {
+    println!("cargo:warning=Building libkrun-sys for macOS (from source)");
+
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+
+    // Verify vendored libkrun source exists (libkrunfw is downloaded as prebuilt)
+    verify_vendored_sources(&manifest_dir, false);
+
+    let libkrun_src = manifest_dir.join("vendor/libkrun");
+
+    // 1. Download and extract prebuilt libkrunfw
+    let libkrunfw_src = download_libkrunfw_prebuilt(&out_dir);
+
+    // 2. Build libkrunfw
+    let libkrunfw_install = out_dir.join("libkrunfw");
+    build_libkrunfw_macos(&libkrunfw_src, &libkrunfw_install);
+
+    // 3. Build libkrun from vendored source (with cross-compile patch)
+    let libkrun_install = out_dir.join("libkrun");
+    build_libkrun_macos(
+        &libkrun_src,
+        &libkrun_install,
+        &libkrunfw_install,
+        &manifest_dir,
     );
 
-    // Copy libraries to OUT_DIR and fix install names
-    copy_and_fix_macos_libs(libkrun_src, &libkrun_out, "libkrun")
-        .unwrap_or_else(|e| panic!("Failed to copy libkrun: {}", e));
+    // 4. Fix install names for @rpath
+    let libkrunfw_lib = libkrunfw_install.join(LIB_DIR);
+    let libkrun_lib = libkrun_install.join(LIB_DIR);
 
-    copy_and_fix_macos_libs(&libkrunfw_src, &libkrunfw_out, "libkrunfw")
-        .unwrap_or_else(|e| panic!("Failed to copy libkrunfw: {}", e));
+    fix_macos_libs(&libkrunfw_lib, "libkrunfw")
+        .unwrap_or_else(|e| panic!("Failed to fix libkrunfw: {}", e));
 
-    // Configure linking to use our copied versions
-    configure_linking(&libkrun_out, &libkrunfw_out);
+    fix_macos_libs(&libkrun_lib, "libkrun")
+        .unwrap_or_else(|e| panic!("Failed to fix libkrun: {}", e));
+
+    // 5. Configure linking
+    configure_linking(&libkrun_lib, &libkrunfw_lib);
 }
 
 /// Linux: Build libkrun and libkrunfw from source
@@ -390,17 +544,11 @@ fn build() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    // Verify vendored sources exist
+    // Verify vendored sources exist (Linux builds both from source)
+    verify_vendored_sources(&manifest_dir, true);
+
     let libkrunfw_src = manifest_dir.join("vendor/libkrunfw");
     let libkrun_src = manifest_dir.join("vendor/libkrun");
-
-    if !libkrunfw_src.exists() || !libkrun_src.exists() {
-        eprintln!("ERROR: Vendored sources not found");
-        eprintln!();
-        eprintln!("Initialize git submodules:");
-        eprintln!("  git submodule update --init --recursive");
-        std::process::exit(1);
-    }
 
     // Build libkrunfw first (libkrun depends on it)
     let libkrunfw_install = out_dir.join("libkrunfw");
@@ -411,27 +559,21 @@ fn build() {
         HashMap::new(),
     );
 
-    // Build libkrun with PKG_CONFIG_PATH pointing to libkrunfw and NET=1 BLK=1 features
+    // Build libkrun with shared build environment
     let libkrun_install = out_dir.join("libkrun");
-    println!("cargo:warning=Building libkrun with NET=1 BLK=1 features");
+    build_with_make(
+        &libkrun_src,
+        &libkrun_install,
+        "libkrun",
+        libkrun_build_env(&libkrunfw_install),
+    );
 
-    let libkrun_env = HashMap::from([
-        (
-            "PKG_CONFIG_PATH".to_string(),
-            format!("{}/lib64/pkgconfig", libkrunfw_install.display()),
-        ),
-        ("NET".to_string(), "1".to_string()),
-        ("BLK".to_string(), "1".to_string()),
-    ]);
-
-    build_with_make(&libkrun_src, &libkrun_install, "libkrun", libkrun_env);
-
-    // Configure linking
-    let libkrun_lib_dir = libkrun_install.join("lib64");
+    // Fix library names
+    let libkrun_lib_dir = libkrun_install.join(LIB_DIR);
     fix_linux_libs(&libkrun_lib_dir, "libkrun")
         .unwrap_or_else(|e| panic!("Failed to fix libkrun: {}", e));
 
-    let libkrunfw_lib_dir = libkrunfw_install.join("lib64");
+    let libkrunfw_lib_dir = libkrunfw_install.join(LIB_DIR);
     fix_linux_libs(&libkrunfw_lib_dir, "libkrunfw")
         .unwrap_or_else(|e| panic!("Failed to fix libkrunfw: {}", e));
 

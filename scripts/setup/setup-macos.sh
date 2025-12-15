@@ -98,15 +98,19 @@ install_dtc() {
     echo ""
 }
 
-# Install lld (LLVM linker) - required for cross-compiling init binary on macOS
-install_lld() {
-    print_step "Checking for lld... "
-    if brew_installed "lld"; then
-        print_success "Already installed"
+# Install llvm (includes lld linker and libclang) - required for cross-compiling init binary and bindgen
+install_llvm() {
+    print_step "Checking for llvm... "
+
+    # Check if llvm-config exists (user may have installed llvm manually)
+    if command_exists llvm-config; then
+        print_success "Found ($(llvm-config --version))"
+    elif brew_installed "llvm"; then
+        print_success "Already installed (brew)"
     else
         echo -e "${YELLOW}Installing...${NC}"
-        brew install lld
-        print_success "lld installed"
+        brew install llvm
+        print_success "llvm installed"
     fi
     echo ""
 }
@@ -181,7 +185,7 @@ main() {
 
     install_dtc
 
-    install_lld
+    install_llvm
 
     install_dylibbundler
 

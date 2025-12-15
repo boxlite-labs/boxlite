@@ -449,6 +449,13 @@ fn build_libkrun_macos(
     // Apply cross-compilation patch from vendored patch file
     apply_libkrun_patch(src_dir, manifest_dir);
 
+    // Remove Cargo.lock to force cargo to regenerate with only needed dependencies
+    // The upstream Cargo.lock includes optional deps like krun_display (gpu) that we don't need
+    let cargo_lock = src_dir.join("Cargo.lock");
+    if cargo_lock.exists() {
+        let _ = fs::remove_file(&cargo_lock);
+    }
+
     // Build with common helper using shared build environment
     build_with_make(
         src_dir,
@@ -564,6 +571,14 @@ fn build() {
 
     // Build libkrun with shared build environment
     let libkrun_install = out_dir.join("libkrun");
+
+    // Remove Cargo.lock to force cargo to regenerate with only needed dependencies
+    // The upstream Cargo.lock includes optional deps like krun_display (gpu) that we don't need
+    let cargo_lock = libkrun_src.join("Cargo.lock");
+    if cargo_lock.exists() {
+        let _ = std::fs::remove_file(&cargo_lock);
+    }
+
     build_with_make(
         &libkrun_src,
         &libkrun_install,

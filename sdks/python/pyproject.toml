@@ -49,6 +49,11 @@ before-all = ["""
     # Source cargo env (Rust may have just been installed)
     [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
 
+    # Add brew's llvm to PATH if installed (for bindgen to find llvm-config)
+    if [ "$(uname)" = "Darwin" ] && [ -d "$(brew --prefix llvm 2>/dev/null)/bin" ]; then
+        export PATH="$(brew --prefix llvm)/bin:$PATH"
+    fi
+
     # Build runtime: on manylinux, reuse guest binary built on Ubuntu host
     keep_guest_bin=0
     if [[ -n "${AUDITWHEEL_PLAT:-}" && "$AUDITWHEEL_PLAT" == manylinux* ]]; then

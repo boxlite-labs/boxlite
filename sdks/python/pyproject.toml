@@ -1,6 +1,6 @@
 [project]
 name = "boxlite"
-version = "0.2.3"
+version = "0.3.0"
 description = "Python bindings for Boxlite runtime"
 requires-python = ">=3.10"
 authors = [{ name = "Dorian Zheng" }]

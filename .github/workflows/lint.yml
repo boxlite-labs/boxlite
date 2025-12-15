@@ -58,13 +58,11 @@ jobs:
       - name: Run Clippy (Linux)
         if: runner.os == 'Linux'
         env:
-          LIBKRUN_SYS_STUB: "1"
-          LIBGVPROXY_SYS_STUB: "1"
+          BOXLITE_DEPS_STUB: "1"
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Run Clippy (macOS)
         if: runner.os == 'macOS'
         env:
-          LIBKRUN_SYS_STUB: "1"
-          LIBGVPROXY_SYS_STUB: "1"
+          BOXLITE_DEPS_STUB: "1"
         run: cargo clippy --workspace --all-targets --all-features --exclude boxlite-guest -- -D warnings

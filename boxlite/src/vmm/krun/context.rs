@@ -133,12 +133,12 @@ impl KrunContext {
             .map_err(|e| BoxliteError::Engine(format!("invalid device path: {e}")))?;
 
         let fstype_c = fstype
-            .map(|s| CString::new(s))
+            .map(CString::new)
             .transpose()
             .map_err(|e| BoxliteError::Engine(format!("invalid fstype: {e}")))?;
 
         let options_c = options
-            .map(|s| CString::new(s))
+            .map(CString::new)
             .transpose()
             .map_err(|e| BoxliteError::Engine(format!("invalid options: {e}")))?;
 

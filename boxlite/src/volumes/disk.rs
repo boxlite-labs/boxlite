@@ -15,7 +15,7 @@ pub enum DiskFormat {
 
 impl DiskFormat {
     /// Get string representation of this format.
-    pub fn to_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             DiskFormat::Ext4 => "ext4",
             DiskFormat::Qcow2 => "qcow2",

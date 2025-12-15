@@ -188,6 +188,14 @@ fn bundle_boxlite_deps(runtime_dir: &Path) -> Vec<(String, PathBuf)> {
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
+    // Check for stub mode (for CI linting without building dependencies)
+    // Set BOXLITE_DEPS_STUB=1 to skip all native dependency builds
+    if env::var("BOXLITE_DEPS_STUB").is_ok() {
+        println!("cargo:warning=BOXLITE_DEPS_STUB mode: skipping dependency bundling");
+        println!("cargo:runtime_dir=/nonexistent");
+        return;
+    }
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let runtime_dir = out_dir.join("runtime");
 

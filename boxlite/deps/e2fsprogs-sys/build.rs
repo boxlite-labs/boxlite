@@ -10,6 +10,15 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=vendor/e2fsprogs");
 
+    // Check for stub mode (for CI linting without building)
+    // Set BOXLITE_DEPS_STUB=1 to skip building and emit stub directives
+    if env::var("BOXLITE_DEPS_STUB").is_ok() {
+        println!("cargo:warning=BOXLITE_DEPS_STUB mode: skipping e2fsprogs build");
+        println!("cargo:mke2fs_BOXLITE_DEP=/nonexistent");
+        println!("cargo:debugfs_BOXLITE_DEP=/nonexistent");
+        return;
+    }
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let vendor_dir = manifest_dir.join("vendor/e2fsprogs");

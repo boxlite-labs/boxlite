@@ -474,7 +474,7 @@ impl ImageStorage {
         let filename = image_digest.replace(':', "-");
         self.layout
             .disk_images_dir()
-            .join(format!("{}.{}", filename, format.to_str()))
+            .join(format!("{}.{}", filename, format.as_str()))
     }
 
     /// Find existing disk image for an image digest, checking all known formats.

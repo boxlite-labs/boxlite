@@ -1,16 +1,22 @@
 use std::collections::HashMap;
 use std::env;
+#[cfg(target_os = "macos")]
 use std::fs;
+#[cfg(target_os = "macos")]
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-// libkrunfw prebuilt tarball configuration (contains kernel.c)
+// libkrunfw prebuilt tarball configuration (contains kernel.c) - macOS only
+#[cfg(target_os = "macos")]
 const LIBKRUNFW_VERSION: &str = "4.10.0";
+#[cfg(target_os = "macos")]
 const LIBKRUNFW_PREBUILT_URL: &str = "https://github.com/containers/libkrunfw/releases/download/v4.10.0/libkrunfw-4.10.0-prebuilt-aarch64.tar.gz";
+#[cfg(target_os = "macos")]
 const LIBKRUNFW_SHA256: &str = "6732e0424ce90fa246a4a75bb5f3357a883546dbca095fee07a7d587e82d94b0";
 
 // Cross-compilation patch for building init binary on macOS (vendored locally)
+#[cfg(target_os = "macos")]
 const LIBKRUN_PATCH_FILE: &str = "patches/macos-cross-compile.patch";
 
 // libkrun build features (NET=1 BLK=1 enables network and block device support)
@@ -58,15 +64,15 @@ fn main() {
     println!("cargo:rerun-if-changed=vendor/libkrunfw");
 
     // Check for stub mode (for CI linting without building)
-    // Set LIBKRUN_SYS_STUB=1 to skip building and emit stub link directives
-    if env::var("LIBKRUN_SYS_STUB").is_ok() {
-        println!("cargo:warning=LIBKRUN_SYS_STUB mode: skipping build, emitting stub directives");
+    // Set BOXLITE_DEPS_STUB=1 to skip building and emit stub link directives
+    if env::var("BOXLITE_DEPS_STUB").is_ok() {
+        println!("cargo:warning=BOXLITE_DEPS_STUB mode: skipping libkrun build");
         // Emit minimal link directives that won't actually link anything
         // This allows cargo check/clippy to pass without building libkrun
         println!("cargo:rustc-link-lib=dylib=krun");
         // Use a non-existent path - linking will fail but check/clippy won't try to link
-        println!("cargo:libkrun_dir=/nonexistent");
-        println!("cargo:libkrunfw_dir=/nonexistent");
+        println!("cargo:LIBKRUN_BOXLITE_DEP=/nonexistent");
+        println!("cargo:LIBKRUNFW_BOXLITE_DEP=/nonexistent");
         return;
     }
 
@@ -282,10 +288,10 @@ fn download_file(url: &str, dest: &Path) -> io::Result<()> {
         .output()?;
 
     if !output.status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("curl failed: {}", String::from_utf8_lossy(&output.stderr)),
-        ));
+        return Err(io::Error::other(format!(
+            "curl failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
     }
 
     Ok(())
@@ -299,7 +305,7 @@ fn verify_sha256(file: &Path, expected: &str) -> io::Result<()> {
         .output()?;
 
     if !output.status.success() {
-        return Err(io::Error::new(io::ErrorKind::Other, "shasum failed"));
+        return Err(io::Error::other("shasum failed"));
     }
 
     let actual = String::from_utf8_lossy(&output.stdout)
@@ -334,10 +340,7 @@ fn extract_tarball(tarball: &Path, dest: &Path) -> io::Result<()> {
         .status()?;
 
     if !status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "tar extraction failed",
-        ));
+        return Err(io::Error::other("tar extraction failed"));
     }
 
     Ok(())

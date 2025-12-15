@@ -36,7 +36,7 @@ fn calculate_dir_size(dir: &Path) -> BoxliteResult<u64> {
         if let Ok(metadata) = entry.metadata() {
             if metadata.is_file() {
                 // Each file needs at least one block, round up
-                let file_blocks = (metadata.len() + BLOCK_SIZE - 1) / BLOCK_SIZE;
+                let file_blocks = metadata.len().div_ceil(BLOCK_SIZE);
                 total_blocks += file_blocks.max(1);
             } else if metadata.is_dir() {
                 // Directories need at least one block

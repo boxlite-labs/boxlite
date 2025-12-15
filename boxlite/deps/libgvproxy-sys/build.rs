@@ -104,13 +104,11 @@ fn main() {
     println!("cargo:rerun-if-changed=gvproxy-bridge/go.mod");
 
     // Check for stub mode (for CI linting without building)
-    // Set LIBGVPROXY_SYS_STUB=1 to skip building and emit stub link directives
-    if env::var("LIBGVPROXY_SYS_STUB").is_ok() {
-        println!(
-            "cargo:warning=LIBGVPROXY_SYS_STUB mode: skipping build, emitting stub directives"
-        );
+    // Set BOXLITE_DEPS_STUB=1 to skip building and emit stub link directives
+    if env::var("BOXLITE_DEPS_STUB").is_ok() {
+        println!("cargo:warning=BOXLITE_DEPS_STUB mode: skipping libgvproxy build");
         println!("cargo:rustc-link-lib=dylib=gvproxy");
-        println!("cargo:lib_dir=/nonexistent");
+        println!("cargo:LIBGVPROXY_BOXLITE_DEP=/nonexistent");
         return;
     }
 

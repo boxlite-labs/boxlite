@@ -438,16 +438,12 @@ fn apply_libkrun_patch(src_dir: &Path, manifest_dir: &Path) {
     fs::write(&patch_marker, "applied").ok();
 }
 
-/// Sets LIBCLANG_PATH if not already set and llvm-config is not in PATH.
-/// This is needed for bindgen to find libclang when building libkrun.
+/// Sets up LLVM environment if llvm-config is not in PATH.
+/// - Adds llvm/bin to PATH (for lld linker used in cross-compilation)
+/// - Sets LIBCLANG_PATH (for bindgen to find libclang)
 #[cfg(target_os = "macos")]
-fn setup_libclang_path() {
-    // Skip if LIBCLANG_PATH is already set
-    if env::var("LIBCLANG_PATH").is_ok() {
-        return;
-    }
-
-    // Skip if llvm-config is in PATH (bindgen will find libclang automatically)
+fn setup_llvm_env() {
+    // Skip if llvm-config is already in PATH
     if Command::new("llvm-config")
         .arg("--version")
         .stdout(Stdio::null())
@@ -462,8 +458,22 @@ fn setup_libclang_path() {
     if let Ok(output) = Command::new("brew").args(["--prefix", "llvm"]).output() {
         if output.status.success() {
             let prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let bin_path = format!("{}/bin", prefix);
             let lib_path = format!("{}/lib", prefix);
-            if Path::new(&lib_path).join("libclang.dylib").exists() {
+
+            // Add llvm/bin to PATH for lld
+            if Path::new(&bin_path).join("lld").exists() {
+                if let Ok(current_path) = env::var("PATH") {
+                    env::set_var("PATH", format!("{}:{}", bin_path, current_path));
+                } else {
+                    env::set_var("PATH", &bin_path);
+                }
+            }
+
+            // Set LIBCLANG_PATH for bindgen
+            if env::var("LIBCLANG_PATH").is_err()
+                && Path::new(&lib_path).join("libclang.dylib").exists()
+            {
                 env::set_var("LIBCLANG_PATH", &lib_path);
             }
         }
@@ -478,8 +488,8 @@ fn build_libkrun_macos(
     libkrunfw_install: &Path,
     manifest_dir: &Path,
 ) {
-    // Setup LIBCLANG_PATH for bindgen if needed
-    setup_libclang_path();
+    // Setup LLVM environment (PATH for lld, LIBCLANG_PATH for bindgen)
+    setup_llvm_env();
 
     // Apply cross-compilation patch from vendored patch file
     apply_libkrun_patch(src_dir, manifest_dir);

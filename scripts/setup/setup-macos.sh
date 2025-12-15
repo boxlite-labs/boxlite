@@ -107,10 +107,19 @@ install_llvm() {
         print_success "Found ($(llvm-config --version))"
     elif brew_installed "llvm"; then
         print_success "Already installed (brew)"
+        # Check if llvm is in PATH
+        if ! command_exists llvm-config; then
+            echo ""
+            echo -e "${YELLOW}Note: Add llvm to your PATH for bindgen:${NC}"
+            echo "  export PATH=\"\$(brew --prefix llvm)/bin:\$PATH\""
+        fi
     else
         echo -e "${YELLOW}Installing...${NC}"
         brew install llvm
         print_success "llvm installed"
+        echo ""
+        echo -e "${YELLOW}Note: Add llvm to your PATH for bindgen:${NC}"
+        echo "  export PATH=\"\$(brew --prefix llvm)/bin:\$PATH\""
     fi
     echo ""
 }

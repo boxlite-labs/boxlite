@@ -29,7 +29,7 @@ pub async fn run(input: RootfsInput<'_>) -> BoxliteResult<RootfsOutput> {
 
     // Prepare rootfs based on strategy
     let rootfs_result = if USE_DISK_ROOTFS {
-        prepare_disk_rootfs(&image).await?
+        prepare_disk_rootfs(input.runtime, &image).await?
     } else if USE_OVERLAYFS {
         prepare_overlayfs_layers(&image).await?
     } else {
@@ -110,6 +110,7 @@ async fn prepare_overlayfs_layers(
 /// 2. If not, merges layers and creates an ext4 disk image
 /// 3. Returns the path to the base disk for COW overlay creation
 async fn prepare_disk_rootfs(
+    runtime: &crate::runtime::RuntimeInner,
     image: &crate::images::ImageObject,
 ) -> BoxliteResult<RootfsPrepResult> {
     // Check if we already have a cached disk image for this image
@@ -146,8 +147,9 @@ async fn prepare_disk_rootfs(
         ));
     }
 
-    // Create a temporary directory for merged rootfs
-    let temp_dir = tempfile::tempdir()
+    // Create a temporary directory for merged rootfs within boxlite home (same filesystem as destination)
+    let temp_base = runtime.non_sync_state.layout.temp_dir();
+    let temp_dir = tempfile::tempdir_in(&temp_base)
         .map_err(|e| BoxliteError::Storage(format!("Failed to create temp directory: {}", e)))?;
     let merged_path = temp_dir.path().join("merged");
 

@@ -44,6 +44,13 @@ impl FilesystemLayout {
         self.home_dir.join(const_dirs::BOXES_DIR)
     }
 
+    /// Temporary directory for transient files: ~/.boxlite/tmp
+    /// Used for disk image creation and other operations that need
+    /// temp files on the same filesystem as the final destination.
+    pub fn temp_dir(&self) -> PathBuf {
+        self.home_dir.join("tmp")
+    }
+
     /// Initialize the filesystem structure.
     ///
     /// Creates necessary directories (home_dir, sockets, images, etc.).
@@ -54,6 +61,11 @@ impl FilesystemLayout {
         let _ = std::fs::remove_dir_all(self.boxes_dir());
         std::fs::create_dir_all(self.boxes_dir())
             .map_err(|e| BoxliteError::Storage(format!("failed to create boxes dir: {e}")))?;
+
+        // Clean and recreate temp dir to avoid stale files from previous runs
+        let _ = std::fs::remove_dir_all(self.temp_dir());
+        std::fs::create_dir_all(self.temp_dir())
+            .map_err(|e| BoxliteError::Storage(format!("failed to create temp dir: {e}")))?;
 
         std::fs::create_dir_all(self.image_layers_dir())
             .map_err(|e| BoxliteError::Storage(format!("failed to create layers dir: {e}")))?;

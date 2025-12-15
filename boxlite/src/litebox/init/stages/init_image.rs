@@ -39,7 +39,7 @@ pub async fn run(input: InitImageInput<'_>) -> BoxliteResult<InitImageOutput> {
 
 /// Prepare init rootfs as a disk image.
 async fn prepare_init_rootfs(
-    _runtime: &crate::runtime::RuntimeInner,
+    runtime: &crate::runtime::RuntimeInner,
     base_image: &crate::images::ImageObject,
     env: Vec<(String, String)>,
 ) -> BoxliteResult<InitRootfs> {
@@ -76,8 +76,9 @@ async fn prepare_init_rootfs(
     // No cached disk - create from layers
     tracing::info!("Creating init disk image from layers (first run)");
 
-    // Extract layers to temp directory
-    let temp_dir = tempfile::tempdir()
+    // Extract layers to temp directory within boxlite home (same filesystem as destination)
+    let temp_base = runtime.non_sync_state.layout.temp_dir();
+    let temp_dir = tempfile::tempdir_in(&temp_base)
         .map_err(|e| BoxliteError::Storage(format!("Failed to create temp directory: {}", e)))?;
     let merged_path = temp_dir.path().join("merged");
 

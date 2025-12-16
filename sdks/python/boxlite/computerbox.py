@@ -141,9 +141,14 @@ class ComputerBox(SimpleBox):
                 logger.debug(f"Desktop not ready yet (waited {elapsed:.1f}s), retrying...")
                 await asyncio.sleep(retry_delay)
 
-            except Exception as e:
+            except (ExecError, ConnectionError, OSError, asyncio.TimeoutError) as e:
+                # Transient errors - guest not ready yet, retry
                 logger.debug(f"Desktop not ready: {e}, retrying...")
                 await asyncio.sleep(retry_delay)
+            except Exception as e:
+                # Fatal errors - propagate immediately (e.g., spawn failure, permission denied)
+                logger.error(f"Fatal error in wait_until_ready: {e}")
+                raise
 
     # GUI Automation Methods
 

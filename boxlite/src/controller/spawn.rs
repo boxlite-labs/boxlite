@@ -46,10 +46,12 @@ pub(super) fn spawn_subprocess(
     cmd.stdout(Stdio::piped());
 
     cmd.spawn().map_err(|e| {
-        BoxliteError::Engine(format!(
+        let err_msg = format!(
             "Failed to spawn VM subprocess at {}: {}",
             binary_path.display(),
             e
-        ))
+        );
+        tracing::error!("{}", err_msg);
+        BoxliteError::Engine(err_msg)
     })
 }

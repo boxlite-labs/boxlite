@@ -167,13 +167,19 @@ impl InitPipeline {
 
         // Extract outputs and durations from parallel phase (propagate errors)
         let (fs_output, stage_filesystem_setup_ms) = fs_result;
-        let fs_output = fs_output?;
+        let fs_output = fs_output.inspect_err(|e| {
+            tracing::error!(box_id = %self.box_id, stage = "filesystem", "Box init failed: {}", e);
+        })?;
 
         let (rootfs_output, stage_image_prepare_ms) = rootfs_result;
-        let rootfs_output = rootfs_output?;
+        let rootfs_output = rootfs_output.inspect_err(|e| {
+            tracing::error!(box_id = %self.box_id, stage = "rootfs", "Box init failed: {}", e);
+        })?;
 
         let (init_output, stage_init_rootfs_ms) = init_result;
-        let init_output = init_output?;
+        let init_output = init_output.inspect_err(|e| {
+            tracing::error!(box_id = %self.box_id, stage = "init_image", "Box init failed: {}", e);
+        })?;
 
         // Register layout for cleanup (after parallel phase succeeds)
         guard.set_layout(fs_output.layout.clone());
@@ -191,7 +197,10 @@ impl InitPipeline {
             init_rootfs: &init_output.init_rootfs,
             home_dir: &self.home_dir,
         })
-        .await?;
+        .await
+        .inspect_err(|e| {
+            tracing::error!(box_id = %self.box_id, stage = "config", "Box init failed: {}", e);
+        })?;
         let stage_box_config_ms = stage4_start.elapsed().as_millis();
 
         // Stage 5: Box spawn
@@ -200,7 +209,10 @@ impl InitPipeline {
             box_id: &self.box_id,
             config: &config_output.box_config,
         })
-        .await?;
+        .await
+        .inspect_err(|e| {
+            tracing::error!(box_id = %self.box_id, stage = "spawn", "Box init failed: {}", e);
+        })?;
         let stage_box_spawn_ms = stage5_start.elapsed().as_millis();
 
         // Update manager with PID and state
@@ -224,7 +236,10 @@ impl InitPipeline {
             is_cow_child: config_output.is_cow_child,
             user_volumes: config_output.user_volumes,
         })
-        .await?;
+        .await
+        .inspect_err(|e| {
+            tracing::error!(box_id = %self.box_id, stage = "guest", "Box init failed: {}", e);
+        })?;
         let stage_container_init_ms = stage6_start.elapsed().as_millis();
 
         // ====================================================================

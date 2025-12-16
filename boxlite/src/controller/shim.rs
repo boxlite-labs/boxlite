@@ -102,11 +102,13 @@ impl ShimController {
 
         // Create listener for ready notification
         let listener = tokio::net::UnixListener::bind(ready_socket_path).map_err(|e| {
-            BoxliteError::Engine(format!(
+            let err_msg = format!(
                 "Failed to bind ready socket {}: {}",
                 ready_socket_path.display(),
                 e
-            ))
+            );
+            tracing::error!(box_id = %self.box_id, "{}", err_msg);
+            BoxliteError::Engine(err_msg)
         })?;
         tracing::debug!(
             socket = %ready_socket_path.display(),
@@ -123,24 +125,26 @@ impl ShimController {
                 tracing::debug!("Guest signaled ready via socket connection");
                 Ok(())
             }
-            Ok(Err(e)) => Err(BoxliteError::Engine(format!(
-                "Ready socket accept failed: {}",
-                e
-            ))),
+            Ok(Err(e)) => {
+                let err_msg = format!("Ready socket accept failed: {}", e);
+                tracing::error!(box_id = %self.box_id, "{}", err_msg);
+                Err(BoxliteError::Engine(err_msg))
+            }
             Err(_) => {
                 // Check if process exited
                 if let Some(ref mut process) = self.process
                     && let Ok(Some(status)) = process.try_wait()
                 {
-                    return Err(BoxliteError::Engine(format!(
+                    let err_msg = format!(
                         "Box process exited prematurely with status: {:?}",
                         status.code()
-                    )));
+                    );
+                    tracing::error!(box_id = %self.box_id, "{}", err_msg);
+                    return Err(BoxliteError::Engine(err_msg));
                 }
-                Err(BoxliteError::Engine(format!(
-                    "Guest failed to signal ready within {}s",
-                    timeout.as_secs()
-                )))
+                let err_msg = format!("Guest failed to signal ready within {}s", timeout.as_secs());
+                tracing::error!(box_id = %self.box_id, "{}", err_msg);
+                Err(BoxliteError::Engine(err_msg))
             }
         }
     }

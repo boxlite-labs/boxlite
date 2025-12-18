@@ -40,11 +40,6 @@ pub(crate) fn validate_container_inputs(
     Ok(())
 }
 
-/// Generate unique container ID
-pub(crate) fn generate_container_id() -> String {
-    format!("boxlite-{}", uuid::Uuid::new_v4())
-}
-
 /// Create /etc/hosts, /etc/hostname and /etc/resolv.conf files for the container
 pub(crate) fn create_container_etc_files(
     bundle_path: &Path,
@@ -89,19 +84,6 @@ pub(crate) fn create_container_etc_files(
     );
 
     Ok(())
-}
-
-/// Prepare state directory for container runtime state
-pub(crate) fn prepare_state_directory(state_root: &Path) -> BoxliteResult<PathBuf> {
-    fs::create_dir_all(state_root).map_err(|e| {
-        BoxliteError::Internal(format!(
-            "Failed to create container state directory {}: {}",
-            state_root.display(),
-            e
-        ))
-    })?;
-
-    Ok(state_root.to_path_buf())
 }
 
 /// Create OCI bundle (config.json + rootfs reference)

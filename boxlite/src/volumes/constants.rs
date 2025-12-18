@@ -25,17 +25,19 @@ pub mod ext4 {
     /// Ext4 inode size in bytes
     pub const INODE_SIZE: u64 = 256;
 
-    /// Multiplier for directory size when calculating disk size
-    /// (accounts for filesystem overhead)
-    pub const SIZE_MULTIPLIER: u64 = 2;
+    /// Size multiplier numerator (11/10 = 1.1x = 10% overhead)
+    pub const SIZE_MULTIPLIER_NUM: u64 = 11;
 
-    /// Base overhead for ext4 metadata and journal (in bytes)
-    /// Typically 256MB for journal and metadata
-    pub const METADATA_OVERHEAD_BYTES: u64 = 256 * 1024 * 1024;
+    /// Size multiplier denominator
+    pub const SIZE_MULTIPLIER_DEN: u64 = 10;
 
-    /// Minimum disk size (in bytes) to handle images with many files
-    /// Set to 1GB to accommodate large binaries
-    pub const MIN_DISK_SIZE_BYTES: u64 = 1024 * 1024 * 1024;
+    /// Base overhead for ext4 journal (in bytes)
+    /// 64MB for journal
+    pub const JOURNAL_OVERHEAD_BYTES: u64 = 64 * 1024 * 1024;
+
+    /// Minimum disk size (in bytes)
+    /// 256MB for small images
+    pub const MIN_DISK_SIZE_BYTES: u64 = 256 * 1024 * 1024;
 
     /// Default fallback directory size if calculation fails (in bytes)
     pub const DEFAULT_DIR_SIZE_BYTES: u64 = 64 * 1024 * 1024;

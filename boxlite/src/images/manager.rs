@@ -22,6 +22,8 @@ use boxlite_shared::errors::BoxliteResult;
 
 #[derive(Debug, Clone)]
 pub(super) struct ImageManifest {
+    /// Manifest digest of the final image (platform-specific for multi-platform images)
+    pub(super) manifest_digest: String,
     pub(super) layers: Vec<LayerInfo>,
     pub(super) config_digest: String,
 }

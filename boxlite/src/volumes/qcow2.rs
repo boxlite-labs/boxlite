@@ -14,6 +14,7 @@ use super::constants::qcow2::{BLOCK_SIZE, CLUSTER_BITS, DEFAULT_DISK_SIZE_GB, RE
 use super::{Disk, DiskFormat};
 
 /// Parsed qcow2 header information.
+#[allow(dead_code)]
 #[derive(Debug)]
 struct Qcow2HeaderInfo {
     #[allow(dead_code)]
@@ -40,11 +41,13 @@ impl Qcow2Helper {
     /// # Arguments
     /// * `disk_path` - Path where the disk should be created
     /// * `persistent` - If true, disk won't be deleted on drop (used for base disks)
+    #[allow(dead_code)]
     pub fn create_disk(&self, disk_path: &Path, persistent: bool) -> BoxliteResult<Disk> {
         self.create_disk_native(disk_path, persistent)
     }
 
     /// Create a qcow2 disk image using native Rust implementation (qcow2-rs).
+    #[allow(dead_code)]
     fn create_disk_native(&self, disk_path: &Path, persistent: bool) -> BoxliteResult<Disk> {
         // Ensure parent directory exists
         if let Some(parent) = disk_path.parent() {
@@ -244,12 +247,14 @@ impl Qcow2Helper {
     }
 
     /// Get the virtual size of a qcow2 disk image.
+    #[allow(dead_code)]
     pub fn qcow2_virtual_size(path: &Path) -> BoxliteResult<u64> {
         let header = Self::read_qcow2_header(path)?;
         Ok(header.size)
     }
 
     /// Read qcow2 header from disk file.
+    #[allow(dead_code)]
     fn read_qcow2_header(path: &Path) -> BoxliteResult<Qcow2HeaderInfo> {
         use std::io::Read;
 
@@ -537,6 +542,7 @@ pub enum BackingFormat {
     /// Raw disk image (ext4, etc.)
     Raw,
     /// Qcow2 disk image.
+    #[allow(dead_code)]
     Qcow2,
 }
 

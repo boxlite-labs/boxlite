@@ -195,36 +195,36 @@ impl Vmm for Krun {
     fn create(&mut self, config: InstanceSpec) -> BoxliteResult<VmmInstance> {
         tracing::trace!("Step into Krun::create");
 
-        // Validate volume mount directories exist
-        for mount in config.volumes.mounts() {
-            if !mount.host_path.exists() {
+        // Validate filesystem shares exist
+        for share in config.fs_shares.shares() {
+            if !share.host_path.exists() {
                 return Err(BoxliteError::Engine(format!(
-                    "Volume mount directory '{}' not found: {}",
-                    mount.tag,
-                    mount.host_path.display()
+                    "Filesystem share directory '{}' not found: {}",
+                    share.tag,
+                    share.host_path.display()
                 )));
             }
             tracing::debug!(
-                tag = %mount.tag,
-                path = %mount.host_path.display(),
-                read_only = mount.read_only,
-                "Validated volume mount directory"
+                tag = %share.tag,
+                path = %share.host_path.display(),
+                read_only = share.read_only,
+                "Validated filesystem share"
             );
         }
 
         // Validate disk images exist
-        for disk in config.disks.disks() {
-            if !disk.disk_path.exists() {
+        for block_device in config.block_devices.devices() {
+            if !block_device.disk_path.exists() {
                 return Err(BoxliteError::Engine(format!(
                     "Disk image not found: {}",
-                    disk.disk_path.display()
+                    block_device.disk_path.display()
                 )));
             }
             tracing::debug!(
-                block_id = %disk.block_id,
-                path = %disk.disk_path.display(),
-                format = %disk.format.as_str(),
-                read_only = disk.read_only,
+                block_id = %block_device.block_id,
+                path = %block_device.disk_path.display(),
+                format = %block_device.format.as_str(),
+                read_only = block_device.read_only,
                 "Validated disk image"
             );
         }
@@ -330,27 +330,26 @@ impl Vmm for Krun {
             tracing::debug!("Configuring guest rlimits: {:?}", rlimits);
             ctx.set_rlimits(&rlimits)?;
 
-            // Mount volume directories via virtiofs
-            // With host-side rootfs preparation, only 2 mounts: "bin" and "rootfs"
-            tracing::info!("Mounting volumes via virtiofs:");
-            for mount in config.volumes.mounts() {
-                let path_str = mount.host_path.to_str().ok_or_else(|| {
-                    BoxliteError::Engine(format!("Invalid path: {}", mount.host_path.display()))
+            // Add filesystem shares via virtiofs
+            tracing::info!("Adding filesystem shares via virtiofs:");
+            for share in config.fs_shares.shares() {
+                let path_str = share.host_path.to_str().ok_or_else(|| {
+                    BoxliteError::Engine(format!("Invalid path: {}", share.host_path.display()))
                 })?;
 
                 tracing::info!(
                     "  {} → {} ({})",
-                    mount.tag,
-                    mount.host_path.display(),
-                    if mount.read_only { "ro" } else { "rw" }
+                    share.tag,
+                    share.host_path.display(),
+                    if share.read_only { "ro" } else { "rw" }
                 );
-                ctx.add_virtiofs(&mount.tag, path_str)?;
+                ctx.add_virtiofs(&share.tag, path_str)?;
             }
 
             // Attach disk images via virtio-blk
-            if !config.disks.disks().is_empty() {
-                tracing::info!("Attaching disk images:");
-                for disk in config.disks.disks() {
+            if !config.block_devices.devices().is_empty() {
+                tracing::info!("Attaching block devices:");
+                for disk in config.block_devices.devices() {
                     let path_str = disk.disk_path.to_str().ok_or_else(|| {
                         BoxliteError::Engine(format!(
                             "Invalid disk path: {}",

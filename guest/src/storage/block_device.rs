@@ -76,6 +76,9 @@ impl BlockDeviceMount {
             ))
         })?;
 
+        // Fix ownership if needed (fallback in case debugfs didn't run on host)
+        super::perms::OwnershipFixer::fix_if_needed(mount_point)?;
+
         tracing::info!(
             "Mounted block device: {} → {}",
             device.display(),

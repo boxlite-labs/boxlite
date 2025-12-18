@@ -51,6 +51,6 @@ pub mod mount_tags {
     /// Tag for extracted layers directory (overlayfs mode)
     pub const LAYERS: &str = "layers";
 
-    /// Tag for writable directory (container state, overlayfs upper/work)
-    pub const RW: &str = "rw";
+    /// Tag for shared container directory (contains overlayfs/ and rootfs/)
+    pub const SHARED: &str = "shared";
 }

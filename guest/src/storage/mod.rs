@@ -5,9 +5,10 @@
 //! - Block devices: Disk images attached via virtio-blk
 
 mod block_device;
+#[allow(dead_code)]
 mod copy;
+mod perms;
 mod virtiofs;
 mod volume;
 
-pub use copy::copy_layers_to_disk;
 pub use volume::mount_volumes;

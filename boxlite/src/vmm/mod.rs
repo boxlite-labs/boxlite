@@ -55,39 +55,41 @@ pub trait VmmController: Send {
     fn is_running(&self) -> bool;
 }
 
-/// Volume configuration for host-to-guest file sharing
+/// A filesystem share from host to guest.
 ///
-/// Encapsulates virtiofs mounts that expose host directories to the guest.
+/// Represents a virtiofs share that exposes a host directory to the guest.
+/// The guest mounts this using the tag as identifier.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MountConfig {
+pub struct FsShare {
+    /// Virtiofs tag (guest uses this to identify the share)
     pub tag: String,
+    /// Host directory to share
     pub host_path: PathBuf,
+    /// Whether the share is read-only
     pub read_only: bool,
 }
 
-/// Volume configuration for host-to-guest file sharing.
+/// Collection of filesystem shares from host to guest.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Mounts {
-    mounts: Vec<MountConfig>,
+pub struct FsShares {
+    shares: Vec<FsShare>,
 }
 
-impl Mounts {
-    /// Create a new volume configuration
+impl FsShares {
     pub fn new() -> Self {
-        Self { mounts: Vec::new() }
+        Self { shares: Vec::new() }
     }
 
     pub fn add(&mut self, tag: impl Into<String>, path: PathBuf, read_only: bool) {
-        self.mounts.push(MountConfig {
+        self.shares.push(FsShare {
             tag: tag.into(),
             host_path: path,
             read_only,
         });
     }
 
-    // Get all mounts
-    pub fn mounts(&self) -> &[MountConfig] {
-        &self.mounts
+    pub fn shares(&self) -> &[FsShare] {
+        &self.shares
     }
 }
 
@@ -110,43 +112,41 @@ impl DiskFormat {
     }
 }
 
-/// Configuration for a single disk attachment.
+/// A block device attachment from host to guest.
+///
+/// Represents a disk image attached via virtio-blk.
+/// Guest sees this as /dev/{block_id}.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DiskConfig {
+pub struct BlockDevice {
     /// Block device ID (e.g., "vda", "vdb").
-    /// Guest will see this as /dev/{block_id}
     pub block_id: String,
-
     /// Path to disk image file on host.
     pub disk_path: PathBuf,
-
-    /// Whether to mount read-only.
+    /// Whether to attach read-only.
     pub read_only: bool,
-
-    /// Disk image format ("raw", "qcow2", etc.).
+    /// Disk image format.
     pub format: DiskFormat,
 }
 
-/// Configuration for attaching disk images via virtio-blk.
+/// Collection of block device attachments from host to guest.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Disks {
-    disks: Vec<DiskConfig>,
+pub struct BlockDevices {
+    devices: Vec<BlockDevice>,
 }
 
-impl Disks {
-    /// Create a new disk attachments configuration.
+impl BlockDevices {
     pub fn new() -> Self {
-        Self { disks: Vec::new() }
+        Self {
+            devices: Vec::new(),
+        }
     }
 
-    /// Add a disk to attach.
-    pub fn add(&mut self, disk: DiskConfig) {
-        self.disks.push(disk);
+    pub fn add(&mut self, device: BlockDevice) {
+        self.devices.push(device);
     }
 
-    /// Get all disk configurations.
-    pub fn disks(&self) -> &[DiskConfig] {
-        &self.disks
+    pub fn devices(&self) -> &[BlockDevice] {
+        &self.devices
     }
 }
 
@@ -158,10 +158,10 @@ impl Disks {
 pub struct InstanceSpec {
     pub cpus: Option<u8>,
     pub memory_mib: Option<u32>,
-    /// Volume mounts from host to guest
-    pub volumes: Mounts,
-    /// Disk attachments via virtio-blk
-    pub disks: Disks,
+    /// Filesystem shares from host to guest
+    pub fs_shares: FsShares,
+    /// Block device attachments via virtio-blk
+    pub block_devices: BlockDevices,
     /// Guest agent entrypoint (e.g., /boxlite/bin/boxlite-guest)
     pub guest_entrypoint: Entrypoint,
     /// Host-side transport for gRPC communication
@@ -198,66 +198,62 @@ mod tests {
     }
 
     #[test]
-    fn test_disk_config_creation() {
-        let disk = DiskConfig {
+    fn test_block_device_creation() {
+        let device = BlockDevice {
             block_id: "vda".to_string(),
             disk_path: PathBuf::from("/tmp/test.qcow2"),
             read_only: false,
             format: DiskFormat::Qcow2,
         };
 
-        assert_eq!(disk.block_id, "vda");
-        assert_eq!(disk.disk_path, PathBuf::from("/tmp/test.qcow2"));
-        assert!(!disk.read_only);
-        assert_eq!(disk.format, DiskFormat::Qcow2);
+        assert_eq!(device.block_id, "vda");
+        assert_eq!(device.disk_path, PathBuf::from("/tmp/test.qcow2"));
+        assert!(!device.read_only);
+        assert_eq!(device.format, DiskFormat::Qcow2);
     }
 
     #[test]
-    fn test_disk_attachments() {
-        let mut disks = Disks::new();
-        assert_eq!(disks.disks().len(), 0);
+    fn test_block_devices() {
+        let mut devices = BlockDevices::new();
+        assert_eq!(devices.devices().len(), 0);
 
-        disks.add(DiskConfig {
+        devices.add(BlockDevice {
             block_id: "vda".to_string(),
             disk_path: PathBuf::from("/tmp/test.qcow2"),
             read_only: false,
             format: DiskFormat::Qcow2,
         });
-        assert_eq!(disks.disks().len(), 1);
+        assert_eq!(devices.devices().len(), 1);
 
-        disks.add(DiskConfig {
+        devices.add(BlockDevice {
             block_id: "vdb".to_string(),
             disk_path: PathBuf::from("/tmp/scratch.raw"),
             read_only: true,
             format: DiskFormat::Raw,
         });
-        assert_eq!(disks.disks().len(), 2);
+        assert_eq!(devices.devices().len(), 2);
 
-        // Verify first disk
-        assert_eq!(disks.disks()[0].block_id, "vda");
-        assert_eq!(disks.disks()[0].format, DiskFormat::Qcow2);
+        assert_eq!(devices.devices()[0].block_id, "vda");
+        assert_eq!(devices.devices()[0].format, DiskFormat::Qcow2);
 
-        // Verify second disk
-        assert_eq!(disks.disks()[1].block_id, "vdb");
-        assert_eq!(disks.disks()[1].format, DiskFormat::Raw);
-        assert!(disks.disks()[1].read_only);
+        assert_eq!(devices.devices()[1].block_id, "vdb");
+        assert_eq!(devices.devices()[1].format, DiskFormat::Raw);
+        assert!(devices.devices()[1].read_only);
     }
 
     #[test]
-    fn test_disk_attachments_default() {
-        let disks = Disks::default();
-        assert_eq!(disks.disks().len(), 0);
+    fn test_block_devices_default() {
+        let devices = BlockDevices::default();
+        assert_eq!(devices.devices().len(), 0);
     }
 
     #[test]
     fn test_disk_format_serialization() {
-        // Test Raw format
         let raw = DiskFormat::Raw;
         let json = serde_json::to_string(&raw).unwrap();
         let deserialized: DiskFormat = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, DiskFormat::Raw);
 
-        // Test Qcow2 format
         let qcow2 = DiskFormat::Qcow2;
         let json = serde_json::to_string(&qcow2).unwrap();
         let deserialized: DiskFormat = serde_json::from_str(&json).unwrap();
@@ -265,16 +261,16 @@ mod tests {
     }
 
     #[test]
-    fn test_disk_config_serialization() {
-        let disk = DiskConfig {
+    fn test_block_device_serialization() {
+        let device = BlockDevice {
             block_id: "vda".to_string(),
             disk_path: PathBuf::from("/tmp/test.qcow2"),
             read_only: true,
             format: DiskFormat::Qcow2,
         };
 
-        let json = serde_json::to_string(&disk).unwrap();
-        let deserialized: DiskConfig = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&device).unwrap();
+        let deserialized: BlockDevice = serde_json::from_str(&json).unwrap();
 
         assert_eq!(deserialized.block_id, "vda");
         assert_eq!(deserialized.disk_path, PathBuf::from("/tmp/test.qcow2"));

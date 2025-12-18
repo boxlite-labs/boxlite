@@ -9,10 +9,10 @@ use crate::litebox::init::types::{
 use crate::net::{NetworkBackendConfig, NetworkBackendFactory};
 use crate::rootfs::operations::fix_rootfs_permissions;
 use crate::runtime::constants::{guest_paths, mount_tags};
-use crate::vmm::{Entrypoint, InstanceSpec, Mounts};
+use crate::vmm::{Entrypoint, FsShares, InstanceSpec};
 use crate::volumes::{BackingFormat, BlockDeviceManager, DiskFormat, Qcow2Helper};
-use boxlite_shared::Transport;
 use boxlite_shared::errors::BoxliteResult;
+use boxlite_shared::{BoxliteError, Transport};
 use std::collections::{HashMap, HashSet};
 
 /// Build box configuration.
@@ -25,7 +25,20 @@ pub async fn run(input: ConfigInput<'_>) -> BoxliteResult<ConfigOutput> {
 
     let user_volumes = resolve_user_volumes(&input.options.volumes)?;
 
-    let volumes = build_volume_config(input.layout, &input.rootfs.rootfs_result, &user_volumes)?;
+    // Prepare container directories (image/, rw/, rootfs/)
+    // This is done here because we now know we're creating a container
+    input
+        .layout
+        .shared_layout()
+        .container(input.container_id.as_str())
+        .prepare()?;
+
+    let fs_shares = build_fs_shares(
+        input.layout,
+        &input.rootfs.rootfs_result,
+        &user_volumes,
+        input.container_id.as_str(),
+    )?;
 
     // Guest entrypoint
     let guest_entrypoint = build_guest_entrypoint(
@@ -39,7 +52,7 @@ pub async fn run(input: ConfigInput<'_>) -> BoxliteResult<ConfigOutput> {
     let network_backend = setup_networking(&input.rootfs.container_config, input.options)?;
 
     // Create disks based on rootfs strategy
-    let (disk, is_cow_child, rootfs_disk) = create_disks(
+    let disk = create_disks(
         input.layout,
         &input.rootfs.image,
         &input.rootfs.rootfs_result,
@@ -48,23 +61,30 @@ pub async fn run(input: ConfigInput<'_>) -> BoxliteResult<ConfigOutput> {
 
     // Register block devices
     let mut block_manager = BlockDeviceManager::new();
-    block_manager.add_disk(disk.path(), DiskFormat::Qcow2);
-    if let Some(ref rootfs) = rootfs_disk {
-        block_manager.add_disk(rootfs.path(), DiskFormat::Qcow2);
-    }
+    let disk_device_path = block_manager.add_disk(disk.path(), DiskFormat::Qcow2);
+
+    // For DiskImage mode, the disk IS the rootfs disk
+    let rootfs_device_path = if matches!(
+        input.rootfs.rootfs_result,
+        RootfsPrepResult::DiskImage { .. }
+    ) {
+        Some(disk_device_path)
+    } else {
+        None
+    };
 
     // Create COW child disk for init rootfs (protects shared base from writes)
     let (init_rootfs, init_disk) =
         create_init_disk(input.layout, input.init_rootfs, &mut block_manager)?;
 
-    let disks = block_manager.build();
+    let block_devices = block_manager.build();
 
     // Assemble config
     let box_config = InstanceSpec {
         cpus: input.options.cpus,
         memory_mib: input.options.memory_mib,
-        volumes,
-        disks,
+        fs_shares,
+        block_devices,
         guest_entrypoint,
         transport: transport.clone(),
         ready_transport: ready_transport.clone(),
@@ -78,44 +98,49 @@ pub async fn run(input: ConfigInput<'_>) -> BoxliteResult<ConfigOutput> {
         box_config,
         network_backend,
         disk,
-        is_cow_child,
         user_volumes,
-        rootfs_disk,
         init_disk,
+        rootfs_device_path,
     })
 }
 
-fn build_volume_config(
+fn build_fs_shares(
     layout: &crate::runtime::layout::BoxFilesystemLayout,
     rootfs_result: &RootfsPrepResult,
     user_volumes: &[ResolvedVolume],
-) -> BoxliteResult<Mounts> {
-    let rw_dir = layout.rw_dir();
-    fix_rootfs_permissions(&rw_dir)?;
+    container_id: &str,
+) -> BoxliteResult<FsShares> {
+    let mut shares = FsShares::new();
 
-    let mut mounts = Mounts::new();
+    // Single "shared" virtiofs share for container directories
+    // Guest mounts this to /run/boxlite/shared/
+    #[cfg(target_os = "linux")]
+    shares.add(mount_tags::SHARED, layout.shared_dir(), false);
+    #[cfg(target_os = "macos")]
+    shares.add(mount_tags::SHARED, layout.mounts_dir().to_path_buf(), false);
 
-    mounts.add(mount_tags::RW, rw_dir, false);
-
+    // Strategy-specific shares
     match rootfs_result {
         RootfsPrepResult::Merged(path) => {
-            mounts.add(mount_tags::ROOTFS, path.clone(), false);
+            shares.add(mount_tags::ROOTFS, path.clone(), false);
         }
         RootfsPrepResult::Layers { layers_dir, .. } => {
-            mounts.add(mount_tags::LAYERS, layers_dir.clone(), true);
+            shares.add(mount_tags::LAYERS, layers_dir.clone(), true);
+            let container_layout = layout.shared_layout().container(container_id);
+            let container_root = container_layout.root();
+            fix_rootfs_permissions(container_root)?;
+            shares.add(mount_tags::SHARED, container_root.to_path_buf(), false);
         }
         RootfsPrepResult::DiskImage { .. } => {
-            // No virtiofs mounts needed for disk-based rootfs
-            // The rootfs is on a block device
-            tracing::debug!("Using disk-based rootfs, no virtiofs layers mount needed");
+            // Rootfs is on block device, no virtiofs needed
         }
     }
 
     for vol in user_volumes {
-        mounts.add(&vol.tag, vol.host_path.clone(), vol.read_only);
+        shares.add(&vol.tag, vol.host_path.clone(), vol.read_only);
     }
 
-    Ok(mounts)
+    Ok(shares)
 }
 
 fn build_guest_entrypoint(
@@ -199,14 +224,14 @@ fn setup_networking(
 
 /// Create disks based on rootfs strategy.
 ///
-/// Returns (data_disk, is_cow_child, rootfs_disk).
-/// - data_disk: Always created (for writable data in overlayfs mode, or just data in disk mode)
-/// - rootfs_disk: Only created when using disk-based rootfs
+/// Create the primary disk for the box.
+///
+/// In DiskImage mode, this is the rootfs disk (COW overlay of base ext4).
 async fn create_disks(
     layout: &crate::runtime::layout::BoxFilesystemLayout,
-    image: &crate::images::ImageObject,
+    _image: &crate::images::ImageObject,
     rootfs_result: &RootfsPrepResult,
-) -> BoxliteResult<(crate::volumes::Disk, bool, Option<crate::volumes::Disk>)> {
+) -> BoxliteResult<crate::volumes::Disk> {
     let qcow2_helper = Qcow2Helper::new();
     let disk_path = layout.disk_path();
 
@@ -217,13 +242,11 @@ async fn create_disks(
     } = rootfs_result
     {
         // Disk-based rootfs: create qcow2 COW overlay pointing to base ext4
-        let rootfs_disk_path = layout.root().join("rootfs.qcow2");
-
-        // Create qcow2 COW overlay for rootfs
+        // This becomes /dev/vda - no separate data disk needed
         let rootfs_disk = qcow2_helper.create_cow_child_disk(
             base_disk_path,
             BackingFormat::Raw,
-            &rootfs_disk_path,
+            &disk_path, // Use disk_path (disk.qcow2) for rootfs
             *disk_size,
         )?;
         tracing::info!(
@@ -232,44 +255,13 @@ async fn create_disks(
             "Created rootfs COW overlay"
         );
 
-        // Create a minimal data disk for any additional writable data
-        // NOTE: The data disk is a fresh qcow2 without a filesystem, so is_cow_child=false
-        // to ensure the guest formats it with ext4. The rootfs disk (vdb) is already
-        // formatted as COW overlay of the base ext4.
-        let disk = qcow2_helper.create_disk(&disk_path, false)?;
-        tracing::info!(
-            disk_path = %disk.path().display(),
-            "Created data disk"
-        );
-
-        // is_cow_child=false: data disk needs formatting, rootfs disk is already formatted
-        return Ok((disk, false, Some(rootfs_disk)));
+        return Ok(rootfs_disk);
     }
 
-    // Overlayfs mode: check if we have a cached disk image for layers
-    if let Some(disk_image) = image.disk_image().await {
-        // COW child from existing qcow2 disk image
-        let virtual_size = Qcow2Helper::qcow2_virtual_size(disk_image.path())?;
-        let disk = qcow2_helper.create_cow_child_disk(
-            disk_image.path(),
-            BackingFormat::Qcow2,
-            &disk_path,
-            virtual_size,
-        )?;
-        tracing::info!(
-            disk_path = %disk.path().display(),
-            "Created COW child disk"
-        );
-        Ok((disk, true, None))
-    } else {
-        // New empty disk
-        let disk = qcow2_helper.create_disk(&disk_path, false)?;
-        tracing::info!(
-            disk_path = %disk.path().display(),
-            "Created empty disk for population"
-        );
-        Ok((disk, false, None))
-    }
+    // Non-DiskImage mode not supported when USE_DISK_ROOTFS is enabled
+    Err(BoxliteError::Internal(
+        "Only DiskImage rootfs strategy is supported".into(),
+    ))
 }
 
 /// Create COW child disk for init rootfs.

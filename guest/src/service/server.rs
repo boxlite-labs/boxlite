@@ -1,4 +1,5 @@
 use crate::container::Container;
+use crate::layout::GuestLayout;
 use crate::service::exec::registry::ExecutionRegistry;
 use boxlite_shared::{BoxliteResult, Transport};
 use std::collections::HashMap;
@@ -14,8 +15,6 @@ use tracing::{info, warn};
 pub(crate) struct GuestInitState {
     /// Whether guest has been initialized
     pub initialized: bool,
-    /// Path to rootfs mount (set after Guest.Init)
-    pub rootfs_mount: Option<String>,
 }
 
 /// Guest agent server.
@@ -25,6 +24,9 @@ pub(crate) struct GuestInitState {
 /// - Container: OCI container lifecycle
 /// - Execution: Command execution with bidirectional streaming
 pub(crate) struct GuestServer {
+    /// Guest filesystem layout
+    pub layout: GuestLayout,
+
     /// Guest initialization state (set by Guest.Init)
     pub init_state: Arc<Mutex<GuestInitState>>,
 
@@ -36,12 +38,13 @@ pub(crate) struct GuestServer {
 }
 
 impl GuestServer {
-    /// Create a new server.
+    /// Create a new server with the given layout.
     ///
     /// Server starts uninitialized. Guest.Init must be called first to setup
     /// the environment, then Container.Init to start the container.
-    pub fn new() -> Self {
+    pub fn new(layout: GuestLayout) -> Self {
         Self {
+            layout,
             init_state: Arc::new(Mutex::new(GuestInitState::default())),
             containers: Arc::new(Mutex::new(HashMap::new())),
             registry: ExecutionRegistry::new(),

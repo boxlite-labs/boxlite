@@ -315,6 +315,11 @@ impl ImageStore {
             return Ok(false);
         }
 
+        if !inner.storage.has_config(&cached.config_digest) {
+            tracing::debug!("Config blob missing: {}", cached.config_digest);
+            return Ok(false);
+        }
+
         Ok(true)
     }
 
@@ -339,6 +344,7 @@ impl ImageStore {
         };
 
         Ok(ImageManifest {
+            manifest_digest: cached.manifest_digest.clone(),
             layers,
             config_digest,
         })
@@ -371,22 +377,20 @@ impl ImageStore {
                 .save_manifest(&manifest, &manifest_digest_str)?;
         }
 
-        // Step 3: Extract layers info (no lock - parsing only)
-        let (layers, config_digest) = self
-            .extract_layers_and_config(&reference, &manifest)
+        // Step 3: Extract image manifest (may pull platform-specific manifest for multi-platform images)
+        let image_manifest = self
+            .extract_image_manifest(&reference, &manifest, manifest_digest_str)
             .await?;
 
         // Step 4: Download layers (no lock during download, atomic file writes)
-        self.download_layers(&reference, &layers).await?;
+        self.download_layers(&reference, &image_manifest.layers)
+            .await?;
 
         // Step 5: Download config (no lock during download)
-        self.download_config(&reference, &config_digest).await?;
+        self.download_config(&reference, &image_manifest.config_digest)
+            .await?;
 
         // Step 6: Update index (quick write lock)
-        let image_manifest = ImageManifest {
-            layers,
-            config_digest,
-        };
         self.update_index(image_ref, &image_manifest).await?;
 
         Ok(image_manifest)
@@ -396,11 +400,9 @@ impl ImageStore {
     async fn update_index(&self, image_ref: &str, manifest: &ImageManifest) -> BoxliteResult<()> {
         let mut inner = self.inner.write().await;
 
-        let manifest_digest = inner.storage.find_manifest_for_layers(&manifest.layers)?;
-
         let cached_image = CachedImage {
-            manifest_digest,
-            platform_manifest_digest: None,
+            manifest_digest: manifest.manifest_digest.clone(),
+            config_digest: manifest.config_digest.clone(),
             layers: manifest.layers.iter().map(|l| l.digest.clone()).collect(),
             cached_at: chrono::Utc::now().to_rfc3339(),
             complete: true,
@@ -420,20 +422,24 @@ impl ImageStore {
     // INTERNAL: Manifest Parsing
     // ========================================================================
 
-    async fn extract_layers_and_config(
+    async fn extract_image_manifest(
         &self,
         reference: &Reference,
         manifest: &oci_client::manifest::OciManifest,
-    ) -> BoxliteResult<(Vec<LayerInfo>, String)> {
+        manifest_digest: String,
+    ) -> BoxliteResult<ImageManifest> {
         match manifest {
             oci_client::manifest::OciManifest::Image(img) => {
                 let layers = Self::layers_from_image(img);
                 let config_digest = img.config.digest.clone();
-                Ok((layers, config_digest))
+                Ok(ImageManifest {
+                    manifest_digest,
+                    layers,
+                    config_digest,
+                })
             }
             oci_client::manifest::OciManifest::ImageIndex(index) => {
-                self.extract_platform_layers_and_config(reference, index)
-                    .await
+                self.extract_platform_manifest(reference, index).await
             }
         }
     }
@@ -449,11 +455,11 @@ impl ImageStore {
             .collect()
     }
 
-    async fn extract_platform_layers_and_config(
+    async fn extract_platform_manifest(
         &self,
         reference: &Reference,
         index: &oci_client::manifest::OciImageIndex,
-    ) -> BoxliteResult<(Vec<LayerInfo>, String)> {
+    ) -> BoxliteResult<ImageManifest> {
         let (platform_os, platform_arch) = Self::detect_platform();
 
         tracing::debug!(
@@ -492,7 +498,11 @@ impl ImageStore {
             oci_client::manifest::OciManifest::Image(img) => {
                 let layers = Self::layers_from_image(&img);
                 let config_digest = img.config.digest.clone();
-                Ok((layers, config_digest))
+                Ok(ImageManifest {
+                    manifest_digest: platform_digest,
+                    layers,
+                    config_digest,
+                })
             }
             _ => Err(BoxliteError::Storage(
                 "platform manifest is not a valid image".into(),
@@ -705,14 +715,15 @@ impl ImageStore {
 
         tracing::debug!("Downloading config blob: {}", config_digest);
 
-        // Create config file (quick read lock)
-        let mut config_file = {
+        // Start staged download (quick read lock)
+        let mut staged = {
             let inner = self.inner.read().await;
-            inner.storage.create_config_file(config_digest).await?
+            inner.storage.stage_config_download(config_digest).await?
         };
 
-        // Download (no lock)
-        self.client
+        // Download to temp file (no lock)
+        if let Err(e) = self
+            .client
             .pull_blob(
                 reference,
                 &OciDescriptor {
@@ -722,10 +733,21 @@ impl ImageStore {
                     urls: None,
                     annotations: None,
                 },
-                &mut config_file,
+                staged.file(),
             )
             .await
-            .map_err(|e| BoxliteError::Storage(format!("failed to pull config: {e}")))?;
+        {
+            staged.abort().await;
+            return Err(BoxliteError::Storage(format!("failed to pull config: {e}")));
+        }
+
+        // Verify and commit (atomic move to final location)
+        if !staged.commit().await? {
+            return Err(BoxliteError::Storage(format!(
+                "Config blob verification failed for {}",
+                config_digest
+            )));
+        }
 
         Ok(())
     }

@@ -5,6 +5,7 @@
 
 use super::command::ContainerCommand;
 use super::{kill, start};
+use crate::layout::GuestLayout;
 use boxlite_shared::errors::BoxliteResult;
 use libcontainer::container::Container as LibContainer;
 use std::collections::HashMap;
@@ -22,6 +23,7 @@ use std::path::{Path, PathBuf};
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// // Create and start container
 /// let container = Container::start(
+///     "my-container",
 ///     "/rootfs",
 ///     vec!["sh".to_string()],
 ///     vec!["PATH=/bin:/usr/bin".to_string()],
@@ -48,33 +50,37 @@ impl Container {
     /// Creates a container with the specified rootfs and starts the init process.
     /// The init process runs detached in the background.
     ///
+    /// Uses GuestLayout internally to determine paths:
+    /// - Container directory: /run/boxlite/{container_id}/
+    /// - OCI bundle (config.json): /run/boxlite/{container_id}/config.json
+    /// - libcontainer state: /run/boxlite/{container_id}/state.json
+    ///
     /// # Arguments
     ///
+    /// - `container_id`: Unique container identifier
     /// - `rootfs`: Path to container root filesystem
     /// - `entrypoint`: Command and arguments for container init process
     /// - `env`: Environment variables in "KEY=VALUE" format
     /// - `workdir`: Working directory inside container
-    /// - `state_root`: OCI container state directory
-    /// - `bundle_root`: OCI container bundle directory
     ///
     /// # Errors
     ///
     /// - Empty rootfs or entrypoint
-    /// - Failed to create bundle directory
+    /// - Failed to create container directory
     /// - Failed to create or start container
     /// - Init process exited immediately
     pub fn start(
+        container_id: &str,
         rootfs: impl AsRef<Path>,
         entrypoint: Vec<String>,
         env: Vec<String>,
         workdir: impl AsRef<Path>,
-        state_root: impl AsRef<Path>,
-        bundle_root: impl AsRef<Path>,
     ) -> BoxliteResult<Self> {
         let rootfs = rootfs.as_ref();
         let workdir = workdir.as_ref();
-        let state_root_path = state_root.as_ref();
-        let bundle_root_path = bundle_root.as_ref();
+
+        // Use GuestLayout for all paths (per-container directories)
+        let layout = GuestLayout::new();
 
         // Validate inputs early
         start::validate_container_inputs(rootfs, &entrypoint, workdir)?;
@@ -89,24 +95,26 @@ impl Container {
             }
         }
 
-        // Prepare container components
-        let container_id = start::generate_container_id();
-        let state_root = start::prepare_state_directory(state_root_path)?;
+        // State at /run/boxlite/containers/{cid}/state/
+        let state_root = layout.container_state_dir(container_id);
+
+        // Create OCI bundle at /run/boxlite/containers/{cid}/
+        // create_oci_bundle creates bundle_root/{cid}/, so pass containers_dir
         let bundle_path = start::create_oci_bundle(
-            &container_id,
+            container_id,
             rootfs,
             &entrypoint,
             &env,
             workdir,
-            bundle_root_path,
+            &layout.containers_dir(),
         )?;
 
         // Create and start container
-        start::create_container(&container_id, &state_root, &bundle_path)?;
-        start::start_container(&container_id, &state_root)?;
+        start::create_container(container_id, &state_root, &bundle_path)?;
+        start::start_container(container_id, &state_root)?;
 
         Ok(Self {
-            id: container_id,
+            id: container_id.to_string(),
             state_root,
             bundle_path,
             env: env_map,

@@ -86,8 +86,8 @@ fn main() -> BoxliteResult<()> {
 
     tracing::info!(engine = ?args.engine, "Box runner starting");
     tracing::debug!(
-        mounts = ?config.volumes.mounts(),
-        "Volume mounts configured"
+        shares = ?config.fs_shares.shares(),
+        "Filesystem shares configured"
     );
     tracing::debug!(
         entrypoint = ?config.guest_entrypoint.executable,

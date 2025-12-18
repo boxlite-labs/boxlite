@@ -1,5 +1,6 @@
 use crate::runtime::constants::dirs as const_dirs;
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
+use boxlite_shared::layout::{GUEST_BASE, SharedGuestLayout, dirs as shared_dirs};
 use std::path::{Path, PathBuf};
 
 // ============================================================================
@@ -95,22 +96,59 @@ impl FilesystemLayout {
 ///
 /// Each box has its own directory containing:
 /// - sockets/: Unix sockets for communication
-/// - rw/: Writable layer for overlayfs
+/// - mounts/: Host preparation area (writable by host)
+/// - shared/: Guest-visible directory (bind mount or symlink to mounts/)
 /// - disk.qcow2: Virtual disk for the box
+///
+/// The mounts/ and shared/ directories follow this pattern:
+/// - Host writes to mounts/containers/{cid}/...
+/// - Guest sees shared/containers/{cid}/... via virtio-fs
+/// - On Linux: shared/ is a read-only bind mount of mounts/
+/// - On macOS: shared/ is a symlink to mounts/ (workaround)
+///
+/// # Directory Structure
+///
+/// ```text
+/// ~/.boxlite/boxes/{box_id}/
+/// ├── sockets/
+/// │   ├── box.sock        # gRPC communication
+/// │   └── ready.sock      # Ready notification
+/// ├── mounts/             # Host preparation (SharedGuestLayout)
+/// │   └── containers/
+/// │       └── {cid}/
+/// │           ├── image/      # Container image (lowerdir)
+/// │           ├── rw/
+/// │           │   ├── upper/  # Overlayfs upper
+/// │           │   └── work/   # Overlayfs work
+/// │           └── rootfs/     # Final rootfs (overlayfs merged)
+/// ├── shared/             # Guest-visible (bind mount/symlink → mounts/)
+/// ├── disk.qcow2          # Data disk
+/// └── console.log         # Kernel/init output
+/// ```
 #[derive(Clone, Debug)]
 pub struct BoxFilesystemLayout {
     box_dir: PathBuf,
+    /// SharedGuestLayout for the mounts/ directory (host writes here).
+    shared_layout: SharedGuestLayout,
 }
 
 impl BoxFilesystemLayout {
     pub fn new(box_dir: PathBuf) -> Self {
-        Self { box_dir }
+        let shared_layout = SharedGuestLayout::new(box_dir.join(shared_dirs::MOUNTS));
+        Self {
+            box_dir,
+            shared_layout,
+        }
     }
 
     /// Root directory for this box: ~/.boxlite/boxes/{box_id}
     pub fn root(&self) -> &Path {
         &self.box_dir
     }
+
+    // ========================================================================
+    // SOCKETS
+    // ========================================================================
 
     /// Sockets directory: ~/.boxlite/boxes/{box_id}/sockets
     pub fn sockets_dir(&self) -> PathBuf {
@@ -129,10 +167,45 @@ impl BoxFilesystemLayout {
         self.sockets_dir().join("ready.sock")
     }
 
-    /// Writable layer directory for overlayfs: ~/.boxlite/boxes/{box_id}/rw
-    pub fn rw_dir(&self) -> PathBuf {
-        self.box_dir.join("rw")
+    // ========================================================================
+    // MOUNTS AND SHARED
+    // ========================================================================
+
+    /// SharedGuestLayout for the mounts/ directory (host-side paths).
+    ///
+    /// Host preparation area. Host writes container images and rw layers here.
+    /// Returns the SharedGuestLayout for accessing container directories.
+    pub fn shared_layout(&self) -> &SharedGuestLayout {
+        &self.shared_layout
     }
+
+    /// SharedGuestLayout for guest-side paths.
+    ///
+    /// Returns a layout with base `/run/boxlite/shared` for constructing
+    /// paths that will be used inside the guest VM.
+    pub fn guest_shared_layout(&self) -> SharedGuestLayout {
+        let guest_base = format!("{}/{}", GUEST_BASE, shared_dirs::SHARED);
+        SharedGuestLayout::new(guest_base)
+    }
+
+    /// Mounts directory path: ~/.boxlite/boxes/{box_id}/mounts
+    pub fn mounts_dir(&self) -> &Path {
+        self.shared_layout.base()
+    }
+
+    /// Shared directory: ~/.boxlite/boxes/{box_id}/shared
+    ///
+    /// Guest-visible directory. On Linux, this is a read-only bind mount of mounts/.
+    /// On macOS, this is a symlink to mounts/ (workaround).
+    ///
+    /// This directory is exposed to the guest via virtio-fs with tag "shared".
+    pub fn shared_dir(&self) -> PathBuf {
+        self.box_dir.join(shared_dirs::SHARED)
+    }
+
+    // ========================================================================
+    // DISK AND CONSOLE
+    // ========================================================================
 
     /// Virtual disk path: ~/.boxlite/boxes/{box_id}/disk.qcow2
     pub fn disk_path(&self) -> PathBuf {
@@ -146,7 +219,18 @@ impl BoxFilesystemLayout {
         self.box_dir.join("console.log")
     }
 
+    // ========================================================================
+    // PREPARATION AND CLEANUP
+    // ========================================================================
+
     /// Prepare the box directory structure.
+    ///
+    /// Creates:
+    /// - sockets/
+    /// - mounts/ (via SharedGuestLayout base)
+    ///
+    /// Note: shared/ is NOT created here - it will be created as a bind mount
+    /// (Linux) or symlink (macOS) in the filesystem stage.
     pub fn prepare(&self) -> BoxliteResult<()> {
         std::fs::create_dir_all(&self.box_dir)
             .map_err(|e| BoxliteError::Storage(format!("failed to create box dir: {e}")))?;
@@ -154,8 +238,12 @@ impl BoxFilesystemLayout {
         std::fs::create_dir_all(self.sockets_dir())
             .map_err(|e| BoxliteError::Storage(format!("failed to create sockets dir: {e}")))?;
 
-        std::fs::create_dir_all(self.rw_dir())
-            .map_err(|e| BoxliteError::Storage(format!("failed to create rw dir: {e}")))?;
+        std::fs::create_dir_all(self.mounts_dir())
+            .map_err(|e| BoxliteError::Storage(format!("failed to create mounts dir: {e}")))?;
+
+        // shared/ is created by create_bind_mount() - don't create it here
+        // On Linux: bind mount from mounts/
+        // On macOS: symlink to mounts/
 
         Ok(())
     }

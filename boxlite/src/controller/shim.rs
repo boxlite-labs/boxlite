@@ -184,8 +184,8 @@ impl VmmController for ShimController {
         let serializable_config = InstanceSpec {
             cpus: config.cpus,
             memory_mib: config.memory_mib,
-            volumes: config.volumes.clone(),
-            disks: config.disks.clone(),
+            fs_shares: config.fs_shares.clone(),
+            block_devices: config.block_devices.clone(),
             guest_entrypoint: config.guest_entrypoint.clone(),
             transport: config.transport.clone(),
             ready_transport: config.ready_transport.clone(),

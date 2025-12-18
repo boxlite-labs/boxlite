@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 
 use oci_client::manifest::OciManifest;
 
-use super::manager::LayerInfo;
 use crate::images::archive;
 use crate::runtime::layout::ImageFilesystemLayout;
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
@@ -355,11 +354,23 @@ impl ImageStorage {
     /// **Mutability**: Atomic - creates file at content-addressed path.
     /// Safe for concurrent access; same digest always writes to same path.
     ///
-    /// Ensures parent directory exists and returns an open file handle.
-    pub async fn create_config_file(&self, digest: &str) -> BoxliteResult<tokio::fs::File> {
-        let config_path = self.config_path(digest);
+    /// Start a staged download for a config blob.
+    ///
+    /// **Mutability**: Atomic - creates unique temp file with random suffix.
+    /// Safe for concurrent access; each caller gets its own temp file.
+    ///
+    /// Returns a StagedDownload handle that manages the temp file lifecycle.
+    /// Use `staged.file()` to get the file for writing, then `staged.commit()`
+    /// to verify and atomically move to final location.
+    pub async fn stage_config_download(&self, digest: &str) -> BoxliteResult<StagedDownload> {
+        // Extract expected hash from digest
+        let expected_hash = digest
+            .strip_prefix("sha256:")
+            .ok_or_else(|| BoxliteError::Storage("Invalid digest format, expected sha256:".into()))?
+            .to_string();
 
         // Ensure parent directory exists
+        let config_path = self.config_path(digest);
         if let Some(parent) = config_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
                 BoxliteError::Storage(format!(
@@ -370,73 +381,33 @@ impl ImageStorage {
             })?;
         }
 
-        // Create file for writing
-        tokio::fs::File::create(&config_path).await.map_err(|e| {
+        // Generate random suffix to prevent collision in parallel downloads
+        let random_suffix = uuid::Uuid::new_v4().simple();
+        let filename = digest.replace(':', "-");
+        let staged_path = self
+            .layout
+            .configs_dir()
+            .join(format!("{}.{}.downloading", filename, random_suffix));
+
+        let file = tokio::fs::File::create(&staged_path).await.map_err(|e| {
             BoxliteError::Storage(format!(
-                "Failed to create config file {}: {}",
-                config_path.display(),
+                "Failed to create temp file {}: {}",
+                staged_path.display(),
                 e
             ))
-        })
+        })?;
+
+        Ok(StagedDownload::new(
+            staged_path,
+            config_path,
+            expected_hash,
+            file,
+        ))
     }
 
     // ========================================================================
     // UTILITY OPERATIONS [immutable, &self]
     // ========================================================================
-
-    /// Find manifest digest by scanning manifests directory for matching layers.
-    ///
-    /// **Mutability**: Immutable - reads and scans files only, no state changes.
-    ///
-    /// This is used after pulling to locate which cached manifest corresponds
-    /// to the pulled layers.
-    pub fn find_manifest_for_layers(&self, layers: &[LayerInfo]) -> BoxliteResult<String> {
-        let manifests_dir = self.layout.manifests_dir();
-
-        // List all manifest files
-        let entries = std::fs::read_dir(&manifests_dir).map_err(|e| {
-            BoxliteError::Storage(format!(
-                "Failed to read manifests directory {}: {}",
-                manifests_dir.display(),
-                e
-            ))
-        })?;
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_none_or(|e| e != "json") {
-                continue;
-            }
-
-            // Read and parse manifest
-            if let Ok(content) = std::fs::read_to_string(&path)
-                && let Ok(manifest) = serde_json::from_str::<OciManifest>(&content)
-            {
-                // Check if this manifest has matching layers
-                let manifest_layers = match manifest {
-                    OciManifest::Image(img) => img.layers,
-                    _ => continue,
-                };
-
-                // Compare layer digests
-                if manifest_layers.len() == layers.len()
-                    && manifest_layers
-                        .iter()
-                        .zip(layers.iter())
-                        .all(|(m, l)| m.digest == l.digest)
-                {
-                    // Found matching manifest - extract digest from filename
-                    let filename = path.file_stem().unwrap().to_str().unwrap();
-                    let digest = filename.replace('-', ":");
-                    return Ok(digest);
-                }
-            }
-        }
-
-        Err(BoxliteError::Storage(
-            "Could not find manifest digest for layers".into(),
-        ))
-    }
 
     /// Verify all blobs for given layer digests exist on disk.
     ///

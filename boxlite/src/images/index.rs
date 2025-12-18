@@ -30,12 +30,14 @@ pub struct ImageIndex {
 /// Metadata for a cached images.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CachedImage {
-    /// Manifest digest (sha256:...)
+    /// Manifest digest of the final image (sha256:...)
+    /// For multi-platform images, this is the platform-specific manifest digest
     pub manifest_digest: String,
 
-    /// Platform-specific manifest digest for multi-platform images
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub platform_manifest_digest: Option<String>,
+    /// Config blob digest (sha256:...)
+    /// Empty string for legacy entries (will trigger re-pull)
+    #[serde(default)]
+    pub config_digest: String,
 
     /// Layer digests in order
     pub layers: Vec<String>,
@@ -154,7 +156,7 @@ mod tests {
 
         let image = CachedImage {
             manifest_digest: "sha256:abc123".to_string(),
-            platform_manifest_digest: None,
+            config_digest: "sha256:config123".to_string(),
             layers: vec!["sha256:layer1".to_string()],
             cached_at: "2025-10-24T12:00:00Z".to_string(),
             complete: true,
@@ -179,7 +181,7 @@ mod tests {
 
         let image = CachedImage {
             manifest_digest: "sha256:abc123".to_string(),
-            platform_manifest_digest: None,
+            config_digest: "sha256:config123".to_string(),
             layers: vec![],
             cached_at: "2025-10-24T12:00:00Z".to_string(),
             complete: true,
@@ -197,7 +199,7 @@ mod tests {
 
         let image = CachedImage {
             manifest_digest: "sha256:abc123".to_string(),
-            platform_manifest_digest: None,
+            config_digest: "sha256:config123".to_string(),
             layers: vec![],
             cached_at: "2025-10-24T12:00:00Z".to_string(),
             complete: true,
@@ -219,7 +221,7 @@ mod tests {
         let mut index = ImageIndex::new();
         let image = CachedImage {
             manifest_digest: "sha256:abc123".to_string(),
-            platform_manifest_digest: Some("sha256:platform123".to_string()),
+            config_digest: "sha256:config123".to_string(),
             layers: vec!["sha256:layer1".to_string(), "sha256:layer2".to_string()],
             cached_at: "2025-10-24T12:00:00Z".to_string(),
             complete: true,

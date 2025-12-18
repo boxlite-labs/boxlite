@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use super::DiskFormat;
-use crate::vmm::{DiskConfig, Disks};
+use crate::vmm::{BlockDevice, BlockDevices};
 
 /// Virtio block device identifier.
 ///
@@ -35,7 +35,7 @@ impl BlockDeviceId {
 /// Handles automatic assignment of block device IDs (vda, vdb, ...) and
 /// generates the final disk configuration for the VMM engine.
 pub struct BlockDeviceManager {
-    disks: Vec<DiskConfig>,
+    devices: Vec<BlockDevice>,
     next_index: u8,
 }
 
@@ -43,7 +43,7 @@ impl BlockDeviceManager {
     /// Create a new block device manager.
     pub fn new() -> Self {
         Self {
-            disks: Vec::new(),
+            devices: Vec::new(),
             next_index: 0,
         }
     }
@@ -65,7 +65,7 @@ impl BlockDeviceManager {
             DiskFormat::Qcow2 => crate::vmm::DiskFormat::Qcow2,
         };
 
-        self.disks.push(DiskConfig {
+        self.devices.push(BlockDevice {
             block_id: block_id.as_str().to_string(),
             disk_path: path.to_path_buf(),
             read_only: false,
@@ -75,13 +75,13 @@ impl BlockDeviceManager {
         device_path
     }
 
-    /// Build the final disk configuration for the VMM engine.
-    pub fn build(self) -> Disks {
-        let mut disks = Disks::new();
-        for disk in self.disks {
-            disks.add(disk);
+    /// Build the final block device configuration for the VMM engine.
+    pub fn build(self) -> BlockDevices {
+        let mut devices = BlockDevices::new();
+        for device in self.devices {
+            devices.add(device);
         }
-        disks
+        devices
     }
 }
 

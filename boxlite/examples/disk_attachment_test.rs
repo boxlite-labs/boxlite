@@ -3,7 +3,7 @@
 //! This example demonstrates attaching a QCOW2 disk image to a VM.
 //! Run with: cargo run --example disk_attachment_test
 
-use boxlite::vmm::{DiskConfig, DiskFormat, Disks};
+use boxlite::vmm::{BlockDevice, BlockDevices, DiskFormat};
 use std::path::PathBuf;
 
 fn main() {
@@ -11,11 +11,11 @@ fn main() {
 
     // Test 1: Create disk configuration
     println!("Test 1: Creating disk configurations...");
-    let mut disks = Disks::new();
-    println!("  ✓ Created empty Disks");
+    let mut disks = BlockDevices::new();
+    println!("  ✓ Created empty BlockDevices");
 
     // Add a QCOW2 disk
-    let qcow2_disk = DiskConfig {
+    let qcow2_disk = BlockDevice {
         block_id: "vda".to_string(),
         disk_path: PathBuf::from("/tmp/test.qcow2"),
         read_only: false,
@@ -25,7 +25,7 @@ fn main() {
     println!("  ✓ Added QCOW2 disk: vda -> /tmp/test.qcow2 (read-write)");
 
     // Add a raw disk
-    let raw_disk = DiskConfig {
+    let raw_disk = BlockDevice {
         block_id: "vdb".to_string(),
         disk_path: PathBuf::from("/tmp/scratch.raw"),
         read_only: true,
@@ -36,9 +36,9 @@ fn main() {
 
     // Test 2: Verify disk configurations
     println!("\nTest 2: Verifying disk configurations...");
-    println!("  Total disks: {}", disks.disks().len());
+    println!("  Total disks: {}", disks.devices().len());
 
-    for (i, disk) in disks.disks().iter().enumerate() {
+    for (i, disk) in disks.devices().iter().enumerate() {
         println!("  Disk {}:", i + 1);
         println!("    Block ID: {}", disk.block_id);
         println!("    Path: {}", disk.disk_path.display());
@@ -61,7 +61,7 @@ fn main() {
     // Test 4: Deserialization
     println!("\nTest 4: Testing deserialization...");
     let json = r#"{
-        "disks": [
+        "devices": [
             {
                 "block_id": "vdc",
                 "disk_path": "/var/lib/data.qcow2",
@@ -71,11 +71,11 @@ fn main() {
         ]
     }"#;
 
-    match serde_json::from_str::<Disks>(json) {
+    match serde_json::from_str::<BlockDevices>(json) {
         Ok(deserialized) => {
             println!("  ✓ Successfully deserialized from JSON");
-            println!("  Loaded {} disk(s)", deserialized.disks().len());
-            if let Some(disk) = deserialized.disks().first() {
+            println!("  Loaded {} disk(s)", deserialized.devices().len());
+            if let Some(disk) = deserialized.devices().first() {
                 println!(
                     "  First disk: {} -> {}",
                     disk.block_id,

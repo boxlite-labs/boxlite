@@ -86,7 +86,7 @@ async fn prepare_init_rootfs(
     let prepared = builder.prepare(merged_path.clone(), base_image).await?;
 
     // Inject guest binary
-    crate::util::inject_guest_binary(&prepared.path)?;
+    util::inject_guest_binary(&prepared.path)?;
 
     // Verify guest binary
     let guest_bin_path = prepared.path.join("boxlite/bin/boxlite-guest");

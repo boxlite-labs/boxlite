@@ -7,53 +7,19 @@
 pub use boxlite_shared::constants::{container, mount_tags, network};
 
 /// Guest mount points (paths inside the guest)
-/// These are sent to the guest via GuestInitRequest - guest doesn't hardcode them.
+/// These are sent to the guest via GuestInitRequest.
+///
+/// Note: Container-specific paths (rootfs, rw, etc.) are derived from
+/// SharedGuestLayout via BoxFilesystemLayout::guest_shared_layout().
 pub mod guest_paths {
-    /// Base directory for workspace in guest
-    pub const WORKSPACE_BASE: &str = "/boxlite/workspace";
-
-    /// Rootfs mount point in guest (for merged strategy)
-    pub const ROOTFS: &str = "/boxlite/workspace/rootfs";
-
     /// Directory for layer mounts in guest (for overlay strategy)
-    pub const LAYERS_DIR: &str = "/boxlite/workspace/layers";
-
-    /// Read-write directory in guest
-    pub const RW_DIR: &str = "/boxlite/workspace/rw";
-
-    /// Upper directory for overlayfs writes
-    pub const UPPER_DIR: &str = "/boxlite/workspace/rw/upper";
-
-    /// Work directory for overlayfs
-    pub const WORK_DIR: &str = "/boxlite/workspace/rw/work";
-
-    /// Merged overlayfs mount point (for overlay strategy)
-    pub const MERGED_DIR: &str = "/boxlite/workspace/merged";
+    pub const LAYERS_DIR: &str = "/run/boxlite/layers";
 
     /// Guest binary directory
     pub const BIN_DIR: &str = "/boxlite/bin";
 
-    /// OCI container state directory
-    pub const STATE_ROOT: &str = "/boxlite/workspace/rw/states";
-
-    /// OCI container bundle directory
-    pub const BUNDLE_ROOT: &str = "/boxlite/workspace/rw/bundles";
-
-    /// Block device path in guest (virtio-blk) - data disk
-    pub const DISK_DEVICE: &str = "/dev/vda";
-
-    /// Mount point for writable disk in guest
-    pub const DISK_MOUNT: &str = "/boxlite/workspace/disk";
-
-    /// Block device path for rootfs disk (virtio-blk) - second disk
-    pub const ROOTFS_DISK_DEVICE: &str = "/dev/vdb";
-
-    /// Mount point for rootfs disk in guest
-    pub const ROOTFS_DISK_MOUNT: &str = "/boxlite/workspace/rootfs";
-
-    /// Block device path for init rootfs disk (virtio-blk) - third disk
-    /// Used when init_rootfs uses disk-based strategy
-    pub const INIT_DISK_DEVICE: &str = "/dev/vdc";
+    /// Mount point for writable disk in guest (data disk)
+    pub const DISK_MOUNT: &str = "/run/boxlite/data";
 
     /// Mount point for init rootfs disk before pivot_root
     pub const INIT_DISK_MOUNT: &str = "/mnt/init";
@@ -98,8 +64,8 @@ pub mod dirs {
     /// Subdirectory for overlayfs work directory (Linux only)
     pub const WORK_DIR: &str = "work";
 
-    /// Subdirectory for writable layer (per box)
-    pub const RW_DIR: &str = "rw";
+    /// Subdirectory for overlayfs (per container)
+    pub const OVERLAYFS_DIR: &str = "overlayfs";
 
     /// Subdirectory for log files
     pub const LOGS_DIR: &str = "logs";

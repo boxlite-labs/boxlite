@@ -9,6 +9,7 @@ use tracing_subscriber::EnvFilter;
 static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
 mod controller;
+pub mod fs;
 pub mod management;
 pub mod metrics;
 pub mod net;
@@ -33,6 +34,7 @@ pub use management::{BoxID, BoxInfo, BoxState};
 pub use metrics::{BoxMetrics, RuntimeMetrics};
 use runtime::layout::FilesystemLayout;
 pub use runtime::options::{BoxOptions, BoxliteOptions, RootfsSpec};
+pub use runtime::types::ContainerId;
 
 /// Initialize tracing for Boxlite using the provided filesystem layout.
 ///

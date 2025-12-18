@@ -75,31 +75,6 @@ pub(crate) async fn shutdown(litebox: &LiteBox) -> BoxliteResult<bool> {
 
         // Socket cleanup is handled automatically when process exits
 
-        // Install disk as disk image if this was a fresh disk (not COW child)
-        // This caches the populated disk for future boxes using the same image
-        if let Some(ref image) = inner.image_for_disk_install {
-            // Take ownership of the disk path before it gets cleaned up
-            let disk_path = inner.disk.path().to_path_buf();
-            let disk_format = inner.disk.format();
-            if disk_path.exists() {
-                // Create a new Disk from the path (non-persistent, will be moved)
-                let disk_to_install = crate::volumes::Disk::new(disk_path, disk_format, false);
-                match image.install_disk_image(disk_to_install).await {
-                    Ok(installed_disk) => {
-                        tracing::info!(
-                            "Installed disk image for future boxes: {}",
-                            installed_disk.path().display()
-                        );
-                        // Leak the installed disk to prevent cleanup (it's now persistent)
-                        let _ = installed_disk.leak();
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to install disk image: {}", e);
-                    }
-                }
-            }
-        }
-
         // Clean up box directory
         if let Err(e) = fs::remove_dir_all(&inner.box_home) {
             tracing::warn!("Failed to cleanup box directory in shutdown: {}", e);

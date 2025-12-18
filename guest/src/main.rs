@@ -6,6 +6,8 @@ compile_error!("BoxLite guest is Linux-only; build with a Linux target");
 #[cfg(target_os = "linux")]
 mod container;
 #[cfg(target_os = "linux")]
+mod layout;
+#[cfg(target_os = "linux")]
 mod mounts;
 #[cfg(target_os = "linux")]
 mod network;
@@ -83,10 +85,15 @@ async fn main() -> BoxliteResult<()> {
     let args = GuestArgs::parse();
     info!("✅ Arguments parsed successfully");
 
+    // Prepare guest layout directories
+    let layout = layout::GuestLayout::new();
+    info!("Preparing guest layout at {}", layout.base().display());
+    layout.prepare_base()?;
+
     // Start server in uninitialized state
     // All initialization (mounts, rootfs, network) will happen via Guest.Init RPC
     info!("🌐 Starting guest server on: {}", args.listen);
-    let server = GuestServer::new();
+    let server = GuestServer::new(layout);
     server.run(args.listen, args.notify).await
 }
 

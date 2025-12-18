@@ -9,6 +9,7 @@ use crate::runtime::RuntimeInner;
 use crate::runtime::initrf::InitRootfs;
 use crate::runtime::layout::BoxFilesystemLayout;
 use crate::runtime::options::BoxOptions;
+use crate::runtime::types::ContainerId;
 use crate::vmm::VmmController;
 use boxlite_shared::errors::BoxliteResult;
 use std::path::PathBuf;
@@ -127,6 +128,10 @@ impl InitPipeline {
 
         let total_start = Instant::now();
 
+        // Generate container ID upfront (OCI-compliant 64-char hex)
+        let container_id = ContainerId::new();
+        tracing::debug!(container_id = %container_id.short(), "Generated container ID");
+
         // Create cleanup guard (armed by default)
         let mut guard = CleanupGuard::new(self.runtime.clone());
 
@@ -196,6 +201,7 @@ impl InitPipeline {
             rootfs: &rootfs_output,
             init_rootfs: &init_output.init_rootfs,
             home_dir: &self.home_dir,
+            container_id: &container_id,
         })
         .await
         .inspect_err(|e| {
@@ -233,8 +239,10 @@ impl InitPipeline {
             guest_session: spawn_output.guest_session,
             rootfs_result: rootfs_output.rootfs_result,
             container_config: rootfs_output.container_config,
-            is_cow_child: config_output.is_cow_child,
             user_volumes: config_output.user_volumes,
+            guest_shared_layout: fs_output.layout.guest_shared_layout(),
+            container_id,
+            rootfs_device_path: config_output.rootfs_device_path,
         })
         .await
         .inspect_err(|e| {
@@ -278,23 +286,17 @@ impl InitPipeline {
         guard.disarm();
 
         // Assemble final state
-        let image_for_disk_install = if config_output.is_cow_child {
-            None
-        } else {
-            Some(rootfs_output.image)
-        };
-
         Ok(BoxInner {
             box_home: fs_output.layout.root().to_path_buf(),
             controller: std::sync::Mutex::new(Box::new(controller)),
             guest_session: guest_output.guest_session,
             network_backend: config_output.network_backend,
             metrics,
-            disk: config_output.disk,
-            rootfs_disk: config_output.rootfs_disk,
-            init_disk: config_output.init_disk,
-            image_for_disk_install,
+            _container_rootfs_disk: config_output.disk,
+            guest_rootfs_disk: config_output.init_disk,
             container_id: guest_output.container_id,
+            #[cfg(target_os = "linux")]
+            bind_mount: fs_output._bind_mount,
         })
     }
 }

@@ -48,69 +48,27 @@ impl GuestService for GuestServer {
             }));
         }
 
-        // Step 2: Setup rootfs based on strategy
-        let rootfs_path = match req.rootfs {
+        // Step 2: Log rootfs strategy (actual mounting moved to Container.Init)
+        // Guest init only mounts volumes; overlayfs is created in container init
+        // to keep the merged directory on local tmpfs instead of virtiofs.
+        match req.rootfs {
             Some(rootfs_init) => match rootfs_init.strategy {
                 Some(rootfs_init::Strategy::Merged(merged)) => {
-                    // Merged rootfs: already mounted via volumes, just record the path
-                    info!("Using merged rootfs at {}", merged.path);
-                    merged.path
+                    info!("Rootfs strategy: merged at {}", merged.path);
                 }
                 Some(rootfs_init::Strategy::Overlay(overlay)) => {
-                    // Overlay: layers already mounted via volumes, create overlayfs
                     info!(
-                        "Creating overlayfs: {} lower dirs -> {} (copy_layers={})",
+                        "Rootfs strategy: overlay ({} lower dirs, merged={})",
                         overlay.lower_dirs.len(),
-                        overlay.merged_dir,
-                        overlay.copy_layers
+                        overlay.merged_dir
                     );
-
-                    // If copy_layers is true, copy lower dirs to disk first
-                    let lower_dirs = if overlay.copy_layers {
-                        match crate::storage::copy_layers_to_disk(
-                            &overlay.lower_dirs,
-                            &overlay.upper_dir,
-                        ) {
-                            Ok(copied_dirs) => copied_dirs,
-                            Err(e) => {
-                                error!("Failed to copy layers to disk: {}", e);
-                                return Ok(Response::new(GuestInitResponse {
-                                    result: Some(guest_init_response::Result::Error(
-                                        GuestInitError {
-                                            reason: format!("Failed to copy layers to disk: {}", e),
-                                        },
-                                    )),
-                                }));
-                            }
-                        }
-                    } else {
-                        overlay.lower_dirs.clone()
-                    };
-
-                    if let Err(e) = crate::overlayfs::mount_overlayfs_direct(
-                        &lower_dirs,
-                        &overlay.upper_dir,
-                        &overlay.work_dir,
-                        &overlay.merged_dir,
-                    ) {
-                        error!("Failed to mount overlayfs: {}", e);
-                        return Ok(Response::new(GuestInitResponse {
-                            result: Some(guest_init_response::Result::Error(GuestInitError {
-                                reason: format!("Failed to mount overlayfs: {}", e),
-                            })),
-                        }));
-                    }
-
-                    overlay.merged_dir
+                    // Overlayfs mounting is deferred to Container.Init
                 }
                 Some(rootfs_init::Strategy::Disk(disk_rootfs)) => {
-                    // Disk-based rootfs: block device already mounted via volumes
-                    // The mount_point contains the complete container rootfs
                     info!(
-                        "Using disk-based rootfs: {} mounted at {}",
+                        "Rootfs strategy: disk ({} at {})",
                         disk_rootfs.device, disk_rootfs.mount_point
                     );
-                    disk_rootfs.mount_point
                 }
                 None => {
                     error!("Missing rootfs strategy in init request");
@@ -129,7 +87,7 @@ impl GuestService for GuestServer {
                     })),
                 }));
             }
-        };
+        }
 
         // Step 3: Configure network (if specified)
         if let Some(network) = req.network {
@@ -150,14 +108,10 @@ impl GuestService for GuestServer {
             }
         }
 
-        // Mark as initialized and store rootfs path
+        // Mark as initialized
         init_state.initialized = true;
-        init_state.rootfs_mount = Some(rootfs_path.clone());
 
-        info!(
-            "✅ Guest initialized successfully, rootfs at {}",
-            rootfs_path
-        );
+        info!("✅ Guest initialized successfully");
         Ok(Response::new(GuestInitResponse {
             result: Some(guest_init_response::Result::Success(GuestInitSuccess {})),
         }))

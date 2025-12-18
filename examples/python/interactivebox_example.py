@@ -36,7 +36,8 @@ async def main():
         # This is all you need for an interactive shell!
         term_mode = os.environ.get("TERM", "xterm-256color")
         print(f"Terminal mode: {term_mode}")
-        async with InteractiveBox(image="alpine:latest", env=[("TERM", term_mode)]) as itbox:
+        async with InteractiveBox(image="alpine:latest", env=[("TERM", term_mode), ("BOXLITE_EXECUTOR", "guest")]) as itbox:
+        # async with InteractiveBox(image="alpine:latest", env=[("TERM", term_mode)]) as itbox:
             # You're now in an interactive shell
             # Everything you type goes to the container
             # Everything the container outputs comes back to your terminal

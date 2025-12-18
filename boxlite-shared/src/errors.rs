@@ -39,6 +39,9 @@ pub enum BoxliteError {
 
     #[error("Execution error: {0}")]
     Execution(String),
+
+    #[error("unsupported: {0}")]
+    Unsupported(String),
 }
 
 // Implement From for common error types to enable `?` operator

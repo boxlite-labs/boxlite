@@ -141,6 +141,7 @@ impl From<PyBoxOptions> for BoxOptions {
             volumes,
             network,
             ports,
+            isolate_mounts: false,
         }
     }
 }

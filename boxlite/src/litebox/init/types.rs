@@ -133,7 +133,7 @@ pub(crate) struct BoxInner {
     /// RAII-managed bind mount for mounts/ → shared/ (Linux only, auto-cleanup on drop)
     #[cfg(target_os = "linux")]
     #[allow(dead_code)]
-    pub(in crate::litebox) bind_mount: BindMountHandle,
+    pub(in crate::litebox) bind_mount: Option<BindMountHandle>,
 }
 
 // ============================================================================
@@ -144,15 +144,16 @@ pub(crate) struct BoxInner {
 pub struct FilesystemInput<'a> {
     pub box_id: &'a BoxID,
     pub runtime: &'a RuntimeInner,
+    pub isolate_mounts: bool,
 }
 
 /// Output from filesystem stage.
 pub struct FilesystemOutput {
     pub layout: BoxFilesystemLayout,
-    /// Bind mount handle for mounts/ → shared/ binding.
+    /// Bind mount handle for mounts/ → shared/ binding (when isolate_mounts is enabled).
     /// Kept alive for the duration of box lifecycle; cleaned up on drop.
     #[cfg(target_os = "linux")]
-    pub _bind_mount: BindMountHandle,
+    pub bind_mount: Option<BindMountHandle>,
 }
 
 /// Input for rootfs stage.

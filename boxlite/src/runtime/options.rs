@@ -2,6 +2,7 @@
 
 use crate::runtime::constants::dirs as const_dirs;
 use crate::runtime::constants::envs as const_envs;
+use boxlite_shared::errors::BoxliteResult;
 use dirs::home_dir;
 use std::path::PathBuf;
 /// Configuration options for BoxliteRuntime.
@@ -38,6 +39,28 @@ pub struct BoxOptions {
     pub volumes: Vec<VolumeSpec>,
     pub network: NetworkSpec,
     pub ports: Vec<PortSpec>,
+    /// Enable bind mount isolation for the shared mounts directory.
+    ///
+    /// When true, creates a read-only bind mount from `mounts/` to `shared/`,
+    /// preventing the guest from modifying host-prepared files.
+    ///
+    /// Requires CAP_SYS_ADMIN (privileged) or FUSE (rootless) on Linux.
+    /// Defaults to false.
+    #[serde(default)]
+    pub isolate_mounts: bool,
+}
+
+impl BoxOptions {
+    /// Sanitize and validate options.
+    pub fn sanitize(&self) -> BoxliteResult<()> {
+        #[cfg(not(target_os = "linux"))]
+        if self.isolate_mounts {
+            return Err(boxlite_shared::errors::BoxliteError::Unsupported(
+                "isolate_mounts is only supported on Linux".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// How to populate the box root filesystem.

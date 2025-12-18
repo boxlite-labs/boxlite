@@ -126,6 +126,8 @@ impl InitPipeline {
     pub async fn run(self) -> BoxliteResult<BoxInner> {
         use std::time::Instant;
 
+        self.options.sanitize()?;
+
         let total_start = Instant::now();
 
         // Generate container ID upfront (OCI-compliant 64-char hex)
@@ -145,6 +147,7 @@ impl InitPipeline {
                 let result = stages::filesystem::run(FilesystemInput {
                     box_id: &self.box_id,
                     runtime: &self.runtime,
+                    isolate_mounts: self.options.isolate_mounts,
                 });
                 (result, start.elapsed().as_millis())
             },
@@ -296,7 +299,7 @@ impl InitPipeline {
             guest_rootfs_disk: config_output.init_disk,
             container_id: guest_output.container_id,
             #[cfg(target_os = "linux")]
-            bind_mount: fs_output._bind_mount,
+            bind_mount: fs_output.bind_mount,
         })
     }
 }

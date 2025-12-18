@@ -1,6 +1,7 @@
 //! Vmm trait for engine-specific Box implementations.
 
 use super::InstanceSpec;
+use crate::runtime::constants::vm_defaults::{DEFAULT_CPUS, DEFAULT_MEMORY_MIB};
 use boxlite_shared::errors::BoxliteResult;
 
 /// Configuration options for creating VMM engines.
@@ -11,18 +12,18 @@ use boxlite_shared::errors::BoxliteResult;
 /// on Box-specific settings like resource limits and library locations.
 #[derive(Clone, Debug)]
 pub struct VmmConfig {
-    /// Number of CPUs to allocate to Boxes (default: 2)
+    /// Number of CPUs to allocate to Boxes (see vm_defaults::DEFAULT_CPUS)
     pub cpus: Option<u8>,
 
-    /// Memory in MiB to allocate to Boxes (default: 512)
+    /// Memory in MiB to allocate to Boxes (see vm_defaults::DEFAULT_MEMORY_MIB)
     pub memory_mib: Option<u32>,
 }
 
 impl Default for VmmConfig {
     fn default() -> Self {
         Self {
-            cpus: Some(2),
-            memory_mib: Some(512),
+            cpus: Some(DEFAULT_CPUS),
+            memory_mib: Some(DEFAULT_MEMORY_MIB),
         }
     }
 }

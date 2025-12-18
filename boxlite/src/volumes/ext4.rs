@@ -4,6 +4,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use walkdir::WalkDir;
 
+use super::constants::ext4::{
+    BLOCK_SIZE, DEFAULT_DIR_SIZE_BYTES, INODE_SIZE, METADATA_OVERHEAD_BYTES, MIN_DISK_SIZE_BYTES,
+    SIZE_MULTIPLIER,
+};
 use super::{Disk, DiskFormat};
 
 /// Get the path to the mke2fs binary.
@@ -20,9 +24,6 @@ fn get_mke2fs_path() -> PathBuf {
 /// - Inode overhead (256 bytes per file/dir/symlink)
 /// - Directory entry overhead
 fn calculate_dir_size(dir: &Path) -> BoxliteResult<u64> {
-    const BLOCK_SIZE: u64 = 4096;
-    const INODE_SIZE: u64 = 256;
-
     let mut total_blocks = 0u64;
     let mut entry_count = 0u64;
 
@@ -56,7 +57,7 @@ fn calculate_dir_size(dir: &Path) -> BoxliteResult<u64> {
 
 /// Calculate appropriate disk size with ext4 overhead.
 fn calculate_disk_size(source: &Path) -> u64 {
-    let dir_size = calculate_dir_size(source).unwrap_or(64 * 1024 * 1024);
+    let dir_size = calculate_dir_size(source).unwrap_or(DEFAULT_DIR_SIZE_BYTES);
 
     // ext4 needs significant overhead for:
     // - Block groups and descriptors
@@ -64,10 +65,10 @@ fn calculate_disk_size(source: &Path) -> u64 {
     // - Journal (typically 64-128MB)
     // - Reserved blocks for root (5% default)
     // Use 2x multiplier plus 256MB base overhead for journal and metadata
-    let size_with_overhead = dir_size * 2 + 256 * 1024 * 1024;
+    let size_with_overhead = dir_size * SIZE_MULTIPLIER + METADATA_OVERHEAD_BYTES;
 
     // Minimum 1GB to handle images with many files or large binaries
-    let final_size = size_with_overhead.max(1024 * 1024 * 1024);
+    let final_size = size_with_overhead.max(MIN_DISK_SIZE_BYTES);
 
     tracing::debug!(
         "Calculated disk size: dir_size={}MB, with_overhead={}MB, final={}MB",

@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use boxlite::runtime::constants::images;
 use boxlite::runtime::options::{
     BoxOptions, BoxliteOptions, NetworkSpec, PortProtocol, PortSpec, RootfsSpec, VolumeSpec,
 };
@@ -116,7 +117,7 @@ impl From<PyBoxOptions> for BoxOptions {
     fn from(py_opts: PyBoxOptions) -> Self {
         let rootfs = match py_opts.rootfs_path {
             Some(path) if !path.is_empty() => RootfsSpec::RootfsPath(path),
-            _ => RootfsSpec::Image(py_opts.image.unwrap_or_else(|| "alpine:latest".to_string())),
+            _ => RootfsSpec::Image(py_opts.image.unwrap_or_else(|| images::DEFAULT.to_string())),
         };
 
         let volumes = py_opts.volumes.into_iter().map(VolumeSpec::from).collect();
@@ -298,7 +299,7 @@ impl<'a, 'py> pyo3::FromPyObject<'a, 'py> for PyPortSpec {
             return Ok(PyPortSpec {
                 host: host_port,
                 guest: guest_port,
-                protocol: parse_protocol(protocol.unwrap_or_else(|| "tcp".to_string())),
+                protocol: parse_protocol(protocol.as_deref().unwrap_or("tcp")),
                 host_ip: host_ip.filter(|s| !s.is_empty()),
             });
         }
@@ -335,7 +336,7 @@ impl<'a, 'py> pyo3::FromPyObject<'a, 'py> for PyPortSpec {
             return Ok(PyPortSpec {
                 host: host_port,
                 guest: guest_port,
-                protocol: parse_protocol(protocol.unwrap_or_else(|| "tcp".to_string())),
+                protocol: parse_protocol(protocol.as_deref().unwrap_or("tcp")),
                 host_ip: host_ip.filter(|s| !s.is_empty()),
             });
         }

@@ -10,14 +10,13 @@ from typing import Optional
 
 from .exec import ExecResult
 
-# Configure logger
 logger = logging.getLogger("boxlite.simplebox")
 
 __all__ = ['SimpleBox']
 
 
 class StreamType(IntEnum):
-    """Stream type for command execution output (deprecated, use execution.py)."""
+    """Stream type for command execution output."""
     STDOUT = 1
     STDERR = 2
 

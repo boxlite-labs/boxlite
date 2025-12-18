@@ -10,19 +10,8 @@ use std::process::Command;
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 use qcow2_rs::meta::Qcow2Header;
 
+use super::constants::qcow2::{BLOCK_SIZE, CLUSTER_BITS, DEFAULT_DISK_SIZE_GB, REFCOUNT_ORDER};
 use super::{Disk, DiskFormat};
-
-/// Default disk size in GB (sparse, grows as needed).
-const DEFAULT_DISK_SIZE_GB: u64 = 10;
-
-/// QCOW2 cluster size (64KB, 2^16).
-const CLUSTER_BITS: usize = 16;
-
-/// QCOW2 refcount order (16-bit refcounts).
-const REFCOUNT_ORDER: u8 = 4;
-
-/// Block size for QCOW2 formatting (512 bytes).
-const BLOCK_SIZE: usize = 512;
 
 /// Parsed qcow2 header information.
 #[derive(Debug)]

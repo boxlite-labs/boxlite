@@ -3,6 +3,7 @@
 //! Provides disk image creation and management for Box block devices.
 
 mod block_device;
+pub mod constants;
 mod disk;
 pub(crate) mod ext4;
 mod qcow2;

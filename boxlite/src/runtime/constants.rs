@@ -65,6 +65,9 @@ pub mod envs {
 
 /// Container images used by the runtime
 pub mod images {
+    /// Default container image when none is specified
+    pub const DEFAULT: &str = "alpine:latest";
+
     /// Base image for VM init rootfs (must include mkfs.ext4 for disk formatting)
     pub const INIT_ROOTFS: &str = "debian:bookworm-slim";
 }
@@ -107,12 +110,21 @@ pub mod dirs {
 
 /// Filesystem and mount options
 pub mod fs_options {
-    /// Default tmpfs size for writable layer
+    /// Default tmpfs size for writable layer (in MB)
     pub const TMPFS_SIZE_MB: usize = 1024;
 
     /// Overlayfs mount options
     pub const OVERLAYFS_OPTIONS: &[&str] =
         &["metacopy=off", "redirect_dir=off", "index=off", "xino=off"];
+}
+
+/// Virtual machine resource defaults
+pub mod vm_defaults {
+    /// Default number of CPUs allocated to a Box
+    pub const DEFAULT_CPUS: u8 = 1;
+
+    /// Default memory in MiB allocated to a Box
+    pub const DEFAULT_MEMORY_MIB: u32 = 2048;
 }
 
 /// File naming patterns

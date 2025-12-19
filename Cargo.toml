@@ -14,7 +14,7 @@ exclude = ["build/tmp", "target", ".venv", "examples/*/.venv"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.2"
 edition = "2024"
 authors = ["Dorian Zheng <https://github.com/dorianzheng>"]
 license = "Apache-2.0"

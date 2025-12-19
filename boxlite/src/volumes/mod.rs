@@ -3,7 +3,7 @@
 //! Provides volume configuration managers:
 //! - `GuestVolumeManager` - Manages virtiofs shares and block devices for guest VM
 //! - `ContainerVolumeManager` - Manages bind mounts for container namespace
-//! - `BlockDeviceManager` - Legacy block device manager (consider using GuestVolumeManager)
+//! - `BlockDeviceManager` - Low-level block device ID allocation (used by vmm_config stage)
 
 mod block_device;
 mod container_volume;

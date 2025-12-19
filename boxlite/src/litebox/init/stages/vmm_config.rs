@@ -1,11 +1,11 @@
-//! Stage 4: Configuration construction.
+//! Stage 4: VMM configuration.
 //!
-//! Builds InstanceSpec from prepared components.
-//! Includes disk creation (minimal I/O).
+//! Builds VMM InstanceSpec from prepared components.
+//! Includes COW disk creation for rootfs and guest rootfs.
 
 use crate::disk::{BackingFormat, DiskFormat, Qcow2Helper};
 use crate::litebox::init::types::{
-    ConfigInput, ConfigOutput, ResolvedVolume, RootfsPrepResult, resolve_user_volumes,
+    ConfigInput, ConfigOutput, ContainerRootfsPrepResult, ResolvedVolume, resolve_user_volumes,
 };
 use crate::net::{NetworkBackendConfig, NetworkBackendFactory};
 use crate::rootfs::operations::fix_rootfs_permissions;
@@ -67,7 +67,7 @@ pub async fn run(input: ConfigInput<'_>) -> BoxliteResult<ConfigOutput> {
     // For DiskImage mode, the disk IS the rootfs disk
     let rootfs_device_path = if matches!(
         input.rootfs.rootfs_result,
-        RootfsPrepResult::DiskImage { .. }
+        ContainerRootfsPrepResult::DiskImage { .. }
     ) {
         Some(disk_device_path)
     } else {
@@ -107,7 +107,7 @@ pub async fn run(input: ConfigInput<'_>) -> BoxliteResult<ConfigOutput> {
 
 fn build_fs_shares(
     layout: &crate::runtime::layout::BoxFilesystemLayout,
-    rootfs_result: &RootfsPrepResult,
+    rootfs_result: &ContainerRootfsPrepResult,
     user_volumes: &[ResolvedVolume],
     container_id: &str,
 ) -> BoxliteResult<FsShares> {
@@ -117,9 +117,9 @@ fn build_fs_shares(
     shares.add(mount_tags::SHARED, layout.shared_dir(), false);
 
     // Strategy-specific shares
-    if let RootfsPrepResult::Merged(path) = rootfs_result {
+    if let ContainerRootfsPrepResult::Merged(path) = rootfs_result {
         shares.add(mount_tags::ROOTFS, path.clone(), false);
-    } else if let RootfsPrepResult::Layers { layers_dir, .. } = rootfs_result {
+    } else if let ContainerRootfsPrepResult::Layers { layers_dir, .. } = rootfs_result {
         shares.add(mount_tags::LAYERS, layers_dir.clone(), true);
         let container_layout = layout.shared_layout().container(container_id);
         let container_root = container_layout.root();
@@ -223,13 +223,13 @@ fn setup_networking(
 async fn create_disks(
     layout: &crate::runtime::layout::BoxFilesystemLayout,
     _image: &crate::images::ImageObject,
-    rootfs_result: &RootfsPrepResult,
+    rootfs_result: &ContainerRootfsPrepResult,
 ) -> BoxliteResult<crate::disk::Disk> {
     let qcow2_helper = Qcow2Helper::new();
     let disk_path = layout.disk_path();
 
     // Check if using disk-based rootfs
-    if let RootfsPrepResult::DiskImage {
+    if let ContainerRootfsPrepResult::DiskImage {
         base_disk_path,
         disk_size,
     } = rootfs_result

@@ -16,9 +16,9 @@
 //! Sequential: Config → Spawn → Guest
 //! ```
 
-pub mod config;
+pub mod container_rootfs;
 pub mod filesystem;
-pub mod guest;
+pub mod guest_init;
 pub mod guest_rootfs;
-pub mod rootfs;
 pub mod spawn;
+pub mod vmm_config;

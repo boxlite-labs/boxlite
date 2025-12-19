@@ -2,7 +2,9 @@
 //!
 //! Sends init configuration to guest and starts container.
 
-use crate::litebox::init::types::{GuestInput, GuestOutput, ResolvedVolume, RootfsPrepResult};
+use crate::litebox::init::types::{
+    ContainerRootfsPrepResult, GuestInput, GuestOutput, ResolvedVolume,
+};
 use crate::portal::interfaces::{
     GuestInitConfig, NetworkInitConfig, RootfsInitConfig, VolumeConfig as GuestVolumeConfig,
 };
@@ -19,7 +21,7 @@ pub async fn run(input: GuestInput) -> BoxliteResult<GuestOutput> {
 
     // Build guest init config
     let guest_init_config = build_guest_init_config(
-        &input.rootfs_result,
+        &input.container_rootfs_result,
         &input.user_volumes,
         &input.guest_shared_layout,
         container_id_str,
@@ -47,7 +49,7 @@ pub async fn run(input: GuestInput) -> BoxliteResult<GuestOutput> {
 }
 
 fn build_guest_init_config(
-    rootfs_result: &RootfsPrepResult,
+    container_rootfs_result: &ContainerRootfsPrepResult,
     user_volumes: &[ResolvedVolume],
     guest_layout: &SharedGuestLayout,
     container_id: &str,
@@ -71,8 +73,8 @@ fn build_guest_init_config(
         false,
     )];
 
-    let rootfs = match rootfs_result {
-        RootfsPrepResult::Merged(_) => {
+    let rootfs = match container_rootfs_result {
+        ContainerRootfsPrepResult::Merged(_) => {
             volumes.push(GuestVolumeConfig::virtiofs(
                 mount_tags::ROOTFS,
                 &rootfs_path_str,
@@ -82,7 +84,7 @@ fn build_guest_init_config(
                 path: rootfs_path_str,
             }
         }
-        RootfsPrepResult::Layers { layer_names, .. } => {
+        ContainerRootfsPrepResult::Layers { layer_names, .. } => {
             volumes.push(GuestVolumeConfig::virtiofs(
                 mount_tags::LAYERS,
                 guest_paths::LAYERS_DIR,
@@ -101,7 +103,7 @@ fn build_guest_init_config(
                 copy_layers: true,
             }
         }
-        RootfsPrepResult::DiskImage { .. } => {
+        ContainerRootfsPrepResult::DiskImage { .. } => {
             let device =
                 rootfs_device_path.expect("rootfs_device_path must be set for DiskImage mode");
 

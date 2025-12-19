@@ -1,13 +1,13 @@
-//! Stage 2: Rootfs preparation.
+//! Stage 2: Container rootfs preparation.
 //!
-//! Pulls container image and prepares rootfs:
+//! Pulls container image and prepares container rootfs:
 //! - Disk-based: Creates ext4 disk image from merged layers (fast boot)
 //! - Overlayfs: Extracts layers for guest-side overlayfs (flexible)
 
 use crate::disk::create_ext4_from_dir;
 use crate::images::ContainerConfig;
 use crate::litebox::init::types::{
-    RootfsInput, RootfsOutput, RootfsPrepResult, USE_DISK_ROOTFS, USE_OVERLAYFS,
+    ContainerRootfsPrepResult, RootfsInput, RootfsOutput, USE_DISK_ROOTFS, USE_OVERLAYFS,
 };
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 
@@ -68,7 +68,7 @@ async fn pull_image(
 
 async fn prepare_overlayfs_layers(
     image: &crate::images::ImageObject,
-) -> BoxliteResult<RootfsPrepResult> {
+) -> BoxliteResult<ContainerRootfsPrepResult> {
     let layer_paths = image.layer_extracted().await?;
 
     if layer_paths.is_empty() {
@@ -97,7 +97,7 @@ async fn prepare_overlayfs_layers(
         layer_names.len()
     );
 
-    Ok(RootfsPrepResult::Layers {
+    Ok(ContainerRootfsPrepResult::Layers {
         layers_dir,
         layer_names,
     })
@@ -112,7 +112,7 @@ async fn prepare_overlayfs_layers(
 async fn prepare_disk_rootfs(
     runtime: &crate::runtime::RuntimeInner,
     image: &crate::images::ImageObject,
-) -> BoxliteResult<RootfsPrepResult> {
+) -> BoxliteResult<ContainerRootfsPrepResult> {
     // Check if we already have a cached disk image for this image
     if let Some(disk) = image.disk_image().await {
         let disk_path = disk.path().to_path_buf();
@@ -129,7 +129,7 @@ async fn prepare_disk_rootfs(
         // Leak the disk to prevent cleanup (it's a cached persistent disk)
         let _ = disk.leak();
 
-        return Ok(RootfsPrepResult::DiskImage {
+        return Ok(ContainerRootfsPrepResult::DiskImage {
             base_disk_path: disk_path,
             disk_size,
         });
@@ -194,7 +194,7 @@ async fn prepare_disk_rootfs(
 
     // Cleanup: temp_dir is dropped automatically
 
-    Ok(RootfsPrepResult::DiskImage {
+    Ok(ContainerRootfsPrepResult::DiskImage {
         base_disk_path: final_path,
         disk_size,
     })

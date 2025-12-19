@@ -1,6 +1,10 @@
-//! Guest-level volume management.
+//! Guest VM volume management.
 //!
-//! Manages virtiofs shares and block devices for the guest VM layer.
+//! Manages volumes visible to the guest VM:
+//! - Virtiofs shares (host directory → guest mount point)
+//! - Block devices (disk image → /dev/vdX)
+//!
+//! Generates configuration for both VMM layer and guest mount instructions.
 
 use std::path::{Path, PathBuf};
 

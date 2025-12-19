@@ -1,6 +1,7 @@
-//! Container-level volume management.
+//! Container volume management.
 //!
-//! Manages bind mounts for the container layer.
+//! Manages bind mounts from guest VM paths into container namespace.
+//! Works with GuestVolumeManager to set up the underlying virtiofs shares.
 
 use std::path::PathBuf;
 

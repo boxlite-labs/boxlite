@@ -154,7 +154,7 @@ impl InitPipeline {
             // Stage 2: Rootfs preparation (pulls image)
             async {
                 let start = Instant::now();
-                let result = stages::rootfs::run(RootfsInput {
+                let result = stages::container_rootfs::run(RootfsInput {
                     options: &self.options,
                     runtime: &self.runtime,
                 })
@@ -198,7 +198,7 @@ impl InitPipeline {
 
         // Stage 4: Config construction
         let stage4_start = Instant::now();
-        let config_output = stages::config::run(ConfigInput {
+        let config_output = stages::vmm_config::run(ConfigInput {
             options: &self.options,
             layout: &fs_output.layout,
             rootfs: &rootfs_output,
@@ -238,9 +238,9 @@ impl InitPipeline {
 
         // Stage 6: Guest initialization
         let stage6_start = Instant::now();
-        let guest_output = stages::guest::run(GuestInput {
+        let guest_output = stages::guest_init::run(GuestInput {
             guest_session: spawn_output.guest_session,
-            rootfs_result: rootfs_output.rootfs_result,
+            container_rootfs_result: rootfs_output.rootfs_result,
             container_config: rootfs_output.container_config,
             user_volumes: config_output.user_volumes,
             guest_shared_layout: fs_output.layout.guest_shared_layout(),

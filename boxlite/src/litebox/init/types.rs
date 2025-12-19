@@ -93,7 +93,7 @@ pub fn resolve_user_volumes(volumes: &[VolumeSpec]) -> BoxliteResult<Vec<Resolve
 
 /// Result of rootfs preparation - either merged, separate layers, or disk image.
 #[derive(Debug)]
-pub enum RootfsPrepResult {
+pub enum ContainerRootfsPrepResult {
     /// Single merged directory (all layers merged on host)
     #[allow(dead_code)]
     Merged(PathBuf),
@@ -166,7 +166,7 @@ pub struct RootfsInput<'a> {
 /// Output from rootfs stage.
 pub struct RootfsOutput {
     pub container_config: ContainerConfig,
-    pub rootfs_result: RootfsPrepResult,
+    pub rootfs_result: ContainerRootfsPrepResult,
     pub image: ImageObject,
 }
 
@@ -220,7 +220,7 @@ pub struct SpawnOutput {
 /// Input for guest initialization stage.
 pub struct GuestInput {
     pub guest_session: GuestSession,
-    pub rootfs_result: RootfsPrepResult,
+    pub container_rootfs_result: ContainerRootfsPrepResult,
     pub container_config: ContainerConfig,
     pub user_volumes: Vec<ResolvedVolume>,
     /// Guest shared layout for constructing guest-side paths.

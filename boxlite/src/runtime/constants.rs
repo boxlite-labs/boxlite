@@ -33,6 +33,8 @@ pub mod dirs {
     /// Base directory name for BoxLite data
     pub const BOXLITE_DIR: &str = ".boxlite";
 
+    pub const DB_DIR: &str = "db";
+
     /// Subdirectory for images layers
     pub const IMAGES_DIR: &str = "images";
 

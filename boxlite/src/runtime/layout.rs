@@ -55,6 +55,10 @@ impl FilesystemLayout {
         &self.home_dir
     }
 
+    pub fn db_dir(&self) -> PathBuf {
+        self.home_dir.join(const_dirs::DB_DIR)
+    }
+
     pub fn images_dir(&self) -> PathBuf {
         self.home_dir.join(const_dirs::IMAGES_DIR)
     }

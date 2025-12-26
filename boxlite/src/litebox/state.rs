@@ -119,16 +119,19 @@ impl BoxStatus {
             BoxStatus::Stopped => "stopped",
         }
     }
+}
 
-    /// Parse from database string.
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for BoxStatus {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "unknown" => Some(BoxStatus::Unknown),
-            "starting" => Some(BoxStatus::Starting),
-            "running" => Some(BoxStatus::Running),
-            "stopping" => Some(BoxStatus::Stopping),
-            "stopped" => Some(BoxStatus::Stopped),
-            _ => None,
+            "unknown" => Ok(BoxStatus::Unknown),
+            "starting" => Ok(BoxStatus::Starting),
+            "running" => Ok(BoxStatus::Running),
+            "stopping" => Ok(BoxStatus::Stopping),
+            "stopped" => Ok(BoxStatus::Stopped),
+            _ => Err(()),
         }
     }
 }
@@ -363,11 +366,11 @@ mod tests {
 
     #[test]
     fn test_status_from_str() {
-        assert_eq!(BoxStatus::from_str("unknown"), Some(BoxStatus::Unknown));
-        assert_eq!(BoxStatus::from_str("starting"), Some(BoxStatus::Starting));
-        assert_eq!(BoxStatus::from_str("running"), Some(BoxStatus::Running));
-        assert_eq!(BoxStatus::from_str("stopping"), Some(BoxStatus::Stopping));
-        assert_eq!(BoxStatus::from_str("stopped"), Some(BoxStatus::Stopped));
-        assert_eq!(BoxStatus::from_str("invalid"), None);
+        assert_eq!("unknown".parse(), Ok(BoxStatus::Unknown));
+        assert_eq!("starting".parse(), Ok(BoxStatus::Starting));
+        assert_eq!("running".parse(), Ok(BoxStatus::Running));
+        assert_eq!("stopping".parse(), Ok(BoxStatus::Stopping));
+        assert_eq!("stopped".parse(), Ok(BoxStatus::Stopped));
+        assert!("invalid".parse::<BoxStatus>().is_err());
     }
 }

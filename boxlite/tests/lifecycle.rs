@@ -47,8 +47,8 @@ fn runtime_initialization_creates_empty_list() {
 #[tokio::test]
 async fn create_generates_unique_ulid_ids() {
     let ctx = TestContext::new();
-    let box1 = ctx.runtime.create(BoxOptions::default()).unwrap();
-    let box2 = ctx.runtime.create(BoxOptions::default()).unwrap();
+    let box1 = ctx.runtime.create(BoxOptions::default(), None).unwrap();
+    let box2 = ctx.runtime.create(BoxOptions::default(), None).unwrap();
 
     // IDs should be unique
     assert_ne!(box1.id(), box2.id());
@@ -73,7 +73,7 @@ async fn create_stores_custom_options() {
     };
 
     let ctx = TestContext::new();
-    let handle = ctx.runtime.create(options).unwrap();
+    let handle = ctx.runtime.create(options, None).unwrap();
     let box_id = handle.id().clone();
 
     let info = ctx.runtime.get_info(&box_id).unwrap().unwrap();
@@ -108,8 +108,8 @@ async fn list_info_returns_all_boxes() {
     assert_eq!(ctx.runtime.list_info().unwrap().len(), 0);
 
     // Create two boxes
-    let box1 = ctx.runtime.create(BoxOptions::default()).unwrap();
-    let box2 = ctx.runtime.create(BoxOptions::default()).unwrap();
+    let box1 = ctx.runtime.create(BoxOptions::default(), None).unwrap();
+    let box2 = ctx.runtime.create(BoxOptions::default(), None).unwrap();
 
     // List should show both boxes
     let boxes = ctx.runtime.list_info().unwrap();
@@ -131,11 +131,11 @@ async fn list_info_sorted_by_creation_time_newest_first() {
     let ctx = TestContext::new();
 
     // Create boxes with small delay to ensure different timestamps
-    let box1 = ctx.runtime.create(BoxOptions::default()).unwrap();
+    let box1 = ctx.runtime.create(BoxOptions::default(), None).unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-    let box2 = ctx.runtime.create(BoxOptions::default()).unwrap();
+    let box2 = ctx.runtime.create(BoxOptions::default(), None).unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-    let box3 = ctx.runtime.create(BoxOptions::default()).unwrap();
+    let box3 = ctx.runtime.create(BoxOptions::default(), None).unwrap();
 
     // List should be sorted newest first
     let boxes = ctx.runtime.list_info().unwrap();
@@ -163,7 +163,7 @@ async fn list_info_sorted_by_creation_time_newest_first() {
 #[tokio::test]
 async fn get_info_returns_box_metadata() {
     let ctx = TestContext::new();
-    let handle = ctx.runtime.create(BoxOptions::default()).unwrap();
+    let handle = ctx.runtime.create(BoxOptions::default(), None).unwrap();
     let box_id = handle.id().clone();
 
     // Get info from runtime
@@ -189,7 +189,7 @@ async fn get_info_returns_none_for_nonexistent() {
 #[tokio::test]
 async fn exists_returns_true_for_existing_box() {
     let ctx = TestContext::new();
-    let handle = ctx.runtime.create(BoxOptions::default()).unwrap();
+    let handle = ctx.runtime.create(BoxOptions::default(), None).unwrap();
     let box_id = handle.id().clone();
 
     assert!(ctx.runtime.exists(&box_id).unwrap());
@@ -228,7 +228,7 @@ async fn remove_nonexistent_returns_not_found() {
 #[tokio::test]
 async fn remove_stopped_box_succeeds() {
     let ctx = TestContext::new();
-    let handle = ctx.runtime.create(BoxOptions::default()).unwrap();
+    let handle = ctx.runtime.create(BoxOptions::default(), None).unwrap();
     let box_id = handle.id().clone();
 
     // Stop the box first
@@ -244,7 +244,7 @@ async fn remove_stopped_box_succeeds() {
 #[tokio::test]
 async fn remove_active_without_force_fails() {
     let ctx = TestContext::new();
-    let handle = ctx.runtime.create(BoxOptions::default()).unwrap();
+    let handle = ctx.runtime.create(BoxOptions::default(), None).unwrap();
     let box_id = handle.id().clone();
 
     // Box is in Starting state (active)
@@ -271,7 +271,7 @@ async fn remove_active_without_force_fails() {
 #[tokio::test]
 async fn remove_active_with_force_stops_and_removes() {
     let ctx = TestContext::new();
-    let handle = ctx.runtime.create(BoxOptions::default()).unwrap();
+    let handle = ctx.runtime.create(BoxOptions::default(), None).unwrap();
     let box_id = handle.id().clone();
 
     // Box is in Starting state (active)
@@ -288,7 +288,7 @@ async fn remove_active_with_force_stops_and_removes() {
 #[tokio::test]
 async fn remove_deletes_box_from_database() {
     let ctx = TestContext::new();
-    let handle = ctx.runtime.create(BoxOptions::default()).unwrap();
+    let handle = ctx.runtime.create(BoxOptions::default(), None).unwrap();
     let box_id = handle.id().clone();
 
     // Verify box exists before removal
@@ -308,7 +308,7 @@ async fn remove_deletes_box_from_database() {
 #[tokio::test]
 async fn stop_marks_box_as_stopped() {
     let ctx = TestContext::new();
-    let handle = ctx.runtime.create(BoxOptions::default()).unwrap();
+    let handle = ctx.runtime.create(BoxOptions::default(), None).unwrap();
     let box_id = handle.id().clone();
 
     // Stop the box
@@ -329,7 +329,7 @@ async fn stop_marks_box_as_stopped() {
 #[tokio::test]
 async fn litebox_info_returns_correct_metadata() {
     let ctx = TestContext::new();
-    let handle = ctx.runtime.create(BoxOptions::default()).unwrap();
+    let handle = ctx.runtime.create(BoxOptions::default(), None).unwrap();
     let box_id = handle.id().clone();
 
     // Get info from handle
@@ -356,8 +356,8 @@ async fn multiple_runtimes_are_isolated() {
     let ctx1 = TestContext::new();
     let ctx2 = TestContext::new();
 
-    let box1 = ctx1.runtime.create(BoxOptions::default()).unwrap();
-    let box2 = ctx2.runtime.create(BoxOptions::default()).unwrap();
+    let box1 = ctx1.runtime.create(BoxOptions::default(), None).unwrap();
+    let box2 = ctx2.runtime.create(BoxOptions::default(), None).unwrap();
 
     // Each runtime should only see its own box
     assert_eq!(ctx1.runtime.list_info().unwrap().len(), 1);
@@ -388,7 +388,7 @@ async fn boxes_persist_across_runtime_restart() {
             home_dir: home_dir.clone(),
         };
         let runtime = BoxliteRuntime::new(options).expect("Failed to create runtime");
-        let litebox = runtime.create(BoxOptions::default()).unwrap();
+        let litebox = runtime.create(BoxOptions::default(), None).unwrap();
         box_id = litebox.id().clone();
 
         // Box should be in database

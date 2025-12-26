@@ -233,6 +233,7 @@ mod tests {
         let now = Utc::now();
         let config = BoxConfig {
             id: "01HJK4TNRPQSXYZ8WM6NCVT9R5".to_string(),
+            name: None,
             created_at: now,
             options: BoxOptions {
                 cpus: Some(4),

@@ -38,6 +38,7 @@
 //! ```
 
 mod metrics;
+#[allow(clippy::module_inception)]
 mod pipeline;
 mod stage;
 mod task;

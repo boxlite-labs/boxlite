@@ -104,7 +104,7 @@ async fn build_config(
     layout: &crate::runtime::layout::BoxFilesystemLayout,
     rootfs_output: crate::litebox::init::types::ContainerRootfsOutput,
     guest_rootfs_output: crate::litebox::init::types::GuestRootfsOutput,
-    home_dir: &std::path::PathBuf,
+    home_dir: &std::path::Path,
     container_id: &crate::runtime::types::ContainerId,
 ) -> BoxliteResult<ConfigOutput> {
     // Transport setup
@@ -176,7 +176,7 @@ async fn build_config(
         guest_rootfs,
         network_config,
         network_backend_endpoint: None,
-        home_dir: home_dir.clone(),
+        home_dir: home_dir.to_path_buf(),
         console_output: None,
     };
 

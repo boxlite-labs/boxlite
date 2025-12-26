@@ -199,18 +199,17 @@ fn configure_guest_rootfs(
     disk: Option<crate::disk::Disk>,
     volume_mgr: &mut GuestVolumeManager,
 ) -> BoxliteResult<(GuestRootfs, Option<crate::disk::Disk>)> {
-    if let Some(ref disk) = disk {
-        if let Strategy::Disk { ref disk_path, .. } = guest_rootfs.strategy {
-            // Add disk to volume manager
-            let device_path =
-                volume_mgr.add_block_device(disk.path(), DiskFormat::Qcow2, false, None);
+    if let Some(ref disk) = disk
+        && let Strategy::Disk { ref disk_path, .. } = guest_rootfs.strategy
+    {
+        // Add disk to volume manager
+        let device_path = volume_mgr.add_block_device(disk.path(), DiskFormat::Qcow2, false, None);
 
-            // Update strategy with device path
-            guest_rootfs.strategy = Strategy::Disk {
-                disk_path: disk_path.clone(),
-                device_path: Some(device_path),
-            };
-        }
+        // Update strategy with device path
+        guest_rootfs.strategy = Strategy::Disk {
+            disk_path: disk_path.clone(),
+            device_path: Some(device_path),
+        };
     }
 
     Ok((guest_rootfs, disk))

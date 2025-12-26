@@ -196,15 +196,15 @@ impl RuntimeInnerImpl {
 
         // Delete box directory
         let box_home = config.box_home;
-        if box_home.exists() {
-            if let Err(e) = std::fs::remove_dir_all(&box_home) {
-                tracing::warn!(
-                    box_id = %id,
-                    path = %box_home.display(),
-                    error = %e,
-                    "Failed to cleanup box directory"
-                );
-            }
+        if box_home.exists()
+            && let Err(e) = std::fs::remove_dir_all(&box_home)
+        {
+            tracing::warn!(
+                box_id = %id,
+                path = %box_home.display(),
+                error = %e,
+                "Failed to cleanup box directory"
+            );
         }
 
         tracing::info!(box_id = %id, "Removed box");
@@ -225,13 +225,13 @@ impl RuntimeInnerImpl {
         name: Option<String>,
     ) -> BoxliteResult<LiteBox> {
         // Validate name uniqueness if provided
-        if let Some(ref name) = name {
-            if self.box_manager.get_by_name(name)?.is_some() {
-                return Err(BoxliteError::InvalidArgument(format!(
-                    "box with name '{}' already exists",
-                    name
-                )));
-            }
+        if let Some(ref name) = name
+            && self.box_manager.get_by_name(name)?.is_some()
+        {
+            return Err(BoxliteError::InvalidArgument(format!(
+                "box with name '{}' already exists",
+                name
+            )));
         }
 
         // Initialize box variables with defaults

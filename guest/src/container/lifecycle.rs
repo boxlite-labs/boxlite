@@ -5,6 +5,7 @@
 
 use super::command::ContainerCommand;
 use super::spec::UserMount;
+use super::stdio::ContainerStdio;
 use super::{kill, start};
 use crate::layout::GuestLayout;
 use boxlite_shared::errors::BoxliteResult;
@@ -43,6 +44,10 @@ pub struct Container {
     state_root: PathBuf,
     bundle_path: PathBuf,
     env: HashMap<String, String>,
+    /// Stdio pipes that keep init process alive.
+    /// Dropping this closes pipes → init gets EOF → init exits.
+    #[allow(dead_code)]
+    stdio: ContainerStdio,
 }
 
 impl Container {
@@ -113,8 +118,12 @@ impl Container {
             &user_mounts,
         )?;
 
-        // Create and start container
-        start::create_container(container_id, &state_root, &bundle_path)?;
+        // Create stdio pipes before container creation.
+        // These keep the init process alive by holding stdin open.
+        let (stdio, init_fds) = ContainerStdio::new()?;
+
+        // Create and start container with custom stdio
+        start::create_container_with_stdio(container_id, &state_root, &bundle_path, init_fds)?;
         start::start_container(container_id, &state_root)?;
 
         Ok(Self {
@@ -122,6 +131,7 @@ impl Container {
             state_root,
             bundle_path,
             env: env_map,
+            stdio,
         })
     }
 
@@ -144,9 +154,23 @@ impl Container {
         match start::load_container_status(&container_state_path) {
             Ok(status) => {
                 use libcontainer::container::ContainerStatus;
-                matches!(status, ContainerStatus::Running)
+                let is_running = matches!(status, ContainerStatus::Running);
+                tracing::trace!(
+                    container_id = %self.id,
+                    status = ?status,
+                    is_running = is_running,
+                    "Container status check"
+                );
+                is_running
             }
-            Err(_) => false,
+            Err(e) => {
+                tracing::warn!(
+                    container_id = %self.id,
+                    error = %e,
+                    "Failed to load container status, assuming not running"
+                );
+                false
+            }
         }
     }
 

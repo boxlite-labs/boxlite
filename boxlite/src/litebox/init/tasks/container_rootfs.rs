@@ -1,21 +1,118 @@
-//! Stage 2: Container rootfs preparation.
+//! Task: Container rootfs preparation.
 //!
 //! Pulls container image and prepares container rootfs:
 //! - Disk-based: Creates ext4 disk image from merged layers (fast boot)
 //! - Overlayfs: Extracts layers for guest-side overlayfs (flexible)
+//!
+//! For restart (reuse_rootfs=true), opens existing COW disk instead of creating new.
 
-use crate::disk::create_ext4_from_dir;
+use super::{InitCtx, log_task_error, task_start};
+use crate::disk::{BackingFormat, Disk, DiskFormat, Qcow2Helper, create_ext4_from_dir};
 use crate::images::ContainerConfig;
 use crate::litebox::init::types::{
     ContainerRootfsInput, ContainerRootfsOutput, ContainerRootfsPrepResult, USE_DISK_ROOTFS,
     USE_OVERLAYFS,
 };
+use crate::pipeline::PipelineTask;
+use async_trait::async_trait;
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 
-/// Pull image and prepare rootfs.
+pub struct ContainerRootfsTask;
+
+#[async_trait]
+impl PipelineTask<InitCtx> for ContainerRootfsTask {
+    async fn run(self: Box<Self>, ctx: InitCtx) -> BoxliteResult<()> {
+        let task_name = self.name();
+        let box_id = task_start(&ctx, task_name).await;
+
+        let (options, runtime, layout, reuse_rootfs) = {
+            let ctx = ctx.lock().await;
+            let layout = ctx
+                .fs_output
+                .as_ref()
+                .ok_or_else(|| BoxliteError::Internal("filesystem task must run first".into()))?
+                .layout
+                .clone();
+            (
+                ctx.config.options.clone(),
+                ctx.runtime.clone(),
+                layout,
+                ctx.should_reuse_rootfs(),
+            )
+        };
+
+        let output = run_container_rootfs(ContainerRootfsInput {
+            options: &options,
+            runtime: &runtime,
+            layout: &layout,
+            reuse_rootfs,
+        })
+        .await
+        .inspect_err(|e| log_task_error(&box_id, task_name, e))?;
+
+        let mut ctx = ctx.lock().await;
+        ctx.rootfs_output = Some(output);
+
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "container_rootfs_prep"
+    }
+}
+
+/// Pull image and prepare rootfs, then create or reuse COW disk.
 ///
-/// **Single Responsibility**: Image pulling + rootfs preparation.
-pub async fn run(input: ContainerRootfsInput<'_>) -> BoxliteResult<ContainerRootfsOutput> {
+/// For fresh start: creates new COW disk from base image
+/// For restart: reuses existing COW disk (preserves user data)
+async fn run_container_rootfs(
+    input: ContainerRootfsInput<'_>,
+) -> BoxliteResult<ContainerRootfsOutput> {
+    let disk_path = input.layout.disk_path();
+
+    // For restart, reuse existing COW disk
+    if input.reuse_rootfs {
+        tracing::info!(
+            disk_path = %disk_path.display(),
+            "Restart mode: reusing existing container rootfs disk"
+        );
+
+        if !disk_path.exists() {
+            return Err(BoxliteError::Storage(format!(
+                "Cannot restart: container rootfs disk not found at {}",
+                disk_path.display()
+            )));
+        }
+
+        // Open existing disk as persistent (won't be deleted on drop)
+        let disk = Disk::new(disk_path.clone(), DiskFormat::Qcow2, true);
+
+        // For restart, we still need container_config for environment etc.
+        // Pull image to get config (uses cache, fast)
+        let image_ref = match &input.options.rootfs {
+            crate::runtime::options::RootfsSpec::Image(r) => r,
+            crate::runtime::options::RootfsSpec::RootfsPath(_) => {
+                return Err(BoxliteError::Storage(
+                    "Direct rootfs paths not yet supported".into(),
+                ));
+            }
+        };
+        let image = pull_image(input.runtime, image_ref).await?;
+        let image_config = image.load_config().await?;
+        let mut container_config = ContainerConfig::from_oci_config(&image_config)?;
+        if !input.options.env.is_empty() {
+            container_config.merge_env(input.options.env.clone());
+        }
+
+        // For restart, rootfs_init is not used (container already exists)
+        // but we need a placeholder - use DiskImage with empty device path
+        return Ok(ContainerRootfsOutput {
+            container_config,
+            disk,
+        });
+    }
+
+    // Fresh start: pull image and prepare rootfs
     let image_ref = match &input.options.rootfs {
         crate::runtime::options::RootfsSpec::Image(r) => r,
         crate::runtime::options::RootfsSpec::RootfsPath(_) => {
@@ -25,20 +122,22 @@ pub async fn run(input: ContainerRootfsInput<'_>) -> BoxliteResult<ContainerRoot
         }
     };
 
-    // Pull image
+    // Pull image (returns cached if already pulled)
     let image = pull_image(input.runtime, image_ref).await?;
 
-    // Prepare rootfs based on strategy
+    // Prepare base rootfs (get or create cached base disk)
     let rootfs_result = if USE_DISK_ROOTFS {
         prepare_disk_rootfs(input.runtime, &image).await?
     } else if USE_OVERLAYFS {
         prepare_overlayfs_layers(&image).await?
     } else {
         return Err(BoxliteError::Storage(
-            "Merged rootfs not supported in parallel pipeline. Use overlayfs or disk rootfs."
-                .into(),
+            "Merged rootfs not supported. Use overlayfs or disk rootfs.".into(),
         ));
     };
+
+    // Create COW disk from base
+    let disk = create_cow_disk(&rootfs_result, input.layout)?;
 
     // Load container config
     let image_config = image.load_config().await?;
@@ -51,19 +150,58 @@ pub async fn run(input: ContainerRootfsInput<'_>) -> BoxliteResult<ContainerRoot
 
     Ok(ContainerRootfsOutput {
         container_config,
-        rootfs_result,
+        disk,
     })
+}
+
+/// Create COW disk from base rootfs.
+fn create_cow_disk(
+    rootfs_result: &ContainerRootfsPrepResult,
+    layout: &crate::runtime::layout::BoxFilesystemLayout,
+) -> BoxliteResult<Disk> {
+    match rootfs_result {
+        ContainerRootfsPrepResult::DiskImage {
+            base_disk_path,
+            disk_size,
+        } => {
+            let qcow2_helper = Qcow2Helper::new();
+            let cow_disk_path = layout.disk_path();
+            let temp_disk = qcow2_helper.create_cow_child_disk(
+                base_disk_path,
+                BackingFormat::Raw,
+                &cow_disk_path,
+                *disk_size,
+            )?;
+
+            // Make disk persistent so it survives stop/restart
+            // create_cow_child_disk returns non-persistent disk, but we want to preserve
+            // COW disks across box restarts (only delete on remove)
+            let disk_path = temp_disk.leak(); // Prevent cleanup
+            let disk = Disk::new(disk_path, DiskFormat::Qcow2, true); // persistent=true
+
+            tracing::info!(
+                cow_disk = %cow_disk_path.display(),
+                base_disk = %base_disk_path.display(),
+                "Created container rootfs COW overlay (persistent)"
+            );
+
+            Ok(disk)
+        }
+        ContainerRootfsPrepResult::Layers { .. } => Err(BoxliteError::Internal(
+            "Layers mode requires overlayfs - disk creation not applicable".into(),
+        )),
+        ContainerRootfsPrepResult::Merged(_) => {
+            Err(BoxliteError::Internal("Merged mode not supported".into()))
+        }
+    }
 }
 
 async fn pull_image(
     runtime: &crate::runtime::RuntimeInner,
     image_ref: &str,
 ) -> BoxliteResult<crate::images::ImageObject> {
-    let image_manager = {
-        let state = runtime.acquire_read()?;
-        state.image_manager.clone()
-    };
-    image_manager.pull(image_ref).await
+    // ImageManager has internal locking - direct access
+    runtime.image_manager.pull(image_ref).await
 }
 
 async fn prepare_overlayfs_layers(
@@ -148,7 +286,7 @@ async fn prepare_disk_rootfs(
     }
 
     // Create a temporary directory for merged rootfs within boxlite home (same filesystem as destination)
-    let temp_base = runtime.non_sync_state.layout.temp_dir();
+    let temp_base = runtime.layout.temp_dir();
     let temp_dir = tempfile::tempdir_in(&temp_base)
         .map_err(|e| BoxliteError::Storage(format!("Failed to create temp directory: {}", e)))?;
     let merged_path = temp_dir.path().join("merged");

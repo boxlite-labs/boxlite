@@ -1,4 +1,4 @@
-//! Integration tests for net backend selection and configuration.
+//! Integration tests for network backend selection and configuration.
 
 use boxlite::net::{NetworkBackendConfig, NetworkBackendFactory};
 
@@ -29,9 +29,9 @@ fn test_network_config_creation() {
     assert_eq!(config.port_mappings, port_mappings);
 }
 
-#[test]
+#[tokio::test]
 #[cfg(any(feature = "libslirp-backend", feature = "gvproxy-backend"))]
-fn test_backend_trait_send_sync() {
+async fn test_backend_trait_send_sync() {
     use boxlite::net::NetworkBackend;
 
     // Verify NetworkBackend trait objects are Send + Sync

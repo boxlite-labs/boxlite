@@ -21,8 +21,8 @@ use std::sync::Arc;
 
 use tokio::runtime::Runtime as TokioRuntime;
 
+use boxlite::BoxID;
 use boxlite::litebox::LiteBox;
-use boxlite::management::BoxID;
 use boxlite::runtime::BoxliteRuntime;
 use boxlite::runtime::options::{BoxOptions, BoxliteOptions};
 use boxlite_shared::errors::BoxliteError;
@@ -198,15 +198,18 @@ pub unsafe extern "C" fn boxlite_create_box(
         }
     };
 
-    // Create box
-    let result = runtime_ref.runtime.create(options);
+    // Create box (no name support in C API yet)
+    let result = runtime_ref.runtime.create(options, None);
 
     match result {
-        Ok((box_id, handle)) => Box::into_raw(Box::new(CBoxHandle {
-            handle,
-            box_id,
-            tokio_rt: runtime_ref.tokio_rt.clone(),
-        })),
+        Ok(handle) => {
+            let box_id = handle.id().clone();
+            Box::into_raw(Box::new(CBoxHandle {
+                handle,
+                box_id,
+                tokio_rt: runtime_ref.tokio_rt.clone(),
+            }))
+        }
         Err(e) => {
             if !out_error.is_null() {
                 *out_error = error_to_c_string(e);
@@ -346,7 +349,7 @@ pub unsafe extern "C" fn boxlite_execute(
     }
 }
 
-/// Shutdown a box
+/// Stop a box
 ///
 /// # Arguments
 /// * `handle` - Box handle (will be consumed/freed)
@@ -355,7 +358,7 @@ pub unsafe extern "C" fn boxlite_execute(
 /// # Returns
 /// 0 on success, -1 on failure
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn boxlite_shutdown_box(
+pub unsafe extern "C" fn boxlite_stop_box(
     handle: *mut CBoxHandle,
     out_error: *mut *mut c_char,
 ) -> c_int {
@@ -370,21 +373,8 @@ pub unsafe extern "C" fn boxlite_shutdown_box(
 
     let handle_box = unsafe { Box::from_raw(handle) };
 
-    // Block on async shutdown using current tokio runtime
-    let result = match tokio::runtime::Handle::try_current() {
-        Ok(handle_rt) => handle_rt.block_on(handle_box.handle.shutdown()),
-        Err(_) => {
-            // No runtime available - return error
-            if !out_error.is_null() {
-                unsafe {
-                    *out_error = error_to_c_string(BoxliteError::Internal(
-                        "no tokio runtime available for shutdown".into(),
-                    ));
-                }
-            }
-            return -1;
-        }
-    };
+    // Block on async stop using the stored tokio runtime
+    let result = handle_box.tokio_rt.block_on(handle_box.handle.stop());
 
     match result {
         Ok(_) => 0,

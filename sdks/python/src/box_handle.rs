@@ -19,6 +19,11 @@ impl PyBox {
         Ok(self.handle.id().to_string())
     }
 
+    #[getter]
+    fn name(&self) -> PyResult<Option<String>> {
+        Ok(self.handle.name().map(|s| s.to_string()))
+    }
+
     fn info(&self) -> PyResult<PyBoxInfo> {
         let info = self.handle.info().map_err(map_err)?;
         Ok(PyBoxInfo::from(info))
@@ -58,12 +63,13 @@ impl PyBox {
         })
     }
 
-    fn shutdown<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
+    /// Stop the box (preserves state for restart).
+    fn stop<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
         let handle = Arc::clone(&self.handle);
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let was_shutdown = handle.shutdown().await.map_err(map_err)?;
-            Ok(was_shutdown)
+            handle.stop().await.map_err(map_err)?;
+            Ok(())
         })
     }
 
@@ -93,7 +99,7 @@ impl PyBox {
         let handle = Arc::clone(&slf.handle);
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let _ = handle.shutdown().await.map_err(map_err)?;
+            handle.stop().await.map_err(map_err)?;
             Ok(())
         })
     }

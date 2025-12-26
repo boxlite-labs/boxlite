@@ -1,4 +1,4 @@
-//! Integration tests for runtime locking behavior.
+//! Integration tests for runtime initialization and locking behavior.
 
 use boxlite::BoxliteRuntime;
 use boxlite::runtime::options::BoxliteOptions;

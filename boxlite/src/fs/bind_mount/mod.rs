@@ -31,6 +31,7 @@ pub fn create_bind_mount(config: &BindMountConfig) -> BoxliteResult<BindMountHan
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 pub fn create_bind_mount(_config: &BindMountConfig) -> BoxliteResult<BindMountHandle> {
     Err(BoxliteError::Unsupported(
         "Bind mounts are only supported on Linux".to_string(),
@@ -91,6 +92,7 @@ fn has_cap_sys_admin() -> bool {
 
 /// Trait for bind mount implementations.
 #[cfg(target_os = "linux")]
+#[allow(dead_code)]
 pub(crate) trait BindMountImpl: Send + Sync {
     fn target(&self) -> &std::path::Path;
     fn unmount(&mut self) -> BoxliteResult<()>;

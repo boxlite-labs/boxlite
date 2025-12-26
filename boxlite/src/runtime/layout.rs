@@ -55,6 +55,10 @@ impl FilesystemLayout {
         &self.home_dir
     }
 
+    pub fn db_dir(&self) -> PathBuf {
+        self.home_dir.join(const_dirs::DB_DIR)
+    }
+
     pub fn images_dir(&self) -> PathBuf {
         self.home_dir.join(const_dirs::IMAGES_DIR)
     }
@@ -93,7 +97,6 @@ impl FilesystemLayout {
         std::fs::create_dir_all(&self.home_dir)
             .map_err(|e| BoxliteError::Storage(format!("failed to create home: {e}")))?;
 
-        let _ = std::fs::remove_dir_all(self.boxes_dir());
         std::fs::create_dir_all(self.boxes_dir())
             .map_err(|e| BoxliteError::Storage(format!("failed to create boxes dir: {e}")))?;
 

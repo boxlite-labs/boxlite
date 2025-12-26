@@ -6,5 +6,7 @@ pub mod options;
 pub mod types;
 
 mod core;
+pub(crate) mod rt_impl;
+
 pub use core::BoxliteRuntime;
-pub(crate) use core::RuntimeInner;
+pub(crate) use rt_impl::RuntimeInner;

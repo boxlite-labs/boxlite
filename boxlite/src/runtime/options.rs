@@ -28,9 +28,8 @@ impl Default for BoxliteOptions {
 }
 
 /// Options used when constructing a box.
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BoxOptions {
-    pub name: Option<String>,
     pub cpus: Option<u8>,
     pub memory_mib: Option<u32>,
     pub working_dir: Option<String>,
@@ -48,6 +47,38 @@ pub struct BoxOptions {
     /// Defaults to false.
     #[serde(default)]
     pub isolate_mounts: bool,
+
+    /// Automatically remove box when stopped.
+    ///
+    /// When true (default), the box is removed from the database and its
+    /// files are deleted when `stop()` is called. This is similar to
+    /// Docker's `--rm` flag.
+    ///
+    /// When false, the box is preserved after stop and can be restarted
+    /// with `runtime.get(box_id)`.
+    #[serde(default = "default_auto_remove")]
+    pub auto_remove: bool,
+}
+
+fn default_auto_remove() -> bool {
+    false
+}
+
+impl Default for BoxOptions {
+    fn default() -> Self {
+        Self {
+            cpus: None,
+            memory_mib: None,
+            working_dir: None,
+            env: Vec::new(),
+            rootfs: RootfsSpec::default(),
+            volumes: Vec::new(),
+            network: NetworkSpec::default(),
+            ports: Vec::new(),
+            isolate_mounts: false,
+            auto_remove: default_auto_remove(),
+        }
+    }
 }
 
 impl BoxOptions {

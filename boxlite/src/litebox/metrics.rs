@@ -1,41 +1,42 @@
 //! Box metrics collection and aggregation
 
 use super::LiteBox;
-use super::init::BoxInner;
 use super::lifecycle;
+use crate::litebox::inner::BoxInner;
 use crate::metrics::BoxMetrics;
 use boxlite_shared::errors::BoxliteResult;
 use std::sync::atomic::Ordering;
 
-/// Get unified metrics (operational + system + network).
+/// Get unified metrics (operational + system).
 ///
 /// Returns a snapshot of:
 /// - Operational metrics: Commands executed, errors, bytes transferred (monotonic counters)
 /// - System metrics: CPU usage, memory usage (current values)
-/// - Network metrics: Bandwidth, TCP connections, errors (from network backend)
 /// - Timing metrics: Spawn and boot duration
 ///
+/// Note: Network metrics are not available from host process since gvproxy
+/// now runs in the shim subprocess to survive detach operations.
+///
 /// All operational counters never reset - delta calculation is caller's responsibility.
-/// System and network metrics are fetched fresh on every call.
+/// System metrics are fetched fresh on every call.
 pub(crate) async fn metrics(litebox: &LiteBox) -> BoxliteResult<BoxMetrics> {
     let inner = lifecycle::ensure_ready(litebox).await?;
 
-    // Fetch system metrics from controller
-    let (cpu_percent, memory_bytes) = fetch_system_metrics(&inner.controller)?;
+    // Fetch system metrics from handler
+    let (cpu_percent, memory_bytes) = fetch_system_metrics(&inner.handler)?;
 
-    // Fetch network metrics from backend if available
-    let (network_bytes_sent, network_bytes_received, network_tcp_connections, network_tcp_errors) =
-        fetch_network_metrics(&inner.network_backend);
+    // Note: Network metrics are not available - gvproxy runs in shim subprocess
+    // to survive detach operations. Network stats could be exposed via gRPC in the future.
 
-    // Combine operational (from storage) + system (from controller) + network (from backend)
+    // Combine operational (from storage) + system (from controller)
     Ok(BoxMetrics::from_storage(
         &inner.metrics,
         cpu_percent,
         memory_bytes,
-        network_bytes_sent,
-        network_bytes_received,
-        network_tcp_connections,
-        network_tcp_errors,
+        None, // network_bytes_sent - not available from host
+        None, // network_bytes_received - not available from host
+        None, // network_tcp_connections - not available from host
+        None, // network_tcp_errors - not available from host
     ))
 }
 
@@ -50,7 +51,6 @@ pub(super) fn instrument_exec_metrics(litebox: &LiteBox, inner: &BoxInner, is_er
     // Level 2: Runtime aggregate (lock-free!)
     litebox
         .runtime
-        .non_sync_state
         .runtime_metrics
         .total_commands
         .fetch_add(1, Ordering::Relaxed);
@@ -58,39 +58,19 @@ pub(super) fn instrument_exec_metrics(litebox: &LiteBox, inner: &BoxInner, is_er
     if is_error {
         litebox
             .runtime
-            .non_sync_state
             .runtime_metrics
             .total_exec_errors
             .fetch_add(1, Ordering::Relaxed);
     }
 }
 
-/// Fetch system metrics from controller.
+/// Fetch system metrics from handler.
 fn fetch_system_metrics(
-    controller: &std::sync::Mutex<Box<dyn crate::vmm::VmmController>>,
+    handler: &std::sync::Mutex<Box<dyn crate::vmm::controller::VmmHandler>>,
 ) -> BoxliteResult<(Option<f32>, Option<u64>)> {
-    let controller = controller.lock().map_err(|e| {
-        boxlite_shared::errors::BoxliteError::Internal(format!("controller lock poisoned: {}", e))
+    let handler = handler.lock().map_err(|e| {
+        boxlite_shared::errors::BoxliteError::Internal(format!("handler lock poisoned: {}", e))
     })?;
-    let raw = controller.metrics()?;
+    let raw = handler.metrics()?;
     Ok((raw.cpu_percent, raw.memory_bytes))
-}
-
-/// Fetch network metrics from backend if available.
-fn fetch_network_metrics(
-    network_backend: &Option<Box<dyn crate::net::NetworkBackend>>,
-) -> (Option<u64>, Option<u64>, Option<u64>, Option<u64>) {
-    if let Some(backend) = network_backend {
-        match backend.metrics() {
-            Ok(Some(net_metrics)) => (
-                Some(net_metrics.bytes_sent),
-                Some(net_metrics.bytes_received),
-                net_metrics.tcp_connections,
-                net_metrics.tcp_connection_errors,
-            ),
-            _ => (None, None, None, None),
-        }
-    } else {
-        (None, None, None, None)
-    }
 }

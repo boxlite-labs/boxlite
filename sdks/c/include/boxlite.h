@@ -104,7 +104,7 @@ int boxlite_execute(struct CBoxHandle *handle,
                     char **out_error);
 
 /**
- * Shutdown a box
+ * Stop a box
  *
  * # Arguments
  * * `handle` - Box handle (will be consumed/freed)
@@ -113,7 +113,7 @@ int boxlite_execute(struct CBoxHandle *handle,
  * # Returns
  * 0 on success, -1 on failure
  */
-int boxlite_shutdown_box(struct CBoxHandle *handle, char **out_error);
+int boxlite_stop_box(struct CBoxHandle *handle, char **out_error);
 
 /**
  * Free a runtime instance

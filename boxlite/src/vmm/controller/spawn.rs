@@ -20,7 +20,7 @@ use libkrun_sys::krun_create_ctx;
 /// # Returns
 /// * `Ok(Child)` - Successfully spawned subprocess with piped stdio
 /// * `Err(...)` - Failed to spawn subprocess
-pub(super) fn spawn_subprocess(
+pub(crate) fn spawn_subprocess(
     binary_path: &PathBuf,
     engine_type: VmmKind,
     config_json: &str,
@@ -39,11 +39,13 @@ pub(super) fn spawn_subprocess(
     // Set library search paths for bundled dependencies
     configure_library_env(&mut cmd, krun_create_ctx as *const libc::c_void);
 
-    // Capture subprocess output for controlled logging
-    // Use null for stdin to prevent libkrun from affecting parent's stdin via shared file description
-    cmd.stdin(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    cmd.stdout(Stdio::piped());
+    // Use null for all stdio to support detach/reattach without pipe issues.
+    // - stdin: prevents libkrun from affecting parent's stdin
+    // - stdout/stderr: prevents SIGPIPE when LogStreamHandler is dropped on detach
+    // TODO: Consider redirecting stdout/stderr to log files for persistent logging
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::null());
 
     cmd.spawn().map_err(|e| {
         let err_msg = format!(

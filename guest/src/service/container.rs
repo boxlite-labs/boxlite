@@ -215,6 +215,13 @@ impl ContainerService for GuestServer {
         );
 
         // Start container using OCI bundle rootfs
+        // Container init process uses pipe-based stdio to stay alive indefinitely.
+        // boxlite-guest holds the write-end of stdin pipe open, so init blocks on read() forever.
+        debug!(
+            container_id = %container_id,
+            entrypoint = ?config.entrypoint,
+            "Starting OCI container with pipe-based stdio"
+        );
         match Container::start(
             &container_id,
             &bundle_rootfs,
@@ -224,6 +231,7 @@ impl ContainerService for GuestServer {
             user_mounts,
         ) {
             Ok(container) => {
+                debug!(container_id = %container_id, "Container started, checking if init process is running");
                 // Verify container init process is running
                 if !container.is_running() {
                     // Gather diagnostic information

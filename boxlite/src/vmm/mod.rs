@@ -1,19 +1,11 @@
 //! Engine abstraction for Boxlite runtime.
 
-use crate::portal::GuestSession;
-use boxlite_shared::errors::{BoxliteError, BoxliteResult};
+use boxlite_shared::errors::BoxliteError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::str::FromStr;
 
-/// Raw metrics collected from Box processes.
-#[derive(Clone, Debug, Default)]
-pub struct VmmMetrics {
-    pub cpu_percent: Option<f32>,
-    pub memory_bytes: Option<u64>,
-    pub disk_bytes: Option<u64>,
-}
-
+pub mod controller;
 pub mod engine;
 pub mod factory;
 pub mod krun;
@@ -44,15 +36,6 @@ impl FromStr for VmmKind {
             ))),
         }
     }
-}
-
-/// Trait implemented by engine-specific Box controllers.
-#[async_trait::async_trait]
-pub trait VmmController: Send {
-    async fn start(&mut self, bundle: &InstanceSpec) -> BoxliteResult<GuestSession>;
-    fn stop(&mut self) -> BoxliteResult<()>;
-    fn metrics(&self) -> BoxliteResult<VmmMetrics>;
-    fn is_running(&self) -> bool;
 }
 
 /// A filesystem share from host to guest.
@@ -170,8 +153,13 @@ pub struct InstanceSpec {
     pub ready_transport: boxlite_shared::Transport,
     /// Resolved guest rootfs path and assembly strategy
     pub guest_rootfs: GuestRootfs,
-    /// Network connection info (serializable, passed to subprocess)
-    /// Contains the socket path or connection method to use
+    /// Network configuration (port mappings) passed to shim subprocess.
+    /// The shim creates the network backend (gvproxy) from this config,
+    /// ensuring networking survives detach operations.
+    pub network_config: Option<crate::net::NetworkBackendConfig>,
+    /// Network backend endpoint (socket path) - populated by shim after creating gvproxy.
+    /// This is not serialized; it's set in-process by the shim before calling the engine.
+    #[serde(skip)]
     pub network_backend_endpoint: Option<crate::net::NetworkBackendEndpoint>,
     /// Home directory for boxlite runtime (~/.boxlite or BOXLITE_HOME)
     pub home_dir: PathBuf,

@@ -69,6 +69,7 @@ impl BoxMetricsStorage {
     }
 
     /// Set guest boot duration (called once after guest is ready).
+    #[allow(dead_code)] // API designed but not yet wired up
     pub(crate) fn set_guest_boot_duration(&mut self, duration_ms: u128) {
         self.guest_boot_duration_ms = Some(duration_ms);
     }
@@ -89,6 +90,7 @@ impl BoxMetricsStorage {
     }
 
     /// Set box config build stage duration.
+    #[allow(dead_code)] // API designed but not yet wired up
     pub(crate) fn set_stage_box_config(&mut self, duration_ms: u128) {
         self.stage_box_config_ms = Some(duration_ms);
     }
@@ -101,6 +103,20 @@ impl BoxMetricsStorage {
     /// Set container initialization stage duration.
     pub(crate) fn set_stage_container_init(&mut self, duration_ms: u128) {
         self.stage_container_init_ms = Some(duration_ms);
+    }
+
+    /// Log init stage durations for debugging.
+    pub(crate) fn log_init_stages(&self) {
+        tracing::debug!(
+            total_create_duration_ms = self.total_create_duration_ms.unwrap_or(0),
+            stage_filesystem_setup_ms = self.stage_filesystem_setup_ms.unwrap_or(0),
+            stage_image_prepare_ms = self.stage_image_prepare_ms.unwrap_or(0),
+            stage_guest_rootfs_ms = self.stage_guest_rootfs_ms.unwrap_or(0),
+            stage_box_config_ms = self.stage_box_config_ms.unwrap_or(0),
+            stage_box_spawn_ms = self.stage_box_spawn_ms.unwrap_or(0),
+            stage_container_init_ms = self.stage_container_init_ms.unwrap_or(0),
+            "Box initialization stages completed"
+        );
     }
 
     /// Increment commands executed counter.

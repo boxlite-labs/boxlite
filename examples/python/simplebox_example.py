@@ -15,6 +15,8 @@ import asyncio
 import logging
 import sys
 
+sys.path.insert(0, 'sdks/python')
+
 import boxlite
 
 logger = logging.getLogger("simplebox_example")

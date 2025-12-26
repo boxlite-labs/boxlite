@@ -7,6 +7,7 @@ use std::path::Path;
 use super::BindMountImpl;
 
 /// Handle to a bind mount that cleans up on drop.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub struct BindMountHandle {
     #[cfg(target_os = "linux")]
     inner: Box<dyn BindMountImpl>,
@@ -14,6 +15,7 @@ pub struct BindMountHandle {
     _marker: std::marker::PhantomData<()>,
 }
 
+#[allow(dead_code)]
 impl BindMountHandle {
     #[cfg(target_os = "linux")]
     pub(super) fn new(inner: Box<dyn BindMountImpl>) -> Self {

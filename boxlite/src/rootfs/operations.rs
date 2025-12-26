@@ -226,28 +226,20 @@ pub fn fix_rootfs_permissions(rootfs: &Path) -> BoxliteResult<()> {
         };
 
         let mut count = 0;
-        let is_symlink = metadata.file_type().is_symlink();
+
+        // Skip symlinks early - they don't need xattr
+        if metadata.file_type().is_symlink() {
+            return Ok(0);
+        }
 
         // Get actual mode bits (preserve setuid/setgid/sticky bits)
-        // Try to get symlink's actual permissions, fallback to 0777 if unavailable
-        let mode = if is_symlink {
-            // On most systems, symlink permissions are always 0777
-            // But we try to read them anyway in case the platform provides them
-            let symlink_mode = metadata.permissions().mode() & 0o7777;
-            if symlink_mode == 0 {
-                0o777 // Fallback if permissions are unavailable
-            } else {
-                symlink_mode
-            }
-        } else {
-            metadata.permissions().mode() & 0o7777
-        };
+        let mode = metadata.permissions().mode() & 0o7777;
 
         // Format as 4-digit octal with leading zeros (e.g., "0:0:0755")
         let xattr_value = format!("0:0:{:04o}", mode);
 
-        // Temporarily add write permission if needed to set xattr (not needed for symlinks)
-        let needs_write = !is_symlink && (mode & 0o200) == 0;
+        // Temporarily add write permission if needed to set xattr
+        let needs_write = (mode & 0o200) == 0;
         if needs_write {
             let mut temp_perms = metadata.permissions();
             temp_perms.set_mode(mode | 0o200); // Add owner write
@@ -285,9 +277,8 @@ pub fn fix_rootfs_permissions(rootfs: &Path) -> BoxliteResult<()> {
             let _ = fs::set_permissions(path, orig_perms);
         }
 
-        // Recurse into directories (but not symlinks to directories)
+        // Recurse into directories
         if metadata.is_dir()
-            && !is_symlink
             && let Ok(entries) = fs::read_dir(path)
         {
             for entry in entries.filter_map(|e| e.ok()) {

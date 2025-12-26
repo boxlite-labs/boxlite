@@ -5,9 +5,12 @@
 //!
 //! Engine implementations auto-register themselves via the inventory pattern,
 //! so this runner doesn't need to know about specific engine types.
-
-#[allow(unused_imports)]
-use std::process;
+//!
+//! ## Network Backend
+//!
+//! The shim creates the network backend (gvproxy) from network_config if present.
+//! This ensures networking survives detach operations - the gvproxy lives in the
+//! shim subprocess, not the main boxlite process.
 
 use std::path::Path;
 
@@ -20,6 +23,9 @@ use boxlite_shared::errors::BoxliteResult;
 use clap::Parser;
 #[allow(unused_imports)]
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+
+#[cfg(feature = "gvproxy-backend")]
+use boxlite::net::{ConnectionType, NetworkBackendEndpoint, gvproxy::GvproxyInstance};
 
 /// Universal Box runner binary - subprocess that executes isolated Boxes
 #[derive(Parser, Debug)]
@@ -76,7 +82,7 @@ fn main() -> BoxliteResult<()> {
     let args = ShimArgs::parse();
 
     // Parse InstanceSpec from JSON
-    let config: InstanceSpec = serde_json::from_str(&args.config).map_err(|e| {
+    let mut config: InstanceSpec = serde_json::from_str(&args.config).map_err(|e| {
         boxlite_shared::errors::BoxliteError::Engine(format!("Failed to parse config JSON: {}", e))
     })?;
 
@@ -94,9 +100,51 @@ fn main() -> BoxliteResult<()> {
         "Guest entrypoint configured"
     );
 
-    // Start parent process monitor thread
-    // This ensures the runner exits if the parent process dies
-    start_parent_monitor();
+    // Create network backend (gvproxy) from network_config if present.
+    // gvproxy provides virtio-net (eth0) to the guest - required even without port mappings.
+    // The gvproxy instance is leaked intentionally - it must live for the entire
+    // duration of the VM. When the shim process exits, OS cleans up all resources.
+    #[cfg(feature = "gvproxy-backend")]
+    if let Some(ref net_config) = config.network_config {
+        tracing::info!(
+            port_mappings = ?net_config.port_mappings,
+            "Creating network backend (gvproxy) from config"
+        );
+
+        // Create gvproxy instance
+        let gvproxy = GvproxyInstance::new(&net_config.port_mappings)?;
+        let socket_path = gvproxy.get_socket_path()?;
+
+        tracing::info!(
+            socket_path = ?socket_path,
+            "Network backend created"
+        );
+
+        // Create NetworkBackendEndpoint from socket path
+        // Platform-specific connection type:
+        // - macOS: UnixDgram with VFKit protocol
+        // - Linux: UnixStream with Qemu protocol
+        let connection_type = if cfg!(target_os = "macos") {
+            ConnectionType::UnixDgram
+        } else {
+            ConnectionType::UnixStream
+        };
+
+        // Use GUEST_MAC constant - must match DHCP static lease in gvproxy config
+        use boxlite::net::constants::GUEST_MAC;
+
+        config.network_backend_endpoint = Some(NetworkBackendEndpoint::UnixSocket {
+            path: socket_path,
+            connection_type,
+            mac_address: GUEST_MAC,
+        });
+
+        // Leak the gvproxy instance to keep it alive for VM lifetime.
+        // This is intentional - the VM needs networking for its entire life,
+        // and OS cleanup handles resources when process exits.
+        let _gvproxy_leaked = Box::leak(Box::new(gvproxy));
+        tracing::debug!("Leaked gvproxy instance for VM lifetime");
+    }
 
     // Initialize engine options with defaults
     let options = VmmConfig::default();
@@ -130,48 +178,4 @@ fn main() -> BoxliteResult<()> {
             Err(e)
         }
     }
-}
-
-/// Monitor parent process and exit if it dies.
-/// This prevents orphaned Box processes when the parent (Python) crashes or is killed.
-///
-/// On Linux: Uses prctl(PR_SET_PDEATHSIG, SIGTERM) - kernel sends signal when parent dies
-/// On macOS: Uses polling with getppid() - less elegant but reliable
-#[cfg(target_os = "linux")]
-fn start_parent_monitor() {
-    // On Linux, use prctl to request SIGTERM when parent dies
-    // This is the most elegant solution - kernel handles it automatically
-    unsafe {
-        if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
-            tracing::info!("Failed to set parent death signal");
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn start_parent_monitor() {
-    // macOS doesn't have PR_SET_PDEATHSIG, so we poll
-    use std::thread;
-    use std::time::Duration;
-
-    let parent_pid = unsafe { libc::getppid() };
-
-    thread::spawn(move || {
-        loop {
-            thread::sleep(Duration::from_secs(1));
-
-            // Check if parent process still exists
-            // getppid() returns 1 (init/launchd) if parent died
-            let current_parent = unsafe { libc::getppid() };
-            if current_parent != parent_pid {
-                tracing::info!(parent_pid, "Parent process died, exiting");
-                process::exit(1);
-            }
-        }
-    });
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn start_parent_monitor() {
-    // No-op on other systems
 }

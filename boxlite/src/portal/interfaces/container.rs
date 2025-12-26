@@ -11,11 +11,13 @@ use crate::volumes::ContainerMount;
 
 /// Container rootfs initialization strategy.
 /// Guest constructs paths from container_id using its own layout knowledge.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ContainerRootfsInitConfig {
     /// Single merged rootfs - guest constructs path from container_id
+    #[allow(dead_code)] // Reserved for future merged rootfs mode
     Merged,
     /// Overlayfs from multiple layers - guest constructs paths from container_id and layer_names
+    #[allow(dead_code)] // Reserved for future overlayfs mode
     Overlay {
         /// Layer directory names (e.g., "sha256-abc123")
         layer_names: Vec<String>,

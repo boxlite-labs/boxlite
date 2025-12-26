@@ -48,8 +48,6 @@ pub(crate) struct PyBoxOptions {
     #[pyo3(get, set)]
     pub(crate) rootfs_path: Option<String>,
     #[pyo3(get, set)]
-    pub(crate) name: Option<String>,
-    #[pyo3(get, set)]
     pub(crate) cpus: Option<u8>,
     #[pyo3(get, set)]
     pub(crate) memory_mib: Option<u32>,
@@ -61,6 +59,8 @@ pub(crate) struct PyBoxOptions {
     #[pyo3(get, set)]
     pub(crate) network: Option<String>,
     pub(crate) ports: Vec<PyPortSpec>,
+    #[pyo3(get, set)]
+    pub(crate) auto_remove: Option<bool>,
 }
 
 #[pymethods]
@@ -69,20 +69,19 @@ impl PyBoxOptions {
     #[pyo3(signature = (
         image=None,
         rootfs_path=None,
-        name=None,
         cpus=None,
         memory_mib=None,
         working_dir=None,
         env=vec![],
         volumes=vec![],
         network=None,
-        ports=vec![]
+        ports=vec![],
+        auto_remove=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         image: Option<String>,
         rootfs_path: Option<String>,
-        name: Option<String>,
         cpus: Option<u8>,
         memory_mib: Option<u32>,
         working_dir: Option<String>,
@@ -90,11 +89,11 @@ impl PyBoxOptions {
         volumes: Vec<PyVolumeSpec>,
         network: Option<String>,
         ports: Vec<PyPortSpec>,
+        auto_remove: Option<bool>,
     ) -> Self {
         Self {
             image,
             rootfs_path,
-            name,
             cpus,
             memory_mib,
             working_dir,
@@ -102,6 +101,7 @@ impl PyBoxOptions {
             volumes,
             network,
             ports,
+            auto_remove,
         }
     }
 
@@ -131,8 +131,7 @@ impl From<PyBoxOptions> for BoxOptions {
 
         let ports = py_opts.ports.into_iter().map(PortSpec::from).collect();
 
-        BoxOptions {
-            name: py_opts.name,
+        let mut opts = BoxOptions {
             rootfs,
             cpus: py_opts.cpus,
             memory_mib: py_opts.memory_mib,
@@ -141,8 +140,14 @@ impl From<PyBoxOptions> for BoxOptions {
             volumes,
             network,
             ports,
-            isolate_mounts: false,
+            ..Default::default()
+        };
+
+        if let Some(auto_remove) = py_opts.auto_remove {
+            opts.auto_remove = auto_remove;
         }
+
+        opts
     }
 }
 

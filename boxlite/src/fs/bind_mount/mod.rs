@@ -92,6 +92,7 @@ fn has_cap_sys_admin() -> bool {
 
 /// Trait for bind mount implementations.
 #[cfg(target_os = "linux")]
+#[allow(dead_code)]
 pub(crate) trait BindMountImpl: Send + Sync {
     fn target(&self) -> &std::path::Path;
     fn unmount(&mut self) -> BoxliteResult<()>;

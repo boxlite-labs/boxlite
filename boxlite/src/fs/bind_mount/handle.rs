@@ -15,7 +15,7 @@ pub struct BindMountHandle {
     _marker: std::marker::PhantomData<()>,
 }
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[allow(dead_code)]
 impl BindMountHandle {
     #[cfg(target_os = "linux")]
     pub(super) fn new(inner: Box<dyn BindMountImpl>) -> Self {

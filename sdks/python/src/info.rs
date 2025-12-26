@@ -1,4 +1,4 @@
-use boxlite::management::{BoxInfo, BoxState};
+use boxlite::{BoxInfo, BoxStatus};
 use pyo3::prelude::*;
 
 #[pyclass(name = "BoxInfo")]
@@ -24,11 +24,12 @@ pub(crate) struct PyBoxInfo {
 
 impl From<BoxInfo> for PyBoxInfo {
     fn from(info: BoxInfo) -> Self {
-        let state_str = match info.state {
-            BoxState::Starting => "starting",
-            BoxState::Running => "running",
-            BoxState::Stopped => "stopped",
-            BoxState::Failed => "failed",
+        let state_str = match info.status {
+            BoxStatus::Unknown => "unknown",
+            BoxStatus::Starting => "starting",
+            BoxStatus::Running => "running",
+            BoxStatus::Stopping => "stopping",
+            BoxStatus::Stopped => "stopped",
         };
 
         PyBoxInfo {

@@ -2,81 +2,264 @@
 //!
 //! ## Architecture
 //!
-//! Initialization is split into 6 stages executed by `InitPipeline`:
+//! Initialization is table-driven with different execution plans based on BoxStatus:
 //!
 //! ```text
-//! 1. Filesystem ──────┐
-//!                     │
-//! 2. ContainerRootfs ─┼──→ 4. VmmConfig ──→ 5. Spawn ──→ 6. GuestInit
-//!                     │
-//! 3. GuestRootfs ─────┘
+//! Starting (new box):
+//!   1. Filesystem           (create layout)
+//!   2. ContainerRootfs ─┬─  (pull image, create COW disk)
+//!      GuestRootfs     ─┘   (prepare guest, create COW disk)
+//!   3. VmmSpawn             (build config + spawn VM)
+//!   4. GuestConnect         (wait for guest ready)
+//!   5. GuestInit            (initialize container)
 //!
-//! Parallel:   [Filesystem, ContainerRootfs, GuestRootfs]
-//! Sequential: VmmConfig → Spawn → GuestInit
+//! Stopped (restart):
+//!   1. Filesystem           (load existing layout)
+//!   2. ContainerRootfs ─┬─  (reuse existing COW disk - preserves user data)
+//!      GuestRootfs     ─┘   (reuse existing COW disk)
+//!   3. VmmSpawn             (build config + spawn NEW VM)
+//!   4. GuestConnect         (wait for guest ready)
+//!   5. GuestInit            (re-initialize container in new VM)
+//!
+//! Running (reattach):
+//!   1. VmmAttach            (attach to running VM)
+//!   2. GuestConnect         (reconnect to guest)
 //! ```
 //!
 //! `CleanupGuard` provides RAII cleanup on failure.
 
-mod pipeline;
-mod stages;
+mod tasks;
 mod types;
 
-pub(crate) use types::BoxInner;
+pub(crate) use crate::litebox::inner::BoxInner;
 
-use crate::BoxID;
+use crate::litebox::BoxStatus;
+use crate::litebox::config::BoxConfig;
+use crate::metrics::BoxMetricsStorage;
+use crate::pipeline::{
+    BoxedTask, ExecutionPlan, PipelineBuilder, PipelineExecutor, PipelineMetrics, Stage,
+};
 use crate::runtime::RuntimeInner;
-use crate::runtime::options::BoxOptions;
-use boxlite_shared::errors::BoxliteResult;
-use pipeline::InitPipeline;
+use crate::runtime::guest_rootfs::GuestRootfs;
+use crate::runtime::types::{BoxState, ContainerId};
+use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 use std::sync::Arc;
+use tokio::sync::{Mutex, OnceCell};
+
+use tasks::{
+    ContainerRootfsTask, FilesystemTask, GuestConnectTask, GuestInitTask, GuestRootfsTask, InitCtx,
+    VmmAttachTask, VmmSpawnTask,
+};
+use types::InitPipelineContext;
+
+// ============================================================================
+// EXECUTION PLAN
+// ============================================================================
+
+/// Get execution plan based on BoxStatus.
+fn get_execution_plan(status: BoxStatus) -> ExecutionPlan<InitCtx> {
+    let stages: Vec<Stage<BoxedTask<InitCtx>>> = match status {
+        BoxStatus::Starting => vec![
+            // Phase 1: Setup filesystem layout first
+            Stage::sequential(vec![Box::new(FilesystemTask)]),
+            // Phase 2: Prepare rootfs (now has access to layout for disk paths)
+            Stage::parallel(vec![
+                Box::new(ContainerRootfsTask),
+                Box::new(GuestRootfsTask),
+            ]),
+            // Phase 3: Build config and spawn VM
+            Stage::sequential(vec![Box::new(VmmSpawnTask)]),
+            // Phase 4: Connect to guest and initialize container
+            Stage::sequential(vec![Box::new(GuestConnectTask)]),
+            Stage::sequential(vec![Box::new(GuestInitTask)]),
+        ],
+        BoxStatus::Stopped => vec![
+            // Restart: Same flow but rootfs tasks reuse existing COW disks
+            // (preserves user modifications from previous run)
+            Stage::sequential(vec![Box::new(FilesystemTask)]),
+            Stage::parallel(vec![
+                Box::new(ContainerRootfsTask),
+                Box::new(GuestRootfsTask),
+            ]),
+            Stage::sequential(vec![Box::new(VmmSpawnTask)]),
+            Stage::sequential(vec![Box::new(GuestConnectTask)]),
+            // GuestInit must run - new VM process has fresh guest daemon
+            Stage::sequential(vec![Box::new(GuestInitTask)]),
+        ],
+        BoxStatus::Running => vec![
+            // Reattach: Attach to existing VM process and connect to guest
+            Stage::sequential(vec![Box::new(VmmAttachTask)]),
+            Stage::sequential(vec![Box::new(GuestConnectTask)]),
+        ],
+        _ => panic!("Invalid BoxStatus for initialization: {:?}", status),
+    };
+
+    ExecutionPlan::new(stages)
+}
+
+fn box_metrics_from_pipeline(pipeline_metrics: &PipelineMetrics) -> BoxMetricsStorage {
+    let mut metrics = BoxMetricsStorage::new();
+
+    if let Some(duration_ms) = pipeline_metrics.task_duration_ms("filesystem_setup") {
+        metrics.set_stage_filesystem_setup(duration_ms);
+    }
+    if let Some(duration_ms) = pipeline_metrics.task_duration_ms("container_rootfs_prep") {
+        metrics.set_stage_image_prepare(duration_ms);
+    }
+    if let Some(duration_ms) = pipeline_metrics.task_duration_ms("guest_rootfs_init") {
+        metrics.set_stage_guest_rootfs(duration_ms);
+    }
+    if let Some(duration_ms) = pipeline_metrics.task_duration_ms("vmm_spawn") {
+        metrics.set_stage_box_spawn(duration_ms);
+    }
+    if let Some(duration_ms) = pipeline_metrics.task_duration_ms("vmm_attach") {
+        metrics.set_stage_box_spawn(duration_ms);
+    }
+    if let Some(_duration_ms) = pipeline_metrics.task_duration_ms("guest_connect") {
+        // Track guest connection time
+        // Could add a new metric field if needed
+    }
+    if let Some(duration_ms) = pipeline_metrics.task_duration_ms("guest_init") {
+        metrics.set_stage_container_init(duration_ms);
+    }
+
+    metrics
+}
 
 /// Builds and initializes box components.
 ///
 /// # Example
 ///
 /// ```ignore
-/// let inner = BoxBuilder::new(box_id, runtime, options)
+/// let inner = BoxBuilder::new(runtime, config, &state)
 ///     .build()
 ///     .await?;
 /// ```
 pub(crate) struct BoxBuilder {
-    box_id: BoxID,
     runtime: RuntimeInner,
-    options: BoxOptions,
+    config: BoxConfig,
+    state: BoxState,
 }
 
 impl BoxBuilder {
-    /// Create a new builder.
+    /// Create a new builder from config and state.
+    ///
+    /// The state determines initialization mode:
+    /// - `Starting`: normal init (pull image or use rootfs path)
+    /// - `Stopped`: restart (reuse existing rootfs at box_home/rootfs)
     ///
     /// # Arguments
     ///
-    /// * `box_id` - Unique identifier for this box
     /// * `runtime` - Runtime providing resources (layout, guest_rootfs, etc.)
-    /// * `options` - Box configuration (image, memory, cpus, etc.)
-    pub(crate) fn new(box_id: BoxID, runtime: RuntimeInner, options: BoxOptions) -> Self {
-        Self {
-            box_id,
+    /// * `config` - Box configuration (immutable after creation)
+    /// * `state` - Current box state (determines init mode)
+    pub(crate) fn new(
+        runtime: RuntimeInner,
+        config: BoxConfig,
+        state: BoxState,
+    ) -> BoxliteResult<Self> {
+        // Get options reference from config (no reconstruction needed!)
+        let options = &config.options;
+        options.sanitize()?;
+
+        Ok(Self {
             runtime,
-            options,
-        }
+            config,
+            state,
+        })
     }
 
     /// Build and initialize the box.
     ///
     /// Executes all initialization stages with automatic cleanup on failure.
     pub(crate) async fn build(self) -> BoxliteResult<BoxInner> {
-        // Derive internal values from runtime
-        let home_dir = self.runtime.non_sync_state.layout.home_dir().to_path_buf();
-        let guest_rootfs_cell = Arc::clone(&self.runtime.non_sync_state.guest_rootfs);
+        use std::time::Instant;
 
-        let pipeline = InitPipeline::new(
-            self.box_id,
+        let total_start = Instant::now();
+
+        let BoxBuilder {
+            runtime,
+            config,
+            state,
+        } = self;
+
+        let status = state.status;
+
+        let container_id = ContainerId::new();
+        tracing::debug!(container_id = %container_id.short(), "Generated container ID");
+
+        let home_dir = runtime.layout.home_dir().to_path_buf();
+        let guest_rootfs_cell: Arc<OnceCell<GuestRootfs>> = Arc::clone(&runtime.guest_rootfs);
+
+        let ctx = InitPipelineContext::new(
+            config,
+            state,
             home_dir,
-            self.options,
-            self.runtime,
+            runtime,
             guest_rootfs_cell,
+            container_id,
         );
+        let ctx = Arc::new(Mutex::new(ctx));
 
-        pipeline.run().await
+        if status != BoxStatus::Starting {
+            let mut ctx_guard = ctx.lock().await;
+            ctx_guard.guard.disarm();
+        }
+
+        let plan = get_execution_plan(status);
+        let pipeline = PipelineBuilder::from_plan(plan);
+        let pipeline_metrics = PipelineExecutor::execute(pipeline, Arc::clone(&ctx)).await?;
+
+        let mut ctx = ctx.lock().await;
+        let total_create_duration_ms = total_start.elapsed().as_millis();
+        let handler = ctx
+            .guard
+            .take_handler()
+            .ok_or_else(|| BoxliteError::Internal("handler was not set".into()))?;
+
+        let mut metrics = box_metrics_from_pipeline(&pipeline_metrics);
+        metrics.set_total_create_duration(total_create_duration_ms);
+        // Note: guest_boot_duration is now logged in ShimController::start(),
+        // but not tracked in BoxMetrics since handler doesn't store timing metadata
+
+        metrics.log_init_stages();
+
+        ctx.guard.disarm();
+
+        // Get guest_output from GuestInitTask (runs for both Starting and Stopped)
+        // Reattach (Running) uses a different path and doesn't call build()
+        let guest_output = ctx
+            .guest_output
+            .take()
+            .ok_or_else(|| BoxliteError::Internal("guest_init task must run first".into()))?;
+
+        // Update container_id in database
+        let _ = ctx
+            .runtime
+            .box_manager
+            .update_container_id(&ctx.config.id, guest_output.container_id.clone());
+
+        let fs_output = ctx
+            .fs_output
+            .take()
+            .ok_or_else(|| BoxliteError::Internal("filesystem task must run first".into()))?;
+        let config_output = ctx
+            .config_output
+            .take()
+            .ok_or_else(|| BoxliteError::Internal("vmm_config task must run first".into()))?;
+
+        let box_home = fs_output.layout.root().to_path_buf();
+
+        Ok(BoxInner {
+            box_home,
+            handler: std::sync::Mutex::new(handler),
+            guest_session: guest_output.guest_session,
+            metrics,
+            _container_rootfs_disk: config_output.disk,
+            guest_rootfs_disk: config_output.init_disk,
+            container_id: guest_output.container_id,
+            #[cfg(target_os = "linux")]
+            bind_mount: fs_output.bind_mount,
+        })
     }
 }

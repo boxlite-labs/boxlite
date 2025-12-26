@@ -41,7 +41,7 @@ async def example_default_runtime():
         f"✓ Exit code: {exec_result.exit_code}s")
 
     # Shutdown box
-    await box.shutdown()
+    await box.stop()
     print("✓ Box shut down")
 
 
@@ -78,7 +78,7 @@ async def example_custom_runtime():
     print(f"  Transport: {info.transport}")
     print(f"  Created: {info.created_at}")
 
-    await box.shutdown()
+    await box.stop()
     print("✓ Box shut down")
 
 
@@ -115,7 +115,7 @@ async def example_streaming_execution():
     print(
         f"\n✓ Exit code: {exec_result.exit_code}s")
 
-    await box.shutdown()
+    await box.stop()
 
 
 async def example_environment_variables():
@@ -144,7 +144,7 @@ async def example_environment_variables():
             print(f"  {line}")
 
     await execution.wait()
-    await box.shutdown()
+    await box.stop()
 
 
 async def example_box_metrics():
@@ -170,8 +170,8 @@ async def example_box_metrics():
     print(f"  Exec errors: {metrics.exec_errors_total}")
     print(f"  Bytes sent: {metrics.bytes_sent_total}")
     print(f"  Bytes received: {metrics.bytes_received_total}")
-    print(f"  Spawn duration: {metrics.spawn_duration_ms} ms")
-    print(f"  Boot duration: {metrics.boot_duration_ms} ms")
+    print(f"  Create duration: {metrics.total_create_duration_ms} ms")
+    print(f"  Boot duration: {metrics.guest_boot_duration_ms} ms")
     if metrics.cpu_percent is not None:
         print(f"  CPU usage: {metrics.cpu_percent:.2f}%")
     if metrics.memory_bytes is not None:
@@ -185,7 +185,7 @@ async def example_box_metrics():
     if metrics.network_tcp_errors is not None:
         print(f"  TCP errors: {metrics.network_tcp_errors}")
 
-    await box.shutdown()
+    await box.stop()
 
 
 async def example_runtime_metrics():
@@ -219,7 +219,7 @@ async def example_runtime_metrics():
 
     # Cleanup
     for box in boxes:
-        await box.shutdown()
+        await box.stop()
     print("\n✓ All boxes shut down")
 
 
@@ -256,8 +256,8 @@ async def example_list_and_info():
 
     # Cleanup - shutdown and remove
     for box in boxes:
-        await box.shutdown()
-        runtime.remove(box.id)
+        await box.stop()
+        await runtime.remove(box.id, force=False)
         print(f"✓ Removed box: {box.id}")
 
 
@@ -287,7 +287,7 @@ async def example_execution_kill():
     print(
         f"✓ Exit code after kill: {exec_result.exit_code}s")
 
-    await box.shutdown()
+    await box.stop()
 
 
 async def example_context_manager():
@@ -340,7 +340,7 @@ async def example_working_directory():
     info = box.info()
     print(f"✓ Box configuration verified")
 
-    await box.shutdown()
+    await box.stop()
 
 
 async def main():

@@ -97,7 +97,6 @@ impl FilesystemLayout {
         std::fs::create_dir_all(&self.home_dir)
             .map_err(|e| BoxliteError::Storage(format!("failed to create home: {e}")))?;
 
-        let _ = std::fs::remove_dir_all(self.boxes_dir());
         std::fs::create_dir_all(self.boxes_dir())
             .map_err(|e| BoxliteError::Storage(format!("failed to create boxes dir: {e}")))?;
 

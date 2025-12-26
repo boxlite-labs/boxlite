@@ -8,20 +8,20 @@ use tracing_subscriber::EnvFilter;
 // Global guard for tracing-appender to keep the writer thread alive
 static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
-mod controller;
-pub mod fs;
-pub mod management;
+pub mod litebox;
 pub mod metrics;
 pub mod net;
-pub mod portal;
-pub mod vmm;
-
-mod disk;
-mod images;
-pub mod litebox;
-mod rootfs;
+pub mod pipeline;
 pub mod runtime;
 pub mod util;
+pub mod vmm;
+
+mod db;
+mod disk;
+mod fs;
+mod images;
+mod portal;
+mod rootfs;
 mod volumes;
 
 pub use litebox::LiteBox;
@@ -31,11 +31,11 @@ use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 pub use litebox::{
     BoxCommand, ExecResult, ExecStderr, ExecStdin, ExecStdout, Execution, ExecutionId,
 };
-pub use management::{BoxID, BoxInfo, BoxState};
 pub use metrics::{BoxMetrics, RuntimeMetrics};
 use runtime::layout::FilesystemLayout;
 pub use runtime::options::{BoxOptions, BoxliteOptions, RootfsSpec};
 pub use runtime::types::ContainerId;
+pub use runtime::types::{BoxID, BoxInfo, BoxState, BoxStatus};
 
 /// Initialize tracing for Boxlite using the provided filesystem layout.
 ///

@@ -1,25 +1,25 @@
 //! Type definitions for initialization pipeline.
 
 use crate::BoxID;
-use crate::controller::ShimController;
 use crate::disk::Disk;
 #[cfg(target_os = "linux")]
 use crate::fs::BindMountHandle;
 use crate::images::ContainerConfig;
-use crate::metrics::BoxMetricsStorage;
-use crate::net::NetworkBackend;
+use crate::litebox::BoxStatus;
+use crate::litebox::config::BoxConfig;
 use crate::portal::GuestSession;
 use crate::portal::interfaces::ContainerRootfsInitConfig;
 use crate::runtime::RuntimeInner;
 use crate::runtime::guest_rootfs::GuestRootfs;
 use crate::runtime::layout::BoxFilesystemLayout;
 use crate::runtime::options::{BoxOptions, VolumeSpec};
-use crate::runtime::types::ContainerId;
-use crate::vmm::VmmController;
+use crate::runtime::types::{BoxState, ContainerId};
+use crate::vmm::controller::VmmHandler;
 use crate::volumes::{ContainerMount, GuestVolumeManager};
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio::sync::OnceCell;
 
 /// Switch between merged and overlayfs rootfs strategies.
@@ -99,6 +99,7 @@ pub enum ContainerRootfsPrepResult {
     #[allow(dead_code)]
     Merged(PathBuf),
     /// Layers for guest-side overlayfs
+    #[allow(dead_code)] // Overlayfs mode currently disabled (USE_DISK_ROOTFS=true)
     Layers {
         /// Parent directory containing all extracted layers (mount as single virtiofs share)
         layers_dir: PathBuf,
@@ -115,26 +116,141 @@ pub enum ContainerRootfsPrepResult {
     },
 }
 
-/// Final initialized box state.
-pub(crate) struct BoxInner {
-    pub(in crate::litebox) box_home: PathBuf,
-    pub(in crate::litebox) controller: std::sync::Mutex<Box<dyn VmmController>>,
-    pub(in crate::litebox) guest_session: GuestSession,
-    pub(in crate::litebox) network_backend: Option<Box<dyn NetworkBackend>>,
-    /// Per-box operational metrics (stored internally, like Tokio's TaskMetrics)
-    pub(in crate::litebox) metrics: BoxMetricsStorage,
-    /// RAII-managed rootfs disk (COW overlay of base ext4, auto-cleanup on drop)
-    pub(in crate::litebox) _container_rootfs_disk: Disk,
-    /// RAII-managed init rootfs disk (auto-cleanup on drop)
-    /// Note: This field is not read directly, but kept for RAII disk cleanup.
-    #[allow(dead_code)]
-    pub(in crate::litebox) guest_rootfs_disk: Option<Disk>,
-    /// Container ID for exec requests (used in BOXLITE_EXECUTOR env var)
-    pub(in crate::litebox) container_id: String,
-    /// RAII-managed bind mount for mounts/ → shared/ (Linux only, auto-cleanup on drop)
-    #[cfg(target_os = "linux")]
-    #[allow(dead_code)]
-    pub(in crate::litebox) bind_mount: Option<BindMountHandle>,
+/// RAII guard for cleanup on initialization failure.
+///
+/// Automatically cleans up resources and increments failure counter
+/// if dropped without being disarmed.
+pub struct CleanupGuard {
+    runtime: RuntimeInner,
+    box_id: BoxID,
+    layout: Option<BoxFilesystemLayout>,
+    handler: Option<Box<dyn VmmHandler>>,
+    armed: bool,
+}
+
+impl CleanupGuard {
+    pub fn new(runtime: RuntimeInner, box_id: BoxID) -> Self {
+        Self {
+            runtime,
+            box_id,
+            layout: None,
+            handler: None,
+            armed: true,
+        }
+    }
+
+    /// Register layout for cleanup on failure.
+    pub fn set_layout(&mut self, layout: BoxFilesystemLayout) {
+        self.layout = Some(layout);
+    }
+
+    /// Register handler for cleanup on failure.
+    pub fn set_handler(&mut self, handler: Box<dyn VmmHandler>) {
+        self.handler = Some(handler);
+    }
+
+    /// Take ownership of handler (for success path).
+    pub fn take_handler(&mut self) -> Option<Box<dyn VmmHandler>> {
+        self.handler.take()
+    }
+
+    /// Disarm the guard (call on success).
+    ///
+    /// After disarming, Drop will not perform cleanup.
+    pub fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CleanupGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+
+        tracing::warn!("Box initialization failed, cleaning up");
+
+        // Stop handler if started
+        if let Some(ref mut handler) = self.handler
+            && let Err(e) = handler.stop()
+        {
+            tracing::warn!("Failed to stop handler during cleanup: {}", e);
+        }
+
+        // Cleanup filesystem
+        if let Some(ref layout) = self.layout
+            && let Err(e) = layout.cleanup()
+        {
+            tracing::warn!("Failed to cleanup box directory: {}", e);
+        }
+
+        // Remove from BoxManager (which handles DB delete via database-first pattern)
+        // First mark as crashed so remove() doesn't fail the active check
+        let _ = self.runtime.box_manager.mark_crashed(&self.box_id);
+        if let Err(e) = self.runtime.box_manager.remove(&self.box_id) {
+            tracing::warn!("Failed to remove box from manager during cleanup: {}", e);
+        }
+
+        // Increment failure counter
+        self.runtime
+            .runtime_metrics
+            .boxes_failed
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Shared initialization pipeline context.
+///
+/// Stores shared inputs, outputs, and timing across all tasks.
+pub struct InitPipelineContext {
+    pub config: BoxConfig,
+    pub state: BoxState,
+    pub home_dir: PathBuf,
+    pub runtime: RuntimeInner,
+    pub guest_rootfs_cell: Arc<OnceCell<GuestRootfs>>,
+    pub container_id: ContainerId,
+    pub guard: CleanupGuard,
+    pub fs_output: Option<FilesystemOutput>,
+    pub rootfs_output: Option<ContainerRootfsOutput>,
+    pub guest_rootfs_output: Option<GuestRootfsOutput>,
+    pub config_output: Option<ConfigOutput>,
+    pub guest_session: Option<GuestSession>,
+    pub guest_output: Option<GuestOutput>,
+    /// Container config extracted from image (set by VmmSpawnTask for GuestInitTask)
+    pub container_config: Option<ContainerConfig>,
+}
+
+impl InitPipelineContext {
+    pub fn new(
+        config: BoxConfig,
+        state: BoxState,
+        home_dir: PathBuf,
+        runtime: RuntimeInner,
+        guest_rootfs_cell: Arc<OnceCell<GuestRootfs>>,
+        container_id: ContainerId,
+    ) -> Self {
+        let guard = CleanupGuard::new(runtime.clone(), config.id.clone());
+        Self {
+            config,
+            state,
+            home_dir,
+            runtime,
+            guest_rootfs_cell,
+            container_id,
+            guard,
+            fs_output: None,
+            rootfs_output: None,
+            guest_rootfs_output: None,
+            config_output: None,
+            guest_session: None,
+            guest_output: None,
+            container_config: None,
+        }
+    }
+
+    pub fn should_reuse_rootfs(&self) -> bool {
+        self.state.status == BoxStatus::Stopped
+    }
 }
 
 // ============================================================================
@@ -158,43 +274,42 @@ pub struct FilesystemOutput {
 }
 
 /// Input for container rootfs stage.
-/// Note: No layout dependency - runs in parallel with filesystem stage.
 pub struct ContainerRootfsInput<'a> {
     pub options: &'a BoxOptions,
     pub runtime: &'a RuntimeInner,
+    /// Box filesystem layout (for disk paths)
+    pub layout: &'a BoxFilesystemLayout,
+    /// When true, reuse existing COW disk (for restart).
+    pub reuse_rootfs: bool,
 }
 
 /// Output from container rootfs stage.
 pub struct ContainerRootfsOutput {
     pub container_config: ContainerConfig,
-    pub rootfs_result: ContainerRootfsPrepResult,
+    /// COW disk for container rootfs (created or reused on restart)
+    pub disk: Disk,
 }
 
 /// Input for guest rootfs stage.
 pub struct GuestRootfsInput<'a> {
     pub runtime: &'a RuntimeInner,
     pub guest_rootfs_cell: &'a Arc<OnceCell<GuestRootfs>>,
+    /// Box filesystem layout (for disk paths)
+    pub layout: &'a BoxFilesystemLayout,
+    /// When true, reuse existing COW disk (for restart).
+    pub reuse_rootfs: bool,
 }
 
 /// Output from guest rootfs stage.
 pub struct GuestRootfsOutput {
     pub guest_rootfs: GuestRootfs,
-}
-
-/// Input for VMM config stage.
-pub struct VmmConfigInput<'a> {
-    pub options: &'a BoxOptions,
-    pub layout: &'a BoxFilesystemLayout,
-    pub rootfs: &'a ContainerRootfsOutput,
-    pub guest_rootfs: &'a GuestRootfs,
-    pub home_dir: &'a PathBuf,
-    pub container_id: &'a ContainerId,
+    /// COW disk for guest rootfs (created or reused on restart)
+    pub disk: Option<Disk>,
 }
 
 /// Output from config stage.
 pub struct ConfigOutput {
     pub box_config: crate::vmm::InstanceSpec,
-    pub network_backend: Option<Box<dyn NetworkBackend>>,
     /// Primary disk - in DiskImage mode, this is the rootfs disk (COW overlay of base ext4)
     pub disk: Disk,
     /// Init rootfs COW disk (protects shared base from writes)
@@ -205,18 +320,6 @@ pub struct ConfigOutput {
     pub rootfs_init: ContainerRootfsInitConfig,
     /// Container bind mounts (user volumes)
     pub container_mounts: Vec<ContainerMount>,
-}
-
-/// Input for spawn stage.
-pub struct SpawnInput<'a> {
-    pub box_id: &'a BoxID,
-    pub config: &'a crate::vmm::InstanceSpec,
-}
-
-/// Output from spawn stage.
-pub struct SpawnOutput {
-    pub controller: ShimController,
-    pub guest_session: GuestSession,
 }
 
 /// Input for guest initialization stage.

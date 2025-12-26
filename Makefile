@@ -26,9 +26,11 @@ help:
 	@echo "  Build:"
 	@echo "    make guest          - Build the guest binary (cross-compile for VM)"
 	@echo ""
+	@echo "  Testing:"
+	@echo "    make test           - Run all Rust tests"
+	@echo ""
 	@echo "  Local Development:"
 	@echo "    make dev:python     - Build and install Python SDK locally (debug mode)"
-	@echo "    make test           - Test the built wheel"
 	@echo ""
 	@echo "  Python Distribution:"
 	@echo "    make dist:python    - Build portable wheel with cibuildwheel (auto-detects platform)"
@@ -129,21 +131,10 @@ dev\:python: runtime-debug
 	@echo "🔨 Building wheel with maturin..."
 	@. .venv/bin/activate && cd sdks/python && maturin develop
 
-# Test the built wheel
+# Run Rust tests (excludes guest and doctests)
 test:
-	@echo "🧪 Testing wheel..."
-	@if [ ! -f wheelhouse/*.whl ]; then \
-		echo "❌ No wheel found. Run 'make dist' first."; \
-		exit 1; \
-	fi
-	@if [ ! -d .venv ]; then \
-		echo "📦 Creating virtual environment..."; \
-		python3 -m venv .venv; \
-	fi
-	@. .venv/bin/activate && pip install -q wheelhouse/*.whl --force-reinstall
-	@. .venv/bin/activate && python -c "import boxlite; print(f'✓ BoxLite {boxlite.__version__} imported successfully')"
-	@echo "🧪 Running examples..."
-	@. .venv/bin/activate && python examples/python/execute.py
+	@echo "🧪 Running Rust tests..."
+	@cargo test --workspace --exclude boxlite-guest --lib --tests
 
 # Format all Rust code
 fmt:

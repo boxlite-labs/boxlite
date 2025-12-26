@@ -83,6 +83,7 @@ impl ExecutionInterface {
     }
 
     /// Wait for execution to complete.
+    #[allow(dead_code)] // API method for future use
     pub async fn wait(&mut self, execution_id: &str) -> BoxliteResult<ExecResult> {
         let request = WaitRequest {
             execution_id: execution_id.to_string(),

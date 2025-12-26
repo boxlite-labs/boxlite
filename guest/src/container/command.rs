@@ -311,6 +311,33 @@ impl ContainerCommand {
         }
 
         // Configure and spawn
+        tracing::debug!(
+            container_id = %self.id,
+            state_root = %self.state_root.display(),
+            program = %program,
+            args = ?container_args,
+            "About to call libcontainer build() to exec into container"
+        );
+
+        // Check container status before attempting exec
+        let container_state_path = self.state_root.join(&self.id);
+        if let Ok(container) =
+            libcontainer::container::Container::load(container_state_path.clone())
+        {
+            tracing::debug!(
+                container_id = %self.id,
+                status = ?container.status(),
+                state_path = %container_state_path.display(),
+                "Container status before exec"
+            );
+        } else {
+            tracing::warn!(
+                container_id = %self.id,
+                state_path = %container_state_path.display(),
+                "Failed to load container status before exec"
+            );
+        }
+
         let pid = builder
             .as_tenant()
             .with_capabilities(capability_names())
@@ -321,11 +348,38 @@ impl ContainerCommand {
             .with_container_args(container_args.clone())
             .build()
             .map_err(|e| {
+                tracing::error!(
+                    container_id = %self.id,
+                    program = %program,
+                    args = ?container_args,
+                    error = %e,
+                    state_root = %self.state_root.display(),
+                    "Libcontainer build() failed - likely container status issue"
+                );
+
+                // Try to get container status after failure
+                let container_state_path = self.state_root.join(&self.id);
+                if let Ok(container) =
+                    libcontainer::container::Container::load(container_state_path.clone())
+                {
+                    tracing::error!(
+                        container_id = %self.id,
+                        status = ?container.status(),
+                        "Container status after exec failure"
+                    );
+                }
+
                 BoxliteError::Internal(format!(
                     "Failed to spawn '{}' with args {:?}: {}",
                     program, container_args, e
                 ))
             })?;
+
+        tracing::debug!(
+            container_id = %self.id,
+            pid = pid.as_raw(),
+            "Successfully spawned process in container"
+        );
 
         Ok(pid)
     }

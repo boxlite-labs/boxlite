@@ -148,6 +148,10 @@ pub(crate) fn create_oci_bundle(
 // ====================
 
 /// Create container using libcontainer (does not start it)
+///
+/// Uses default stdio (inherited from parent process).
+/// For custom stdio, use `create_container_with_stdio`.
+#[allow(dead_code)]
 pub(crate) fn create_container(
     container_id: &str,
     state_root: &Path,
@@ -172,6 +176,50 @@ pub(crate) fn create_container(
         })?;
 
     tracing::info!(container_id, "Created OCI container");
+    Ok(())
+}
+
+/// Create container with custom stdio file descriptors.
+///
+/// This allows the init process to use pipes controlled by boxlite-guest,
+/// keeping interactive entrypoints (like /bin/sh) alive by holding stdin open.
+///
+/// # Arguments
+///
+/// * `container_id` - Unique container identifier
+/// * `state_root` - Directory for libcontainer state
+/// * `bundle_path` - OCI bundle directory with config.json
+/// * `stdio_fds` - Custom stdio file descriptors for init process
+pub(crate) fn create_container_with_stdio(
+    container_id: &str,
+    state_root: &Path,
+    bundle_path: &Path,
+    stdio_fds: super::stdio::InitStdioFds,
+) -> BoxliteResult<()> {
+    // Note: with_stdin/stdout/stderr must be called before as_init()
+    // because they're methods on ContainerBuilder, not InitContainerBuilder
+    ContainerBuilder::new(container_id.to_string(), SyscallType::default())
+        .with_root_path(state_root)
+        .map_err(|e| BoxliteError::Internal(format!("Failed to set container root path: {}", e)))?
+        .validate_id()
+        .map_err(|e| BoxliteError::Internal(format!("Invalid container ID: {}", e)))?
+        .with_stdin(stdio_fds.stdin)
+        .with_stdout(stdio_fds.stdout)
+        .with_stderr(stdio_fds.stderr)
+        .as_init(bundle_path)
+        .with_systemd(false)
+        .with_detach(true)
+        .build()
+        .map_err(|e| {
+            BoxliteError::Internal(format!(
+                "Failed to create container {} at bundle {}: {}",
+                container_id,
+                bundle_path.display(),
+                e
+            ))
+        })?;
+
+    tracing::info!(container_id, "Created OCI container with custom stdio");
     Ok(())
 }
 

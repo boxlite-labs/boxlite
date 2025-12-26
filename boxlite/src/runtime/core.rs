@@ -1,18 +1,19 @@
 //! High-level sandbox runtime structures.
 
-use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
 
-use crate::litebox::{BoxBuilder, LiteBox};
+use crate::db::{BoxStore, Database};
+use crate::litebox::config::BoxConfig;
+use crate::litebox::{BoxManager, LiteBox};
 use crate::runtime::constants::filenames;
 use crate::runtime::guest_rootfs::GuestRootfs;
 use crate::runtime::layout::{FilesystemLayout, FsLayoutConfig};
 use crate::runtime::lock::RuntimeLock;
-use crate::runtime::options::{BoxOptions, BoxliteOptions, RootfsSpec};
+use crate::runtime::options::{BoxOptions, BoxliteOptions};
+use crate::runtime::types::{BoxID, BoxInfo, BoxState, BoxStatus, generate_box_id};
 use crate::{
     images::ImageManager,
     init_logging_for,
-    management::{BoxID, BoxInfo, BoxManager, BoxMetadata, BoxState, generate_box_id},
     metrics::{RuntimeMetrics, RuntimeMetricsStorage},
     vmm::VmmKind,
 };
@@ -55,43 +56,48 @@ pub struct BoxliteRuntime {
 /// **Shared via Arc**: This is the actual shared state that can be cloned cheaply.
 pub type RuntimeInner = Arc<RuntimeInnerImpl>;
 
-/// Runtime inner implementation - just data structure with lock helpers.
-///
-/// **Design Philosophy**: This struct only holds state and provides lock acquisition helpers.
-/// It does NOT wrap BoxManager/ImageManager operations. Components acquire the lock directly
-/// and call manager methods.
+/// Runtime inner implementation.
 ///
 /// **Locking Strategy**:
-/// - `mutable`: Protected by `RwLock` - concurrent reads, exclusive writes
-/// - `immutable`: No lock needed - never changes after creation
+/// - `sync_state`: Empty coordination lock - acquire when multi-step operations
+///   on box_manager/image_manager need atomicity
+/// - All managers have internal locking for individual operations
+/// - Immutable fields: No lock needed - never change after creation
+/// - Atomic fields: Lock-free (RuntimeMetricsStorage uses AtomicU64)
 pub struct RuntimeInnerImpl {
-    /// All mutable state (boxes, images) - protected by ONE lock
+    /// Coordination lock for multi-step atomic operations.
+    /// Acquire this BEFORE accessing box_manager/image_manager
+    /// when you need atomicity across multiple operations.
     pub(crate) sync_state: RwLock<SynchronizedState>,
 
-    /// Immutable configuration and resources
-    pub(crate) non_sync_state: NonSynchronizedState,
-}
-
-/// Mutable runtime state protected by RwLock.
-///
-/// **Design**: Both managers have their internal locks removed.
-/// All access must go through RuntimeInnerImpl::mutable lock.
-pub struct SynchronizedState {
+    // ========================================================================
+    // COORDINATION REQUIRED: Acquire sync_state lock for multi-step operations
+    // ========================================================================
+    /// Box manager with integrated persistence (has internal RwLock)
     pub(crate) box_manager: BoxManager,
+    /// Image management (has internal RwLock via ImageStore)
     pub(crate) image_manager: ImageManager,
-}
 
-/// Immutable runtime resources (no lock needed).
-///
-/// **Thread Safety**: All fields are either `Clone` or wrapped in `Arc`.
-/// RuntimeMetricsStorage lives here because it uses AtomicU64 internally - no lock needed!
-pub struct NonSynchronizedState {
+    // ========================================================================
+    // NO COORDINATION NEEDED: Immutable or internally synchronized
+    // ========================================================================
+    /// Filesystem layout (immutable after init)
     pub(crate) layout: FilesystemLayout,
+    /// Guest rootfs lazy initialization (Arc<OnceCell>)
     pub(crate) guest_rootfs: Arc<OnceCell<GuestRootfs>>,
     /// Runtime-wide metrics (AtomicU64 based, lock-free)
     pub(crate) runtime_metrics: RuntimeMetricsStorage,
+
+    /// Runtime filesystem lock (held for lifetime). Prevent from multiple process run on same
+    /// BOXLITE_HOME directory
     _runtime_lock: RuntimeLock,
 }
+
+/// Empty coordination lock.
+///
+/// Acquire this when you need atomicity across multiple operations on
+/// box_manager or image_manager.
+pub struct SynchronizedState;
 
 // ============================================================================
 // RUNTIME IMPLEMENTATION
@@ -153,22 +159,32 @@ impl BoxliteRuntime {
             ))
         })?;
 
+        let db = Database::open(&layout.db_dir().join("boxlite.db")).map_err(|e| {
+            BoxliteError::Storage(format!(
+                "Failed to initialize database at {}: {}",
+                layout.home_dir().join("boxlite.db").display(),
+                e
+            ))
+        })?;
+        let box_store = BoxStore::new(db);
+
         let inner = Arc::new(RuntimeInnerImpl {
-            sync_state: RwLock::new(SynchronizedState {
-                box_manager: BoxManager::new(),
-                image_manager,
-            }),
-            non_sync_state: NonSynchronizedState {
-                layout,
-                guest_rootfs: Arc::new(OnceCell::new()),
-                runtime_metrics: RuntimeMetricsStorage::new(),
-                _runtime_lock: runtime_lock,
-            },
+            sync_state: RwLock::new(SynchronizedState),
+            box_manager: BoxManager::new(box_store),
+            image_manager,
+            layout,
+            guest_rootfs: Arc::new(OnceCell::new()),
+            runtime_metrics: RuntimeMetricsStorage::new(),
+            _runtime_lock: runtime_lock,
         });
 
         tracing::debug!("initialized runtime");
 
-        Ok(Self { inner })
+        // Recover boxes from database
+        let runtime = Self { inner };
+        runtime.recover_boxes()?;
+
+        Ok(runtime)
     }
 
     /// Create a new runtime with default options.
@@ -274,68 +290,125 @@ impl BoxliteRuntime {
             ))
     }
 
-    /// Create a sandbox handle.
+    /// Create a box handle.
     ///
     /// Returns immediately with a LiteBox handle. Heavy initialization (image pulling,
     /// Box startup) is deferred until the first API call on the handle.
     ///
     /// **Single Responsibility**: Only registers box metadata and creates handle.
     /// Box startup happens separately in LiteBox::start().
-    pub fn create(&self, options: BoxOptions) -> BoxliteResult<(BoxID, LiteBox)> {
-        let box_id = generate_box_id();
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use boxlite::runtime::BoxliteRuntime;
+    /// # use boxlite::runtime::options::BoxOptions;
+    /// # fn example(runtime: &BoxliteRuntime) -> Result<(), Box<dyn std::error::Error>> {
+    /// let litebox = runtime.create(BoxOptions::default())?;
+    /// println!("Created box: {}", litebox.id());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn create(&self, options: BoxOptions) -> BoxliteResult<LiteBox> {
+        // Stage 1: Initialize box variables with defaults
+        let (config, state) = self.init_box_variables(&options);
 
-        // Register box metadata
-        self.register_box(&box_id, &options)?;
+        // Register in BoxManager (handles DB persistence internally)
+        self.inner
+            .box_manager
+            .register(config.clone(), state.clone())?;
 
         // Increment boxes_created counter (lock-free!)
         self.inner
-            .non_sync_state
             .runtime_metrics
             .boxes_created
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Create builder and handle
-        let builder = BoxBuilder::new(box_id.clone(), Arc::clone(&self.inner), options);
-        let handle = LiteBox::new(box_id.clone(), Arc::clone(&self.inner), builder);
+        // Create LiteBox from config and state
+        LiteBox::new(Arc::clone(&self.inner), config, &state)
+    }
 
-        Ok((box_id, handle))
+    /// Get a handle to an existing box.
+    ///
+    /// Returns a LiteBox handle that can be used to operate on the box.
+    /// This follows Podman's pattern where all operations go through the object handle.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use boxlite::runtime::BoxliteRuntime;
+    /// # async fn example(runtime: &BoxliteRuntime, box_id: &boxlite::BoxID) -> Result<(), Box<dyn std::error::Error>> {
+    /// if let Some(litebox) = runtime.get(box_id)? {
+    ///     litebox.stop().await?;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn get(&self, id: &BoxID) -> BoxliteResult<Option<LiteBox>> {
+        tracing::trace!(box_id = %id, "BoxliteRuntime::get called");
+
+        let Some((config, state)) = self.inner.box_manager.get(id)? else {
+            tracing::trace!(box_id = %id, "Box not found in manager");
+            return Ok(None);
+        };
+
+        tracing::trace!(
+            box_id = %id,
+            status = ?state.status,
+            pid = ?state.pid,
+            "Retrieved box from manager, creating LiteBox"
+        );
+
+        let litebox = LiteBox::new(Arc::clone(&self.inner), config, &state)?;
+
+        tracing::trace!(box_id = %id, "LiteBox created successfully");
+        Ok(Some(litebox))
+    }
+
+    /// Get information about a specific box (without creating a handle).
+    ///
+    /// Use this when you only need to read box metadata without operating on it.
+    pub fn get_info(&self, id: &BoxID) -> BoxliteResult<Option<BoxInfo>> {
+        self.inner.box_manager.get_info(id)
     }
 
     /// List all boxes, sorted by creation time (newest first).
     ///
-    /// **State Refresh**: Automatically checks process liveness and updates states
-    /// before returning results.
-    pub fn list(&self) -> BoxliteResult<Vec<BoxInfo>> {
-        // Acquire write lock
-        let state = self.inner.acquire_write()?;
-
-        // Call BoxManager methods directly
-        state.box_manager.refresh_states()?;
-        state.box_manager.list()
+    /// Returns metadata for all boxes without creating handles.
+    /// Use `get()` to get a handle for operating on a specific box.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use boxlite::runtime::BoxliteRuntime;
+    /// # fn example(runtime: &BoxliteRuntime) -> Result<(), Box<dyn std::error::Error>> {
+    /// for info in runtime.list_info()? {
+    ///     println!("{}: {:?}", info.id, info.status);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn list_info(&self) -> BoxliteResult<Vec<BoxInfo>> {
+        self.inner.box_manager.list()
     }
 
-    /// Get information about a specific box.
-    pub fn get(&self, id: &BoxID) -> BoxliteResult<Option<BoxInfo>> {
-        // Acquire read lock
-        let state = self.inner.acquire_read()?;
-
-        // Call BoxManager method directly and convert to BoxInfo
-        Ok(state.box_manager.get(id)?.map(|m| m.to_info()))
-    }
-
-    /// Remove a stopped box from the manager.
+    /// Check if a box with the given ID exists.
     ///
-    /// # Errors
+    /// More efficient than `get()` when you only need to check existence.
     ///
-    /// Returns error if:
-    /// - Box doesn't exist
-    /// - Box is still in an active state (Starting or Running)
-    pub fn remove(&self, id: &BoxID) -> BoxliteResult<()> {
-        // Acquire write lock
-        let state = self.inner.acquire_write()?;
-
-        // Call BoxManager method directly and discard the returned metadata
-        state.box_manager.remove(id).map(|_| ())
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use boxlite::runtime::BoxliteRuntime;
+    /// # fn example(runtime: &BoxliteRuntime, box_id: &boxlite::BoxID) -> Result<(), Box<dyn std::error::Error>> {
+    /// if runtime.exists(box_id)? {
+    ///     println!("Box {} exists", box_id);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn exists(&self, id: &BoxID) -> BoxliteResult<bool> {
+        Ok(self.inner.box_manager.get(id)?.is_some())
     }
 
     /// Get runtime-wide metrics.
@@ -357,7 +430,43 @@ impl BoxliteRuntime {
     /// ```
     pub fn metrics(&self) -> RuntimeMetrics {
         // No lock needed! RuntimeMetricsStorage uses AtomicU64 internally
-        RuntimeMetrics::new(self.inner.non_sync_state.runtime_metrics.clone())
+        RuntimeMetrics::new(self.inner.runtime_metrics.clone())
+    }
+
+    /// Remove a box completely.
+    ///
+    /// Follows Podman's `Runtime.RemoveContainer` pattern:
+    /// - If `force` is true, stops the box first if running
+    /// - If `force` is false, returns error if box is active
+    /// - Removes box directory and all resources
+    /// - Deletes from database
+    ///
+    /// # Arguments
+    /// * `id` - Box ID to remove
+    /// * `force` - If true, stop the box first; if false, error on active box
+    ///
+    /// # Errors
+    ///
+    /// Returns error if:
+    /// - Box doesn't exist
+    /// - Box is active and `force` is false
+    /// - Stop fails (when `force` is true)
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use boxlite::runtime::BoxliteRuntime;
+    /// # async fn example(runtime: &BoxliteRuntime, box_id: &boxlite::BoxID) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Force remove (stops if running)
+    /// runtime.remove(box_id, true).await?;
+    ///
+    /// // Non-force remove (fails if running)
+    /// runtime.remove(box_id, false).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn remove(&self, id: &BoxID, force: bool) -> BoxliteResult<()> {
+        self.inner.remove_box(id, force)
     }
 }
 
@@ -366,33 +475,104 @@ impl BoxliteRuntime {
 // ============================================================================
 
 impl BoxliteRuntime {
-    /// Register box metadata in manager.
+    /// Initialize box variables with defaults.
     ///
-    /// **Single Responsibility**: Only creates and registers metadata.
-    /// Does not start Box or initialize resources.
-    fn register_box(&self, box_id: &BoxID, options: &BoxOptions) -> BoxliteResult<()> {
-        let metadata = BoxMetadata {
-            id: box_id.clone(),
-            state: BoxState::Starting,
-            created_at: Utc::now(),
-            pid: None,
-            transport: Transport::unix(filenames::unix_socket_path(
-                self.inner.non_sync_state.layout.home_dir(),
-                box_id,
-            )),
-            image: match &options.rootfs {
-                RootfsSpec::Image(r) => r.clone(),
-                RootfsSpec::RootfsPath(p) => format!("rootfs:{}", p),
-            },
-            cpus: options.cpus.unwrap_or(2),
-            memory_mib: options.memory_mib.unwrap_or(512),
-            labels: HashMap::new(),
-            engine_kind: VmmKind::Libkrun,
+    /// This is Stage 1 of box creation (following Podman's pattern):
+    /// - Allocates BoxConfig and BoxState structs
+    /// - Generates unique box ID (ULID format)
+    /// - Sets default values (engine, paths)
+    /// - Derives paths from box ID
+    ///
+    /// Does NOT register to database - caller must do that separately.
+    ///
+    /// # Arguments
+    /// * `options` - User-provided options to store in config
+    ///
+    /// # Returns
+    /// * `(BoxConfig, BoxState)` - Initialized config and state
+    fn init_box_variables(&self, options: &BoxOptions) -> (BoxConfig, BoxState) {
+        // Generate unique ID (26 chars, ULID format, sortable by time)
+        let box_id = generate_box_id();
+
+        // Record creation timestamp
+        let now = Utc::now();
+
+        // Derive paths from ID (computed from layout + ID)
+        let box_home = self.inner.layout.boxes_dir().join(box_id.as_str());
+        let socket_path = filenames::unix_socket_path(self.inner.layout.home_dir(), &box_id);
+        let ready_socket_path = box_home.join("sockets").join("ready.sock");
+
+        // Create config with defaults + user options
+        let config = BoxConfig {
+            id: box_id,
+            created_at: now,
+            options: options.clone(),
+            engine_kind: VmmKind::Libkrun, // Default engine
+            transport: Transport::unix(socket_path),
+            box_home,
+            ready_socket_path,
         };
 
-        // Acquire lock and register
-        let state = self.inner.acquire_write()?;
-        state.box_manager.register(metadata)
+        // Create initial state (status = Starting)
+        let state = BoxState::new();
+
+        (config, state)
+    }
+
+    /// Recover boxes from persistent storage on runtime startup.
+    ///
+    /// Loads all boxes from the database, validates PIDs, and updates states:
+    /// - Running: PID is valid and process is running (can reattach)
+    /// - Stopped: PID was set but process is dead, or no PID was set
+    fn recover_boxes(&self) -> BoxliteResult<()> {
+        use crate::util::{is_process_alive, is_same_process};
+
+        // Check for system reboot and reset active boxes
+        self.inner.box_manager.check_and_handle_reboot()?;
+
+        let persisted = self.inner.box_manager.load_all_persisted()?;
+
+        tracing::info!("Recovering {} boxes from database", persisted.len());
+
+        for (config, mut state) in persisted {
+            let box_id = &config.id;
+
+            // Validate PID if present
+            if let Some(pid) = state.pid {
+                if is_process_alive(pid) && is_same_process(pid, box_id.as_str()) {
+                    // Process is alive and it's our boxlite-shim - box stays Running
+                    if state.status == BoxStatus::Running {
+                        tracing::info!("Recovered box {} as Running (PID {})", box_id, pid);
+                    }
+                } else {
+                    // Process died or PID was reused - mark as Stopped
+                    if state.status.is_active() {
+                        state.mark_crashed(); // This sets status to Stopped
+                        tracing::warn!(
+                            "Box {} marked as Stopped (PID {} not found or different process)",
+                            box_id,
+                            pid
+                        );
+                    }
+                }
+            } else {
+                // No PID - box was stopped gracefully or never started
+                if state.status == BoxStatus::Running || state.status == BoxStatus::Starting {
+                    // This shouldn't happen, but handle it gracefully
+                    state.set_status(BoxStatus::Stopped);
+                    tracing::warn!(
+                        "Box {} was Running/Starting but had no PID, marked as Stopped",
+                        box_id
+                    );
+                }
+            }
+
+            // Register recovered box in memory cache
+            self.inner.box_manager.register_recovered(config, state)?;
+        }
+
+        tracing::info!("Box recovery complete");
+        Ok(())
     }
 }
 
@@ -401,37 +581,84 @@ impl BoxliteRuntime {
 // ============================================================================
 
 impl RuntimeInnerImpl {
-    /// Acquire read lock with explicit error handling.
+    /// Acquire coordination lock for multi-step atomic operations.
     ///
-    /// **Single Responsibility**: Only acquires lock and provides error context.
-    /// Does NOT wrap any BoxManager/ImageManager operations.
-    ///
-    /// **Explicit Errors**: Self-documenting error messages that explain
-    /// what lock failed and why.
-    pub(crate) fn acquire_read(
-        &self,
-    ) -> BoxliteResult<std::sync::RwLockReadGuard<'_, SynchronizedState>> {
-        self.sync_state.read().map_err(|e| {
-            BoxliteError::Internal(format!("Runtime state lock poisoned (read): {}", e))
-        })
-    }
-
-    /// Acquire write lock with explicit error handling.
-    ///
-    /// **Single Responsibility**: Only acquires lock and provides error context.
+    /// Use this when you need atomicity across multiple operations on
+    /// box_manager or image_manager.
     pub(crate) fn acquire_write(
         &self,
     ) -> BoxliteResult<std::sync::RwLockWriteGuard<'_, SynchronizedState>> {
-        self.sync_state.write().map_err(|e| {
-            BoxliteError::Internal(format!("Runtime state lock poisoned (write): {}", e))
-        })
+        self.sync_state
+            .write()
+            .map_err(|e| BoxliteError::Internal(format!("Coordination lock poisoned: {}", e)))
+    }
+
+    /// Remove a box from the runtime (internal implementation).
+    ///
+    /// This is the internal implementation called by both `BoxliteRuntime::remove()`
+    /// and `LiteBox::stop()` (when `auto_remove=true`).
+    ///
+    /// # Arguments
+    /// * `id` - Box ID to remove
+    /// * `force` - If true, kill the process first if running
+    ///
+    /// # Errors
+    /// - Box not found
+    /// - Box is active and force=false
+    pub(crate) fn remove_box(&self, id: &BoxID, force: bool) -> BoxliteResult<()> {
+        tracing::debug!(box_id = %id, force = force, "RuntimeInnerImpl::remove_box called");
+
+        // Get current state
+        let (config, state) = self
+            .box_manager
+            .get(id)?
+            .ok_or_else(|| BoxliteError::NotFound(id.to_string()))?;
+
+        // Check if box is active
+        if state.status.is_active() {
+            if force {
+                // Force mode: kill the process directly
+                if let Some(pid) = state.pid {
+                    tracing::info!(box_id = %id, pid = pid, "Force killing active box");
+                    crate::util::kill_process(pid);
+                }
+                // Update status to stopped
+                self.box_manager.update_status(id, BoxStatus::Stopped)?;
+                self.box_manager.update_pid(id, None)?;
+            } else {
+                // Non-force mode: error on active box
+                return Err(BoxliteError::InvalidState(format!(
+                    "cannot remove active box {} (status: {:?}). Use force=true to stop first",
+                    id, state.status
+                )));
+            }
+        }
+
+        // Remove from BoxManager (database-first)
+        self.box_manager.remove(id)?;
+
+        // Delete box directory
+        let box_home = config.box_home;
+        if box_home.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&box_home) {
+                tracing::warn!(
+                    box_id = %id,
+                    path = %box_home.display(),
+                    error = %e,
+                    "Failed to cleanup box directory"
+                );
+            }
+        }
+
+        tracing::info!(box_id = %id, "Removed box");
+        Ok(())
     }
 }
 
 impl std::fmt::Debug for BoxliteRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BoxliteRuntime")
-            .field("home_dir", &self.inner.non_sync_state.layout.home_dir())
+            .field("home_dir", &self.inner.layout.home_dir())
             .finish()
     }
 }
@@ -439,7 +666,7 @@ impl std::fmt::Debug for BoxliteRuntime {
 impl std::fmt::Debug for RuntimeInnerImpl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RuntimeInner")
-            .field("home_dir", &self.non_sync_state.layout.home_dir())
+            .field("home_dir", &self.layout.home_dir())
             .finish()
     }
 }

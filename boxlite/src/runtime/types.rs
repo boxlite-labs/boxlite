@@ -9,6 +9,9 @@ use std::fmt;
 
 use boxlite_shared::Transport;
 
+// Re-export status types from litebox module
+pub use crate::litebox::{BoxState, BoxStatus};
+
 /// Box identifier (ULID format for sortability).
 ///
 /// ULIDs are 26-character strings that encode:
@@ -119,48 +122,22 @@ impl AsRef<str> for ContainerId {
     }
 }
 
-/// Lifecycle state of a box.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BoxState {
-    /// Box subprocess is spawned but guest is not yet ready.
-    Starting,
-
-    /// Box is running and the guest server is accepting commands.
-    Running,
-
-    /// Box was shut down gracefully via `shutdown()`.
-    Stopped,
-
-    /// Box crashed, failed to start, or initialization timed out.
-    Failed,
-}
-
-impl BoxState {
-    /// Check if this state represents an active box.
-    pub fn is_active(&self) -> bool {
-        matches!(self, BoxState::Starting | BoxState::Running)
-    }
-
-    /// Check if this state represents a terminal state (no longer active).
-    pub fn is_terminal(&self) -> bool {
-        matches!(self, BoxState::Stopped | BoxState::Failed)
-    }
-}
-
 /// Public metadata about a box (returned by list operations).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BoxInfo {
     /// Unique box identifier (ULID).
     pub id: BoxID,
 
-    /// Current lifecycle state.
-    pub state: BoxState,
+    /// Current lifecycle status.
+    pub status: BoxStatus,
 
     /// Creation timestamp (UTC).
     pub created_at: DateTime<Utc>,
 
-    /// Process ID of the boxlite-shim subprocess (None if not started yet).
+    /// Last state change timestamp (UTC).
+    pub last_updated: DateTime<Utc>,
+
+    /// Process ID of the VMM subprocess (None if not running).
     pub pid: Option<u32>,
 
     /// Transport mechanism for guest communication.
@@ -179,49 +156,55 @@ pub struct BoxInfo {
     pub labels: HashMap<String, String>,
 }
 
-/// Internal metadata stored in the manager.
-///
-/// This contains all information needed to track a box,
-/// including fields not exposed in the public API.
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // engine_kind may be used in future phases
-pub(crate) struct BoxMetadata {
-    pub id: BoxID,
-    pub state: BoxState,
-    pub created_at: DateTime<Utc>,
-    pub pid: Option<u32>,
-    pub transport: Transport,
+impl BoxInfo {
+    /// Create BoxInfo from config and state.
+    pub fn new(config: &crate::litebox::config::BoxConfig, state: &BoxState) -> Self {
+        use crate::runtime::options::RootfsSpec;
 
-    // Original options used to create the box
-    pub image: String,
-    pub cpus: u8,
-    pub memory_mib: u32,
-    pub labels: HashMap<String, String>,
-
-    // Internal tracking
-    pub engine_kind: crate::vmm::VmmKind,
-}
-
-impl BoxMetadata {
-    /// Convert internal metadata to public BoxInfo.
-    pub fn to_info(&self) -> BoxInfo {
-        BoxInfo {
-            id: self.id.clone(),
-            state: self.state,
-            created_at: self.created_at,
-            pid: self.pid,
-            transport: self.transport.clone(),
-            image: self.image.clone(),
-            cpus: self.cpus,
-            memory_mib: self.memory_mib,
-            labels: self.labels.clone(),
+        Self {
+            id: config.id.clone(),
+            status: state.status,
+            created_at: config.created_at,
+            last_updated: state.last_updated,
+            pid: state.pid,
+            transport: config.transport.clone(),
+            image: match &config.options.rootfs {
+                RootfsSpec::Image(r) => r.clone(),
+                RootfsSpec::RootfsPath(p) => format!("rootfs:{}", p),
+            },
+            cpus: config.options.cpus.unwrap_or(2),
+            memory_mib: config.options.memory_mib.unwrap_or(512),
+            labels: HashMap::new(), // TODO: map from options.name or add labels field
         }
     }
 }
 
+impl PartialEq for BoxInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.status == other.status
+            && self.created_at == other.created_at
+            && self.pid == other.pid
+            && self.image == other.image
+            && self.cpus == other.cpus
+            && self.memory_mib == other.memory_mib
+            && self.labels == other.labels
+    }
+}
+
+// ============================================================================
+// BOX CONFIG (Podman-style separation)
+// ============================================================================
+
+// BoxMetadata is replaced by BoxConfig + BoxState
+// Old BoxMetadata struct removed - use BoxConfig + BoxState instead
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::litebox::config::BoxConfig;
+    use crate::runtime::options::{BoxOptions, RootfsSpec};
+    use std::path::PathBuf;
 
     #[test]
     fn test_generate_box_id() {
@@ -235,52 +218,44 @@ mod tests {
         // IDs should be unique
         assert_ne!(id1, id2);
 
-        // IDs should be sortable (later ID > earlier ID)
-        assert!(id2 > id1);
+        // Note: ULIDs generated in same millisecond may have random ordering,
+        // so we only test uniqueness, not ordering.
     }
 
-    #[test]
-    fn test_box_state_is_active() {
-        assert!(BoxState::Starting.is_active());
-        assert!(BoxState::Running.is_active());
-        assert!(!BoxState::Stopped.is_active());
-        assert!(!BoxState::Failed.is_active());
-    }
+    // BoxStatus and BoxState tests are in litebox/state
 
     #[test]
-    fn test_box_state_is_terminal() {
-        assert!(!BoxState::Starting.is_terminal());
-        assert!(!BoxState::Running.is_terminal());
-        assert!(BoxState::Stopped.is_terminal());
-        assert!(BoxState::Failed.is_terminal());
-    }
-
-    #[test]
-    fn test_metadata_to_info() {
-        use std::path::PathBuf;
-
-        let metadata = BoxMetadata {
+    fn test_config_state_to_info() {
+        let now = Utc::now();
+        let config = BoxConfig {
             id: "01HJK4TNRPQSXYZ8WM6NCVT9R5".to_string(),
-            state: BoxState::Running,
-            created_at: Utc::now(),
-            pid: Some(12345),
-            transport: Transport::unix(PathBuf::from("/tmp/boxlite.sock")),
-            image: "python:3.11".to_string(),
-            cpus: 4,
-            memory_mib: 1024,
-            labels: HashMap::new(),
+            created_at: now,
+            options: BoxOptions {
+                cpus: Some(4),
+                memory_mib: Some(1024),
+                rootfs: RootfsSpec::Image("python:3.11".to_string()),
+                ..Default::default()
+            },
             engine_kind: crate::vmm::VmmKind::Libkrun,
+            transport: Transport::unix(PathBuf::from("/tmp/boxlite.sock")),
+            box_home: PathBuf::from("/tmp/box"),
+            ready_socket_path: PathBuf::from("/tmp/ready.sock"),
         };
 
-        let info = metadata.to_info();
+        let mut state = BoxState::new();
+        state.set_pid(Some(12345));
+        let _ = state.transition_to(BoxStatus::Running);
 
-        assert_eq!(info.id, metadata.id);
-        assert_eq!(info.state, metadata.state);
-        assert_eq!(info.pid, metadata.pid);
-        assert_eq!(info.transport, metadata.transport);
-        assert_eq!(info.image, metadata.image);
-        assert_eq!(info.cpus, metadata.cpus);
-        assert_eq!(info.memory_mib, metadata.memory_mib);
+        let info = BoxInfo::new(&config, &state);
+
+        assert_eq!(info.id, config.id);
+        assert_eq!(info.status, state.status);
+        assert_eq!(info.created_at, config.created_at);
+        assert_eq!(info.pid, state.pid);
+        assert_eq!(info.transport, config.transport);
+        assert_eq!(info.image, "python:3.11");
+        assert_eq!(info.cpus, 4);
+        assert_eq!(info.memory_mib, 1024);
     }
 
     #[test]

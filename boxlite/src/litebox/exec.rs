@@ -353,7 +353,7 @@ pub(crate) async fn exec(litebox: &LiteBox, command: BoxCommand) -> BoxliteResul
     let result = exec_interface.exec(command).await;
 
     // Instrument metrics
-    metrics::instrument_exec_metrics(litebox, inner, result.is_err());
+    metrics::instrument_exec_metrics(litebox, &inner, result.is_err());
 
     // Assemble Execution from components
     let components = result?;

@@ -1,3 +1,5 @@
+pub mod process;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -6,6 +8,9 @@ use tracing_appender::non_blocking::NonBlocking;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt};
+
+// Re-export process utilities
+pub use process::{is_process_alive, is_same_process, kill_process};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 unsafe extern "C" {
@@ -339,6 +344,11 @@ mod tests {
         // Create a temporary directory structure
         let temp_dir = TempDir::new().unwrap();
         let rootfs = temp_dir.path();
+
+        // Set rootfs to 0700 (like a real rootfs would be)
+        let mut perms = fs::metadata(rootfs).unwrap().permissions();
+        perms.set_mode(0o700);
+        fs::set_permissions(rootfs, perms).unwrap();
 
         // Create test files with different permissions
         let file1 = rootfs.join("executable");

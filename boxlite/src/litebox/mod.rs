@@ -5,17 +5,24 @@
 //! ## Architecture
 //!
 //! This module is organized into focused submodules:
+//! - `status`: Box lifecycle status and state machine
 //! - `init`: Initialization orchestration (image pulling, rootfs prep, Box startup)
 //! - `lifecycle`: State management (start/stop/destroy/cleanup)
 //! - `exec`: Command execution
 //! - `metrics`: Metrics collection and aggregation
 
+pub(crate) mod config;
 mod exec;
 mod init;
+mod inner;
 mod lifecycle;
+mod manager;
 mod metrics;
+mod state;
 
 pub use exec::{BoxCommand, ExecResult, ExecStderr, ExecStdin, ExecStdout, Execution, ExecutionId};
+pub(crate) use manager::BoxManager;
+pub use state::{BoxState, BoxStatus};
 
 pub(crate) use init::BoxBuilder;
 
@@ -23,8 +30,9 @@ use crate::metrics::BoxMetrics;
 use crate::runtime::RuntimeInner;
 use crate::{BoxID, BoxInfo};
 use boxlite_shared::errors::BoxliteResult;
+use config::BoxConfig;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use tokio::sync::OnceCell;
 
 /// BoxHandle represents a running Box.
 ///
@@ -39,26 +47,73 @@ use tokio::sync::OnceCell;
 ///
 /// **Lazy Initialization**: Heavy initialization (images pulling, Box startup) is deferred
 /// until the first API call that requires the box to be running.
+///
+/// **Restart Support**: Uses tokio::sync::RwLock<Option<Arc<BoxInner>>> instead of OnceCell
+/// to allow replacing the inner state during restart operations.
 pub struct LiteBox {
     id: BoxID,
     runtime: RuntimeInner,
-    inner: OnceCell<init::BoxInner>,
+    inner: tokio::sync::RwLock<Option<Arc<init::BoxInner>>>,
     builder: tokio::sync::Mutex<Option<BoxBuilder>>,
     is_shutdown: AtomicBool,
+    /// Automatically remove box when stopped
+    auto_remove: bool,
 }
 
 impl LiteBox {
-    /// Create a new handle.
+    /// Create a LiteBox from config and state.
     ///
-    /// **Internal Use**: Called by BoxliteRuntime::create().
-    pub(crate) fn new(id: BoxID, runtime: RuntimeInner, builder: BoxBuilder) -> Self {
-        Self {
-            id,
+    /// Works for both new boxes (from create()) and recovered boxes (from get()).
+    /// The state determines initialization mode:
+    /// - `Starting`: new box, normal init
+    /// - `Stopped`: restart, reuse existing rootfs
+    /// - `Running`: reattach (handled in ensure_ready)
+    ///
+    /// **Internal Use**: Called by BoxliteRuntime::create() and BoxliteRuntime::get().
+    pub(crate) fn new(
+        runtime: RuntimeInner,
+        config: BoxConfig,
+        state: &BoxState,
+    ) -> BoxliteResult<Self> {
+        tracing::trace!(
+            box_id = %config.id,
+            status = ?state.status,
+            "LiteBox::new called"
+        );
+
+        // Create builder for states that can use it
+        let builder = if state.status.can_exec() {
+            tracing::trace!(
+                box_id = %config.id,
+                status = ?state.status,
+                "Status can_exec, creating BoxBuilder"
+            );
+            Some(BoxBuilder::new(
+                Arc::clone(&runtime),
+                config.clone(),
+                state.clone(),
+            )?)
+        } else {
+            tracing::trace!(
+                box_id = %config.id,
+                status = ?state.status,
+                "Status cannot exec, no builder created"
+            );
+            None
+        };
+
+        tracing::trace!(box_id = %config.id, has_builder = builder.is_some(), "LiteBox created");
+
+        let auto_remove = config.options.auto_remove;
+
+        Ok(Self {
+            id: config.id.clone(),
             runtime,
-            inner: OnceCell::new(),
-            builder: tokio::sync::Mutex::new(Some(builder)),
+            inner: tokio::sync::RwLock::new(None),
+            builder: tokio::sync::Mutex::new(builder),
             is_shutdown: AtomicBool::new(false),
-        }
+            auto_remove,
+        })
     }
 
     /// Get the unique identifier for this box.
@@ -124,12 +179,35 @@ impl LiteBox {
         metrics::metrics(self).await
     }
 
-    /// Gracefully shut down the box.
+    /// Stop the box gracefully.
     ///
-    /// Stops the Box, cleans up resources, and removes the box directory.
-    /// Returns `Ok(true)` if shutdown was performed, `Ok(false)` if already shut down.
-    pub async fn shutdown(&self) -> BoxliteResult<bool> {
-        lifecycle::shutdown(self).await
+    /// The VM is stopped but the box directory and state are preserved.
+    /// You can restart the box later by calling `exec()` on a new handle
+    /// obtained via `runtime.get()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if:
+    /// - Box is not initialized
+    /// - Box is not in a stoppable state
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # async fn example(litebox: boxlite::LiteBox, runtime: &boxlite::BoxliteRuntime) -> Result<(), Box<dyn std::error::Error>> {
+    /// let box_id = litebox.id().clone();
+    ///
+    /// // Stop the box (preserves state)
+    /// litebox.stop().await?;
+    ///
+    /// // Can restart later via get() + exec()
+    /// let litebox = runtime.get(&box_id)?.unwrap();
+    /// litebox.exec(boxlite::BoxCommand::new("echo").arg("restarted")).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn stop(&self) -> BoxliteResult<()> {
+        lifecycle::stop(self).await
     }
 }
 

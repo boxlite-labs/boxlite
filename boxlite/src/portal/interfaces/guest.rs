@@ -61,6 +61,7 @@ impl GuestInterface {
     }
 
     /// Ping the guest (health check).
+    #[allow(dead_code)] // API method for future health checks
     pub async fn ping(&mut self) -> BoxliteResult<()> {
         let _response = self.client.ping(PingRequest {}).await?;
         Ok(())

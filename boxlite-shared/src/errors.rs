@@ -42,6 +42,22 @@ pub enum BoxliteError {
 
     #[error("unsupported: {0}")]
     Unsupported(String),
+
+    /// Box not found in registry or database.
+    #[error("box not found: {0}")]
+    NotFound(String),
+
+    /// Box is in wrong state for the requested operation.
+    #[error("invalid state: {0}")]
+    InvalidState(String),
+
+    /// Database operation failed.
+    #[error("database error: {0}")]
+    Database(String),
+
+    /// Metadata corruption or parsing error.
+    #[error("metadata error: {0}")]
+    MetadataError(String),
 }
 
 // Implement From for common error types to enable `?` operator

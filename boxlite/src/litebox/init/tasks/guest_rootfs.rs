@@ -1,19 +1,68 @@
-//! Stage 3: Guest rootfs preparation.
+//! Task: Guest rootfs preparation.
 //!
 //! Lazily initializes the bootstrap guest rootfs as a disk image (shared across all boxes).
+//! Then creates or reuses per-box COW overlay disk.
 
-use crate::disk::create_ext4_from_dir;
+use super::{InitCtx, log_task_error, task_start};
+use crate::disk::{BackingFormat, Disk, DiskFormat, Qcow2Helper, create_ext4_from_dir};
 use crate::litebox::init::types::{GuestRootfsInput, GuestRootfsOutput};
+use crate::pipeline::PipelineTask;
 use crate::rootfs::RootfsBuilder;
 use crate::runtime::constants::images;
 use crate::runtime::guest_rootfs::{GuestRootfs, Strategy};
+use crate::runtime::layout::BoxFilesystemLayout;
 use crate::util;
+use async_trait::async_trait;
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
+use std::sync::Arc;
 
-/// Get or initialize bootstrap guest rootfs.
-///
-/// **Single Responsibility**: Guest rootfs lazy initialization.
-pub async fn run(input: GuestRootfsInput<'_>) -> BoxliteResult<GuestRootfsOutput> {
+pub struct GuestRootfsTask;
+
+#[async_trait]
+impl PipelineTask<InitCtx> for GuestRootfsTask {
+    async fn run(self: Box<Self>, ctx: InitCtx) -> BoxliteResult<()> {
+        let task_name = self.name();
+        let box_id = task_start(&ctx, task_name).await;
+
+        let (runtime, guest_rootfs_cell, layout, reuse_rootfs) = {
+            let ctx = ctx.lock().await;
+            let layout = ctx
+                .fs_output
+                .as_ref()
+                .ok_or_else(|| BoxliteError::Internal("filesystem task must run first".into()))?
+                .layout
+                .clone();
+            (
+                ctx.runtime.clone(),
+                Arc::clone(&ctx.guest_rootfs_cell),
+                layout,
+                ctx.should_reuse_rootfs(),
+            )
+        };
+
+        let output = run_guest_rootfs(GuestRootfsInput {
+            runtime: &runtime,
+            guest_rootfs_cell: &guest_rootfs_cell,
+            layout: &layout,
+            reuse_rootfs,
+        })
+        .await
+        .inspect_err(|e| log_task_error(&box_id, task_name, e))?;
+
+        let mut ctx = ctx.lock().await;
+        ctx.guest_rootfs_output = Some(output);
+
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "guest_rootfs_init"
+    }
+}
+
+/// Get or initialize bootstrap guest rootfs, then create/reuse per-box COW disk.
+async fn run_guest_rootfs(input: GuestRootfsInput<'_>) -> BoxliteResult<GuestRootfsOutput> {
+    // First, get or create the shared base guest rootfs
     let guest_rootfs = input
         .guest_rootfs_cell
         .get_or_try_init(|| async {
@@ -30,11 +79,96 @@ pub async fn run(input: GuestRootfsInput<'_>) -> BoxliteResult<GuestRootfsOutput
 
             Ok::<_, BoxliteError>(guest_rootfs)
         })
-        .await?;
+        .await?
+        .clone();
+
+    // Now create or reuse the per-box COW disk
+    let (updated_guest_rootfs, disk) =
+        create_or_reuse_cow_disk(&guest_rootfs, input.layout, input.reuse_rootfs)?;
 
     Ok(GuestRootfsOutput {
-        guest_rootfs: guest_rootfs.clone(),
+        guest_rootfs: updated_guest_rootfs,
+        disk,
     })
+}
+
+/// Create new COW disk or reuse existing one for restart.
+fn create_or_reuse_cow_disk(
+    guest_rootfs: &GuestRootfs,
+    layout: &BoxFilesystemLayout,
+    reuse_rootfs: bool,
+) -> BoxliteResult<(GuestRootfs, Option<Disk>)> {
+    let guest_rootfs_disk_path = layout.root().join("guest-rootfs.qcow2");
+
+    if reuse_rootfs {
+        // Restart: reuse existing COW disk
+        tracing::info!(
+            disk_path = %guest_rootfs_disk_path.display(),
+            "Restart mode: reusing existing guest rootfs disk"
+        );
+
+        if !guest_rootfs_disk_path.exists() {
+            return Err(BoxliteError::Storage(format!(
+                "Cannot restart: guest rootfs disk not found at {}",
+                guest_rootfs_disk_path.display()
+            )));
+        }
+
+        // Open existing disk as persistent
+        let disk = Disk::new(guest_rootfs_disk_path.clone(), DiskFormat::Qcow2, true);
+
+        // Update guest_rootfs with the COW disk path
+        let mut updated = guest_rootfs.clone();
+        if let Strategy::Disk { ref disk_path, .. } = guest_rootfs.strategy {
+            updated.strategy = Strategy::Disk {
+                disk_path: disk_path.clone(), // Keep base path reference
+                device_path: None,             // Will be set by VmmSpawnTask
+            };
+        }
+
+        return Ok((updated, Some(disk)));
+    }
+
+    // Fresh start: create new COW disk
+    if let Strategy::Disk { ref disk_path, .. } = guest_rootfs.strategy {
+        let base_disk_path = disk_path;
+
+        // Get base disk size
+        let base_size = std::fs::metadata(base_disk_path)
+            .map(|m| m.len())
+            .unwrap_or(512 * 1024 * 1024);
+
+        // Create COW child disk
+        let qcow2_helper = Qcow2Helper::new();
+        let temp_disk = qcow2_helper.create_cow_child_disk(
+            base_disk_path,
+            BackingFormat::Raw,
+            &guest_rootfs_disk_path,
+            base_size,
+        )?;
+
+        // Make disk persistent so it survives stop/restart
+        let disk_path_owned = temp_disk.leak();
+        let disk = Disk::new(disk_path_owned, DiskFormat::Qcow2, true);
+
+        tracing::info!(
+            cow_disk = %guest_rootfs_disk_path.display(),
+            base_disk = %base_disk_path.display(),
+            "Created guest rootfs COW overlay (persistent)"
+        );
+
+        // Update guest_rootfs with COW disk path
+        let mut updated = guest_rootfs.clone();
+        updated.strategy = Strategy::Disk {
+            disk_path: guest_rootfs_disk_path,
+            device_path: None, // Will be set by VmmSpawnTask
+        };
+
+        Ok((updated, Some(disk)))
+    } else {
+        // Non-disk strategy - no COW disk needed
+        Ok((guest_rootfs.clone(), None))
+    }
 }
 
 /// Prepare guest rootfs as a disk image.
@@ -80,7 +214,7 @@ async fn prepare_guest_rootfs(
     tracing::info!("Creating guest rootfs disk image from layers (first run)");
 
     // Extract layers to temp directory within boxlite home (same filesystem as destination)
-    let temp_base = runtime.non_sync_state.layout.temp_dir();
+    let temp_base = runtime.layout.temp_dir();
     let temp_dir = tempfile::tempdir_in(&temp_base)
         .map_err(|e| BoxliteError::Storage(format!("Failed to create temp directory: {}", e)))?;
     let merged_path = temp_dir.path().join("merged");
@@ -156,11 +290,8 @@ async fn prepare_guest_rootfs(
 async fn pull_guest_rootfs_image(
     runtime: &crate::runtime::RuntimeInner,
 ) -> BoxliteResult<crate::images::ImageObject> {
-    let image_manager = {
-        let state = runtime.acquire_read()?;
-        state.image_manager.clone()
-    };
-    image_manager.pull(images::INIT_ROOTFS).await
+    // ImageManager has internal locking - direct access
+    runtime.image_manager.pull(images::INIT_ROOTFS).await
 }
 
 async fn extract_env_from_image(

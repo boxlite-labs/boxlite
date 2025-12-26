@@ -49,6 +49,7 @@ pub struct VmmMountConfig {
 /// Tracks virtiofs shares and block devices, generates VMM config
 /// and guest mount instructions.
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct GuestVolumeManager {
     fs_shares: Vec<FsShareEntry>,
     block_devices: Vec<BlockDeviceEntry>,

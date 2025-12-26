@@ -58,12 +58,13 @@ impl PyBox {
         })
     }
 
-    fn shutdown<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
+    /// Stop the box (preserves state for restart).
+    fn stop<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
         let handle = Arc::clone(&self.handle);
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let was_shutdown = handle.shutdown().await.map_err(map_err)?;
-            Ok(was_shutdown)
+            handle.stop().await.map_err(map_err)?;
+            Ok(())
         })
     }
 
@@ -93,7 +94,7 @@ impl PyBox {
         let handle = Arc::clone(&slf.handle);
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let _ = handle.shutdown().await.map_err(map_err)?;
+            handle.stop().await.map_err(map_err)?;
             Ok(())
         })
     }

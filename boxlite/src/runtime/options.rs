@@ -48,6 +48,21 @@ pub struct BoxOptions {
     /// Defaults to false.
     #[serde(default)]
     pub isolate_mounts: bool,
+
+    /// Automatically remove box when stopped.
+    ///
+    /// When true (default), the box is removed from the database and its
+    /// files are deleted when `stop()` is called. This is similar to
+    /// Docker's `--rm` flag.
+    ///
+    /// When false, the box is preserved after stop and can be restarted
+    /// with `runtime.get(box_id)`.
+    #[serde(default = "default_auto_remove")]
+    pub auto_remove: bool,
+}
+
+fn default_auto_remove() -> bool {
+    true
 }
 
 impl BoxOptions {

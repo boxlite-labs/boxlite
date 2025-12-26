@@ -137,11 +137,6 @@ impl ContainerConfig {
             entrypoint.extend(cmd.iter().cloned());
         }
 
-        // Default to shell if no entrypoint
-        if entrypoint.is_empty() {
-            entrypoint = vec!["/bin/sh".to_string()];
-        }
-
         // Extract environment variables
         let env = config.env().clone().unwrap_or_default();
 

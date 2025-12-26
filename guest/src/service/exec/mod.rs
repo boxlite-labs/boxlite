@@ -143,8 +143,22 @@ impl Execution for GuestServer {
         let exit_status = state.wait_process().await?;
 
         let (exit_code, signal) = match exit_status {
-            ExitStatus::Code(code) => (code, 0),
-            ExitStatus::Signal(sig) => (0, sig as i32),
+            ExitStatus::Code(code) => {
+                debug!(
+                    execution_id = %exec_id,
+                    exit_code = code,
+                    "Process exited with code"
+                );
+                (code, 0)
+            }
+            ExitStatus::Signal(sig) => {
+                debug!(
+                    execution_id = %exec_id,
+                    signal = sig as i32,
+                    "Process exited due to signal"
+                );
+                (0, sig as i32)
+            }
         };
 
         Ok(Response::new(WaitResponse {

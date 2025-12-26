@@ -41,6 +41,7 @@ class SimpleBox:
             memory_mib: Optional[int] = None,
             cpus: Optional[int] = None,
             runtime: Optional['Boxlite'] = None,
+            auto_remove: bool = True,
             **kwargs
     ):
         """
@@ -51,6 +52,7 @@ class SimpleBox:
             memory_mib: Memory limit in MiB
             cpus: Number of CPU cores
             runtime: Optional runtime instance (uses global default if None)
+            auto_remove: Remove box when stopped (default: True)
             **kwargs: Additional configuration options
         """
         try:
@@ -80,6 +82,7 @@ class SimpleBox:
             image=image,
             cpus=cpus,
             memory_mib=memory_mib,
+            auto_remove=auto_remove,
             **kwargs
         )
         self._box = self._runtime.create(box_opts)

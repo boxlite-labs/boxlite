@@ -187,15 +187,11 @@ fn create_cow_disk(
 
             Ok(disk)
         }
-        ContainerRootfsPrepResult::Layers { .. } => {
-            Err(BoxliteError::Internal(
-                "Layers mode requires overlayfs - disk creation not applicable".into(),
-            ))
-        }
+        ContainerRootfsPrepResult::Layers { .. } => Err(BoxliteError::Internal(
+            "Layers mode requires overlayfs - disk creation not applicable".into(),
+        )),
         ContainerRootfsPrepResult::Merged(_) => {
-            Err(BoxliteError::Internal(
-                "Merged mode not supported".into(),
-            ))
+            Err(BoxliteError::Internal("Merged mode not supported".into()))
         }
     }
 }

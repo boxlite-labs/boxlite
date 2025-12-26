@@ -122,7 +122,7 @@ fn create_or_reuse_cow_disk(
         if let Strategy::Disk { ref disk_path, .. } = guest_rootfs.strategy {
             updated.strategy = Strategy::Disk {
                 disk_path: disk_path.clone(), // Keep base path reference
-                device_path: None,             // Will be set by VmmSpawnTask
+                device_path: None,            // Will be set by VmmSpawnTask
             };
         }
 

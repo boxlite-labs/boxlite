@@ -28,7 +28,7 @@ impl Default for BoxliteOptions {
 }
 
 /// Options used when constructing a box.
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BoxOptions {
     pub name: Option<String>,
     pub cpus: Option<u8>,
@@ -62,7 +62,25 @@ pub struct BoxOptions {
 }
 
 fn default_auto_remove() -> bool {
-    true
+    false
+}
+
+impl Default for BoxOptions {
+    fn default() -> Self {
+        Self {
+            name: None,
+            cpus: None,
+            memory_mib: None,
+            working_dir: None,
+            env: Vec::new(),
+            rootfs: RootfsSpec::default(),
+            volumes: Vec::new(),
+            network: NetworkSpec::default(),
+            ports: Vec::new(),
+            isolate_mounts: false,
+            auto_remove: default_auto_remove(),
+        }
+    }
 }
 
 impl BoxOptions {

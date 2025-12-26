@@ -61,10 +61,8 @@ pub(crate) struct PyBoxOptions {
     #[pyo3(get, set)]
     pub(crate) network: Option<String>,
     pub(crate) ports: Vec<PyPortSpec>,
-    /// Automatically remove box when stopped (like Docker's --rm flag).
-    /// Defaults to true.
     #[pyo3(get, set)]
-    pub(crate) auto_remove: bool,
+    pub(crate) auto_remove: Option<bool>,
 }
 
 #[pymethods]
@@ -81,7 +79,7 @@ impl PyBoxOptions {
         volumes=vec![],
         network=None,
         ports=vec![],
-        auto_remove=true
+        auto_remove=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -95,7 +93,7 @@ impl PyBoxOptions {
         volumes: Vec<PyVolumeSpec>,
         network: Option<String>,
         ports: Vec<PyPortSpec>,
-        auto_remove: bool,
+        auto_remove: Option<bool>,
     ) -> Self {
         Self {
             image,
@@ -138,7 +136,7 @@ impl From<PyBoxOptions> for BoxOptions {
 
         let ports = py_opts.ports.into_iter().map(PortSpec::from).collect();
 
-        BoxOptions {
+        let mut opts = BoxOptions {
             name: py_opts.name,
             rootfs,
             cpus: py_opts.cpus,
@@ -148,9 +146,14 @@ impl From<PyBoxOptions> for BoxOptions {
             volumes,
             network,
             ports,
-            isolate_mounts: false,
-            auto_remove: py_opts.auto_remove,
+            ..Default::default()
+        };
+
+        if let Some(auto_remove) = py_opts.auto_remove {
+            opts.auto_remove = auto_remove;
         }
+
+        opts
     }
 }
 

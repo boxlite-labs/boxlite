@@ -9,6 +9,7 @@ use tracing_subscriber::EnvFilter;
 static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
 pub mod litebox;
+pub mod lock;
 pub mod metrics;
 pub mod net;
 pub mod pipeline;

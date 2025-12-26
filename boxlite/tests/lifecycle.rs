@@ -182,7 +182,7 @@ async fn get_info_returns_box_metadata() {
 #[tokio::test]
 async fn get_info_returns_none_for_nonexistent() {
     let ctx = TestContext::new();
-    let missing = ctx.runtime.get_info(&"nonexistent-id".to_string()).unwrap();
+    let missing = ctx.runtime.get_info("nonexistent-id").unwrap();
     assert!(missing.is_none());
 }
 
@@ -201,7 +201,7 @@ async fn exists_returns_true_for_existing_box() {
 #[tokio::test]
 async fn exists_returns_false_for_nonexistent() {
     let ctx = TestContext::new();
-    assert!(!ctx.runtime.exists(&"nonexistent-id".to_string()).unwrap());
+    assert!(!ctx.runtime.exists("nonexistent-id").unwrap());
 }
 
 // ============================================================================
@@ -211,10 +211,7 @@ async fn exists_returns_false_for_nonexistent() {
 #[tokio::test]
 async fn remove_nonexistent_returns_not_found() {
     let ctx = TestContext::new();
-    let result = ctx
-        .runtime
-        .remove(&"nonexistent-id".to_string(), false)
-        .await;
+    let result = ctx.runtime.remove("nonexistent-id", false).await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();

@@ -39,8 +39,8 @@ use crate::metrics::BoxMetricsStorage;
 use crate::pipeline::{
     BoxedTask, ExecutionPlan, PipelineBuilder, PipelineExecutor, PipelineMetrics, Stage,
 };
-use crate::runtime::RuntimeInner;
 use crate::runtime::guest_rootfs::GuestRootfs;
+use crate::runtime::rt_impl::RuntimeInner;
 use crate::runtime::types::{BoxState, ContainerId};
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 use std::sync::Arc;

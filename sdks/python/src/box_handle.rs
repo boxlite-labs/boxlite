@@ -19,6 +19,11 @@ impl PyBox {
         Ok(self.handle.id().to_string())
     }
 
+    #[getter]
+    fn name(&self) -> PyResult<Option<String>> {
+        Ok(self.handle.name().map(|s| s.to_string()))
+    }
+
     fn info(&self) -> PyResult<PyBoxInfo> {
         let info = self.handle.info().map_err(map_err)?;
         Ok(PyBoxInfo::from(info))

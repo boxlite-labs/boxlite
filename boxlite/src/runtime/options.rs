@@ -30,7 +30,6 @@ impl Default for BoxliteOptions {
 /// Options used when constructing a box.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BoxOptions {
-    pub name: Option<String>,
     pub cpus: Option<u8>,
     pub memory_mib: Option<u32>,
     pub working_dir: Option<String>,
@@ -68,7 +67,6 @@ fn default_auto_remove() -> bool {
 impl Default for BoxOptions {
     fn default() -> Self {
         Self {
-            name: None,
             cpus: None,
             memory_mib: None,
             working_dir: None,

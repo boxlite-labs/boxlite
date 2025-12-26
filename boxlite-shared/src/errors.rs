@@ -58,6 +58,10 @@ pub enum BoxliteError {
     /// Metadata corruption or parsing error.
     #[error("metadata error: {0}")]
     MetadataError(String),
+
+    /// Invalid argument provided.
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
 }
 
 // Implement From for common error types to enable `?` operator

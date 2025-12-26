@@ -13,6 +13,8 @@ pub struct BoxConfig {
     // === Identity & Timestamps ===
     /// Unique box identifier (ULID).
     pub id: BoxID,
+    /// User-defined name (optional, must be unique if provided).
+    pub name: Option<String>,
     /// Creation timestamp (UTC).
     pub created_at: DateTime<Utc>,
 

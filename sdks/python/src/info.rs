@@ -7,6 +7,8 @@ pub(crate) struct PyBoxInfo {
     #[pyo3(get)]
     pub(crate) id: String,
     #[pyo3(get)]
+    pub(crate) name: Option<String>,
+    #[pyo3(get)]
     pub(crate) state: String,
     #[pyo3(get)]
     pub(crate) created_at: String,
@@ -34,6 +36,7 @@ impl From<BoxInfo> for PyBoxInfo {
 
         PyBoxInfo {
             id: info.id,
+            name: info.name,
             state: state_str.to_string(),
             created_at: info.created_at.to_rfc3339(),
             pid: info.pid,

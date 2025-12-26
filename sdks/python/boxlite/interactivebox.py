@@ -46,6 +46,7 @@ class InteractiveBox:
             memory_mib: Optional[int] = None,
             cpus: Optional[int] = None,
             runtime: Optional['Boxlite'] = None,
+            name: Optional[str] = None,
             auto_remove: bool = True,
             **kwargs
     ):
@@ -62,6 +63,7 @@ class InteractiveBox:
             memory_mib: Memory limit in MiB
             cpus: Number of CPU cores
             runtime: Optional runtime instance (uses global default if None)
+            name: Optional name for the box (must be unique)
             auto_remove: Remove box when stopped (default: True)
             **kwargs: Additional configuration options (working_dir, env)
         """
@@ -89,7 +91,7 @@ class InteractiveBox:
         )
 
         # Create box directly (no SimpleBox wrapper)
-        self._box = self._runtime.create(box_opts)
+        self._box = self._runtime.create(box_opts, name=name)
 
         # Store interactive config
         self._shell = shell

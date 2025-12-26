@@ -128,6 +128,9 @@ pub struct BoxInfo {
     /// Unique box identifier (ULID).
     pub id: BoxID,
 
+    /// User-defined name (optional).
+    pub name: Option<String>,
+
     /// Current lifecycle status.
     pub status: BoxStatus,
 
@@ -163,6 +166,7 @@ impl BoxInfo {
 
         Self {
             id: config.id.clone(),
+            name: config.name.clone(),
             status: state.status,
             created_at: config.created_at,
             last_updated: state.last_updated,
@@ -174,7 +178,7 @@ impl BoxInfo {
             },
             cpus: config.options.cpus.unwrap_or(2),
             memory_mib: config.options.memory_mib.unwrap_or(512),
-            labels: HashMap::new(), // TODO: map from options.name or add labels field
+            labels: HashMap::new(),
         }
     }
 }

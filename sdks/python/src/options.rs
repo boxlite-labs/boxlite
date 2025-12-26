@@ -48,8 +48,6 @@ pub(crate) struct PyBoxOptions {
     #[pyo3(get, set)]
     pub(crate) rootfs_path: Option<String>,
     #[pyo3(get, set)]
-    pub(crate) name: Option<String>,
-    #[pyo3(get, set)]
     pub(crate) cpus: Option<u8>,
     #[pyo3(get, set)]
     pub(crate) memory_mib: Option<u32>,
@@ -71,7 +69,6 @@ impl PyBoxOptions {
     #[pyo3(signature = (
         image=None,
         rootfs_path=None,
-        name=None,
         cpus=None,
         memory_mib=None,
         working_dir=None,
@@ -85,7 +82,6 @@ impl PyBoxOptions {
     fn new(
         image: Option<String>,
         rootfs_path: Option<String>,
-        name: Option<String>,
         cpus: Option<u8>,
         memory_mib: Option<u32>,
         working_dir: Option<String>,
@@ -98,7 +94,6 @@ impl PyBoxOptions {
         Self {
             image,
             rootfs_path,
-            name,
             cpus,
             memory_mib,
             working_dir,
@@ -137,7 +132,6 @@ impl From<PyBoxOptions> for BoxOptions {
         let ports = py_opts.ports.into_iter().map(PortSpec::from).collect();
 
         let mut opts = BoxOptions {
-            name: py_opts.name,
             rootfs,
             cpus: py_opts.cpus,
             memory_mib: py_opts.memory_mib,

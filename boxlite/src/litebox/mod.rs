@@ -27,7 +27,7 @@ pub use state::{BoxState, BoxStatus};
 pub(crate) use init::BoxBuilder;
 
 use crate::metrics::BoxMetrics;
-use crate::runtime::RuntimeInner;
+use crate::runtime::rt_impl::RuntimeInner;
 use crate::{BoxID, BoxInfo};
 use boxlite_shared::errors::BoxliteResult;
 use config::BoxConfig;
@@ -52,6 +52,7 @@ use std::sync::atomic::AtomicBool;
 /// to allow replacing the inner state during restart operations.
 pub struct LiteBox {
     id: BoxID,
+    name: Option<String>,
     runtime: RuntimeInner,
     inner: tokio::sync::RwLock<Option<Arc<init::BoxInner>>>,
     builder: tokio::sync::Mutex<Option<BoxBuilder>>,
@@ -105,9 +106,11 @@ impl LiteBox {
         tracing::trace!(box_id = %config.id, has_builder = builder.is_some(), "LiteBox created");
 
         let auto_remove = config.options.auto_remove;
+        let name = config.name.clone();
 
         Ok(Self {
             id: config.id.clone(),
+            name,
             runtime,
             inner: tokio::sync::RwLock::new(None),
             builder: tokio::sync::Mutex::new(builder),
@@ -119,6 +122,11 @@ impl LiteBox {
     /// Get the unique identifier for this box.
     pub fn id(&self) -> &BoxID {
         &self.id
+    }
+
+    /// Get the user-defined name for this box (if any).
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 
     /// Get current information about this box.

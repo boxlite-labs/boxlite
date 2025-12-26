@@ -41,6 +41,7 @@ class SimpleBox:
             memory_mib: Optional[int] = None,
             cpus: Optional[int] = None,
             runtime: Optional['Boxlite'] = None,
+            name: Optional[str] = None,
             auto_remove: bool = True,
             **kwargs
     ):
@@ -52,6 +53,7 @@ class SimpleBox:
             memory_mib: Memory limit in MiB
             cpus: Number of CPU cores
             runtime: Optional runtime instance (uses global default if None)
+            name: Optional name for the box (must be unique)
             auto_remove: Remove box when stopped (default: True)
             **kwargs: Additional configuration options
         """
@@ -85,7 +87,8 @@ class SimpleBox:
             auto_remove=auto_remove,
             **kwargs
         )
-        self._box = self._runtime.create(box_opts)
+        self._name = name
+        self._box = self._runtime.create(box_opts, name=name)
 
     async def __aenter__(self):
         """Async context manager entry - delegates to Box.__aenter__."""

@@ -220,6 +220,22 @@ impl BoxManager {
             .map(|opt| opt.map(|(config, state)| BoxInfo::new(&config, &state)))
     }
 
+    /// Get config and state for a box by name.
+    ///
+    /// Returns `Ok(None)` if no box with that name exists.
+    pub fn get_by_name(&self, name: &str) -> BoxliteResult<Option<(BoxConfig, BoxState)>> {
+        let inner = self
+            .inner
+            .read()
+            .map_err(|e| BoxliteError::Internal(format!("manager lock poisoned: {}", e)))?;
+
+        Ok(inner
+            .boxes
+            .values()
+            .find(|e| e.config.name.as_deref() == Some(name))
+            .map(|e| (e.config.clone(), e.state.clone())))
+    }
+
     /// List all boxes, sorted by creation time (newest first).
     pub fn list(&self) -> BoxliteResult<Vec<BoxInfo>> {
         let inner = self

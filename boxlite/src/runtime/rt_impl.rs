@@ -65,6 +65,10 @@ pub struct RuntimeImpl {
 pub struct SynchronizedState;
 
 impl RuntimeImpl {
+    // ========================================================================
+    // CONSTRUCTION
+    // ========================================================================
+
     /// Create a new RuntimeInnerImpl with the provided options.
     ///
     /// Performs all initialization: filesystem setup, locks, managers, and box recovery.
@@ -138,83 +142,8 @@ impl RuntimeImpl {
         Ok(inner)
     }
 
-    /// Acquire coordination lock for multi-step atomic operations.
-    ///
-    /// Use this when you need atomicity across multiple operations on
-    /// box_manager or image_manager.
-    pub(crate) fn acquire_write(
-        &self,
-    ) -> BoxliteResult<std::sync::RwLockWriteGuard<'_, SynchronizedState>> {
-        self.sync_state
-            .write()
-            .map_err(|e| BoxliteError::Internal(format!("Coordination lock poisoned: {}", e)))
-    }
-
-    /// Remove a box from the runtime (internal implementation).
-    ///
-    /// This is the internal implementation called by both `BoxliteRuntime::remove()`
-    /// and `LiteBox::stop()` (when `auto_remove=true`).
-    ///
-    /// # Arguments
-    /// * `id` - Box ID to remove
-    /// * `force` - If true, kill the process first if running
-    ///
-    /// # Errors
-    /// - Box not found
-    /// - Box is active and force=false
-    pub(crate) fn remove_box(&self, id: &BoxID, force: bool) -> BoxliteResult<()> {
-        tracing::debug!(box_id = %id, force = force, "RuntimeInnerImpl::remove_box called");
-
-        // Get current state
-        let (config, state) = self
-            .box_manager
-            .box_by_id(id)?
-            .ok_or_else(|| BoxliteError::NotFound(id.to_string()))?;
-
-        // Check if box is active
-        let mut state = state;
-        if state.status.is_active() {
-            if force {
-                // Force mode: kill the process directly
-                if let Some(pid) = state.pid {
-                    tracing::info!(box_id = %id, pid = pid, "Force killing active box");
-                    crate::util::kill_process(pid);
-                }
-                // Update status to stopped and save
-                state.set_status(BoxStatus::Stopped);
-                state.set_pid(None);
-                self.box_manager.save_box(id, &state)?;
-            } else {
-                // Non-force mode: error on active box
-                return Err(BoxliteError::InvalidState(format!(
-                    "cannot remove active box {} (status: {:?}). Use force=true to stop first",
-                    id, state.status
-                )));
-            }
-        }
-
-        // Remove from BoxManager (database-first)
-        self.box_manager.remove_box(id)?;
-
-        // Delete box directory
-        let box_home = config.box_home;
-        if box_home.exists()
-            && let Err(e) = std::fs::remove_dir_all(&box_home)
-        {
-            tracing::warn!(
-                box_id = %id,
-                path = %box_home.display(),
-                error = %e,
-                "Failed to cleanup box directory"
-            );
-        }
-
-        tracing::info!(box_id = %id, "Removed box");
-        Ok(())
-    }
-
     // ========================================================================
-    // BOX LIFECYCLE OPERATIONS
+    // PUBLIC API - BOX OPERATIONS
     // ========================================================================
 
     /// Create a box handle.
@@ -281,6 +210,16 @@ impl RuntimeImpl {
         Ok(None)
     }
 
+    /// Remove a box completely by ID or name.
+    pub fn remove(&self, id_or_name: &str, force: bool) -> BoxliteResult<()> {
+        let box_id = self.resolve_id(id_or_name)?;
+        self.remove_box(&box_id, force)
+    }
+
+    // ========================================================================
+    // PUBLIC API - QUERY OPERATIONS
+    // ========================================================================
+
     /// Get information about a specific box by ID or name (without creating a handle).
     pub fn get_info(&self, id_or_name: &str) -> BoxliteResult<Option<BoxInfo>> {
         // lookup_box handles: exact ID, exact name, then ID prefix
@@ -308,19 +247,17 @@ impl RuntimeImpl {
         Ok(self.box_manager.lookup_box_id(id_or_name)?.is_some())
     }
 
+    // ========================================================================
+    // PUBLIC API - METRICS
+    // ========================================================================
+
     /// Get runtime-wide metrics.
     pub fn metrics(&self) -> RuntimeMetrics {
         RuntimeMetrics::new(self.runtime_metrics.clone())
     }
 
-    /// Remove a box completely by ID or name.
-    pub fn remove(&self, id_or_name: &str, force: bool) -> BoxliteResult<()> {
-        let box_id = self.resolve_id(id_or_name)?;
-        self.remove_box(&box_id, force)
-    }
-
     // ========================================================================
-    // INTERNAL HELPERS
+    // INTERNAL - BOX OPERATIONS
     // ========================================================================
 
     /// Resolve an ID or name to the actual box ID.
@@ -330,6 +267,73 @@ impl RuntimeImpl {
             .lookup_box_id(id_or_name)?
             .ok_or_else(|| BoxliteError::NotFound(id_or_name.to_string()))
     }
+
+    /// Remove a box from the runtime (internal implementation).
+    ///
+    /// This is the internal implementation called by both `BoxliteRuntime::remove()`
+    /// and `LiteBox::stop()` (when `auto_remove=true`).
+    ///
+    /// # Arguments
+    /// * `id` - Box ID to remove
+    /// * `force` - If true, kill the process first if running
+    ///
+    /// # Errors
+    /// - Box not found
+    /// - Box is active and force=false
+    pub(crate) fn remove_box(&self, id: &BoxID, force: bool) -> BoxliteResult<()> {
+        tracing::debug!(box_id = %id, force = force, "RuntimeInnerImpl::remove_box called");
+
+        // Get current state
+        let (config, state) = self
+            .box_manager
+            .box_by_id(id)?
+            .ok_or_else(|| BoxliteError::NotFound(id.to_string()))?;
+
+        // Check if box is active
+        let mut state = state;
+        if state.status.is_active() {
+            if force {
+                // Force mode: kill the process directly
+                if let Some(pid) = state.pid {
+                    tracing::info!(box_id = %id, pid = pid, "Force killing active box");
+                    crate::util::kill_process(pid);
+                }
+                // Update status to stopped and save
+                state.set_status(BoxStatus::Stopped);
+                state.set_pid(None);
+                self.box_manager.save_box(id, &state)?;
+            } else {
+                // Non-force mode: error on active box
+                return Err(BoxliteError::InvalidState(format!(
+                    "cannot remove active box {} (status: {:?}). Use force=true to stop first",
+                    id, state.status
+                )));
+            }
+        }
+
+        // Remove from BoxManager (database-first)
+        self.box_manager.remove_box(id)?;
+
+        // Delete box directory
+        let box_home = config.box_home;
+        if box_home.exists()
+            && let Err(e) = std::fs::remove_dir_all(&box_home)
+        {
+            tracing::warn!(
+                box_id = %id,
+                path = %box_home.display(),
+                error = %e,
+                "Failed to cleanup box directory"
+            );
+        }
+
+        tracing::info!(box_id = %id, "Removed box");
+        Ok(())
+    }
+
+    // ========================================================================
+    // INTERNAL - INITIALIZATION
+    // ========================================================================
 
     /// Initialize box variables with defaults.
     fn init_box_variables(
@@ -367,7 +371,7 @@ impl RuntimeImpl {
     }
 
     /// Recover boxes from persistent storage on runtime startup.
-    pub(crate) fn recover_boxes(&self) -> BoxliteResult<()> {
+    fn recover_boxes(&self) -> BoxliteResult<()> {
         use crate::util::{is_process_alive, is_same_process};
 
         // Check for system reboot and reset active boxes
@@ -418,6 +422,18 @@ impl RuntimeImpl {
 
         tracing::info!("Box recovery complete");
         Ok(())
+    }
+
+    /// Acquire coordination lock for multi-step atomic operations.
+    ///
+    /// Use this when you need atomicity across multiple operations on
+    /// box_manager or image_manager.
+    pub(crate) fn acquire_write(
+        &self,
+    ) -> BoxliteResult<std::sync::RwLockWriteGuard<'_, SynchronizedState>> {
+        self.sync_state
+            .write()
+            .map_err(|e| BoxliteError::Internal(format!("Coordination lock poisoned: {}", e)))
     }
 }
 

@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use crate::litebox::LiteBox;
 use crate::metrics::RuntimeMetrics;
 use crate::runtime::options::{BoxOptions, BoxliteOptions};
-use crate::runtime::rt_impl::{RuntimeInner, RuntimeInnerImpl};
+use crate::runtime::rt_impl::{RuntimeImpl, SharedRuntimeImpl};
 use crate::runtime::types::BoxInfo;
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 // ============================================================================
@@ -32,7 +32,7 @@ static DEFAULT_RUNTIME: OnceLock<BoxliteRuntime> = OnceLock::new();
 /// **Cloning**: Runtime is cheaply cloneable via `Arc` - all clones share the same state.
 #[derive(Clone)]
 pub struct BoxliteRuntime {
-    inner: RuntimeInner,
+    rt_impl: SharedRuntimeImpl,
 }
 
 // ============================================================================
@@ -53,7 +53,7 @@ impl BoxliteRuntime {
     /// - Image API initialization fails
     pub fn new(options: BoxliteOptions) -> BoxliteResult<Self> {
         Ok(Self {
-            inner: RuntimeInnerImpl::new(options)?,
+            rt_impl: RuntimeImpl::new(options)?,
         })
     }
 
@@ -169,7 +169,7 @@ impl BoxliteRuntime {
     /// Returns immediately with a LiteBox handle. Heavy initialization (image pulling,
     /// Box startup) is deferred until the first API call on the handle.
     pub fn create(&self, options: BoxOptions, name: Option<String>) -> BoxliteResult<LiteBox> {
-        self.inner.create(options, name)
+        self.rt_impl.create(options, name)
     }
 
     /// Get a handle to an existing box by ID or name.
@@ -178,32 +178,32 @@ impl BoxliteRuntime {
     /// - A box ID (ULID format, 26 characters)
     /// - A user-defined box name
     pub fn get(&self, id_or_name: &str) -> BoxliteResult<Option<LiteBox>> {
-        self.inner.get(id_or_name)
+        self.rt_impl.get(id_or_name)
     }
 
     /// Get information about a specific box by ID or name (without creating a handle).
     pub fn get_info(&self, id_or_name: &str) -> BoxliteResult<Option<BoxInfo>> {
-        self.inner.get_info(id_or_name)
+        self.rt_impl.get_info(id_or_name)
     }
 
     /// List all boxes, sorted by creation time (newest first).
     pub fn list_info(&self) -> BoxliteResult<Vec<BoxInfo>> {
-        self.inner.list_info()
+        self.rt_impl.list_info()
     }
 
     /// Check if a box with the given ID or name exists.
     pub fn exists(&self, id_or_name: &str) -> BoxliteResult<bool> {
-        self.inner.exists(id_or_name)
+        self.rt_impl.exists(id_or_name)
     }
 
     /// Get runtime-wide metrics.
     pub fn metrics(&self) -> RuntimeMetrics {
-        self.inner.metrics()
+        self.rt_impl.metrics()
     }
 
     /// Remove a box completely by ID or name.
     pub async fn remove(&self, id_or_name: &str, force: bool) -> BoxliteResult<()> {
-        self.inner.remove(id_or_name, force)
+        self.rt_impl.remove(id_or_name, force)
     }
 }
 
@@ -214,7 +214,7 @@ impl BoxliteRuntime {
 impl std::fmt::Debug for BoxliteRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BoxliteRuntime")
-            .field("home_dir", &self.inner.layout.home_dir())
+            .field("home_dir", &self.rt_impl.layout.home_dir())
             .finish()
     }
 }

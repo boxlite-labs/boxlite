@@ -173,7 +173,7 @@ fn create_or_reuse_cow_disk(
 
 /// Prepare guest rootfs as a disk image.
 async fn prepare_guest_rootfs(
-    runtime: &crate::runtime::RuntimeInner,
+    runtime: &crate::runtime::SharedRuntimeImpl,
     base_image: &crate::images::ImageObject,
     env: Vec<(String, String)>,
 ) -> BoxliteResult<GuestRootfs> {
@@ -288,7 +288,7 @@ async fn prepare_guest_rootfs(
 }
 
 async fn pull_guest_rootfs_image(
-    runtime: &crate::runtime::RuntimeInner,
+    runtime: &crate::runtime::SharedRuntimeImpl,
 ) -> BoxliteResult<crate::images::ImageObject> {
     // ImageManager has internal locking - direct access
     runtime.image_manager.pull(images::INIT_ROOTFS).await

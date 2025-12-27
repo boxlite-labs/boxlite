@@ -12,7 +12,7 @@ use crate::portal::interfaces::ContainerRootfsInitConfig;
 use crate::runtime::guest_rootfs::GuestRootfs;
 use crate::runtime::layout::BoxFilesystemLayout;
 use crate::runtime::options::{BoxOptions, VolumeSpec};
-use crate::runtime::rt_impl::RuntimeInner;
+use crate::runtime::rt_impl::SharedRuntimeImpl;
 use crate::runtime::types::{BoxState, ContainerId};
 use crate::vmm::controller::VmmHandler;
 use crate::volumes::{ContainerMount, GuestVolumeManager};
@@ -121,7 +121,7 @@ pub enum ContainerRootfsPrepResult {
 /// Automatically cleans up resources and increments failure counter
 /// if dropped without being disarmed.
 pub struct CleanupGuard {
-    runtime: RuntimeInner,
+    runtime: SharedRuntimeImpl,
     box_id: BoxID,
     layout: Option<BoxFilesystemLayout>,
     handler: Option<Box<dyn VmmHandler>>,
@@ -129,7 +129,7 @@ pub struct CleanupGuard {
 }
 
 impl CleanupGuard {
-    pub fn new(runtime: RuntimeInner, box_id: BoxID) -> Self {
+    pub fn new(runtime: SharedRuntimeImpl, box_id: BoxID) -> Self {
         Self {
             runtime,
             box_id,
@@ -185,9 +185,12 @@ impl Drop for CleanupGuard {
         }
 
         // Remove from BoxManager (which handles DB delete via database-first pattern)
-        // First mark as crashed so remove() doesn't fail the active check
-        let _ = self.runtime.box_manager.mark_crashed(&self.box_id);
-        if let Err(e) = self.runtime.box_manager.remove(&self.box_id) {
+        // First mark as crashed so remove_box() doesn't fail the active check
+        if let Ok(mut state) = self.runtime.box_manager.update_box(&self.box_id) {
+            state.mark_crashed();
+            let _ = self.runtime.box_manager.save_box(&self.box_id, &state);
+        }
+        if let Err(e) = self.runtime.box_manager.remove_box(&self.box_id) {
             tracing::warn!("Failed to remove box from manager during cleanup: {}", e);
         }
 
@@ -206,7 +209,7 @@ pub struct InitPipelineContext {
     pub config: BoxConfig,
     pub state: BoxState,
     pub home_dir: PathBuf,
-    pub runtime: RuntimeInner,
+    pub runtime: SharedRuntimeImpl,
     pub guest_rootfs_cell: Arc<OnceCell<GuestRootfs>>,
     pub container_id: ContainerId,
     pub guard: CleanupGuard,
@@ -225,7 +228,7 @@ impl InitPipelineContext {
         config: BoxConfig,
         state: BoxState,
         home_dir: PathBuf,
-        runtime: RuntimeInner,
+        runtime: SharedRuntimeImpl,
         guest_rootfs_cell: Arc<OnceCell<GuestRootfs>>,
         container_id: ContainerId,
     ) -> Self {
@@ -260,7 +263,7 @@ impl InitPipelineContext {
 /// Input for filesystem stage.
 pub struct FilesystemInput<'a> {
     pub box_id: &'a BoxID,
-    pub runtime: &'a RuntimeInner,
+    pub runtime: &'a SharedRuntimeImpl,
     pub isolate_mounts: bool,
 }
 
@@ -276,7 +279,7 @@ pub struct FilesystemOutput {
 /// Input for container rootfs stage.
 pub struct ContainerRootfsInput<'a> {
     pub options: &'a BoxOptions,
-    pub runtime: &'a RuntimeInner,
+    pub runtime: &'a SharedRuntimeImpl,
     /// Box filesystem layout (for disk paths)
     pub layout: &'a BoxFilesystemLayout,
     /// When true, reuse existing COW disk (for restart).
@@ -292,7 +295,7 @@ pub struct ContainerRootfsOutput {
 
 /// Input for guest rootfs stage.
 pub struct GuestRootfsInput<'a> {
-    pub runtime: &'a RuntimeInner,
+    pub runtime: &'a SharedRuntimeImpl,
     pub guest_rootfs_cell: &'a Arc<OnceCell<GuestRootfs>>,
     /// Box filesystem layout (for disk paths)
     pub layout: &'a BoxFilesystemLayout,
@@ -338,6 +341,6 @@ pub struct GuestInput {
 
 /// Output from guest initialization stage.
 pub struct GuestOutput {
-    pub container_id: String,
+    pub container_id: ContainerId,
     pub guest_session: GuestSession,
 }

@@ -329,14 +329,14 @@ async fn litebox_info_returns_correct_metadata() {
     let handle = ctx.runtime.create(BoxOptions::default(), None).unwrap();
     let box_id = handle.id().clone();
 
-    // Get info from handle
-    let info = handle.info().unwrap();
+    // Get info from runtime (handle.info() requires VM initialization)
+    let info = ctx
+        .runtime
+        .get_info(&box_id)
+        .unwrap()
+        .expect("info should be available");
     assert_eq!(info.id, box_id);
-    assert!(
-        info.status == BoxStatus::Starting || info.status == BoxStatus::Running,
-        "Expected Starting or Running, got {:?}",
-        info.status
-    );
+    assert_eq!(info.status, BoxStatus::Starting);
     assert_eq!(info.cpus, 2); // Default value
     assert_eq!(info.memory_mib, 512); // Default value
 

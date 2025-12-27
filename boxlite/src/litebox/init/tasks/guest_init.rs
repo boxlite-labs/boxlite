@@ -98,7 +98,7 @@ async fn run_guest_init(input: GuestInput) -> BoxliteResult<GuestOutput> {
     // Step 2: Container Init (rootfs + container config + user volume mounts)
     tracing::info!("Sending container configuration to guest");
     let mut container_interface = guest_session.container().await?;
-    let container_id = container_interface
+    let returned_id = container_interface
         .init(
             container_id_str,
             container_config,
@@ -106,10 +106,10 @@ async fn run_guest_init(input: GuestInput) -> BoxliteResult<GuestOutput> {
             container_mounts,
         )
         .await?;
-    tracing::info!(container_id = %container_id, "Container initialized");
+    tracing::info!(container_id = %returned_id, "Container initialized");
 
     Ok(GuestOutput {
-        container_id,
+        container_id, // Use the original ContainerId (same value as returned)
         guest_session,
     })
 }

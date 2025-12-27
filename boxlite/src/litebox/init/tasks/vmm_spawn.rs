@@ -81,10 +81,11 @@ impl PipelineTask<InitCtx> for VmmSpawnTask {
         let pid = handler.pid();
         {
             let _guard_lock = runtime.acquire_write();
-            let _ = runtime.box_manager.update_pid(&box_id, Some(pid));
-            let _ = runtime
-                .box_manager
-                .update_status(&box_id, BoxStatus::Running);
+            if let Ok(mut state) = runtime.box_manager.update_box(&box_id) {
+                state.set_pid(Some(pid));
+                state.set_status(BoxStatus::Running);
+                let _ = runtime.box_manager.save_box(&box_id, &state);
+            }
         }
 
         let mut ctx = ctx.lock().await;

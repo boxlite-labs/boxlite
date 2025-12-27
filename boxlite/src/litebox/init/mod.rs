@@ -31,7 +31,7 @@
 mod tasks;
 mod types;
 
-pub(crate) use crate::litebox::inner::BoxInner;
+pub(crate) use crate::litebox::box_impl::BoxImpl;
 
 use crate::litebox::BoxStatus;
 use crate::litebox::config::BoxConfig;
@@ -40,7 +40,7 @@ use crate::pipeline::{
     BoxedTask, ExecutionPlan, PipelineBuilder, PipelineExecutor, PipelineMetrics, Stage,
 };
 use crate::runtime::guest_rootfs::GuestRootfs;
-use crate::runtime::rt_impl::RuntimeInner;
+use crate::runtime::rt_impl::SharedRuntimeImpl;
 use crate::runtime::types::{BoxState, ContainerId};
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 use std::sync::Arc;
@@ -136,7 +136,7 @@ fn box_metrics_from_pipeline(pipeline_metrics: &PipelineMetrics) -> BoxMetricsSt
 ///     .await?;
 /// ```
 pub(crate) struct BoxBuilder {
-    runtime: RuntimeInner,
+    runtime: SharedRuntimeImpl,
     config: BoxConfig,
     state: BoxState,
 }
@@ -154,7 +154,7 @@ impl BoxBuilder {
     /// * `config` - Box configuration (immutable after creation)
     /// * `state` - Current box state (determines init mode)
     pub(crate) fn new(
-        runtime: RuntimeInner,
+        runtime: SharedRuntimeImpl,
         config: BoxConfig,
         state: BoxState,
     ) -> BoxliteResult<Self> {
@@ -169,10 +169,10 @@ impl BoxBuilder {
         })
     }
 
-    /// Build and initialize the box.
+    /// Build and initialize BoxImpl.
     ///
     /// Executes all initialization stages with automatic cleanup on failure.
-    pub(crate) async fn build(self) -> BoxliteResult<BoxInner> {
+    pub(crate) async fn build(self) -> BoxliteResult<BoxImpl> {
         use std::time::Instant;
 
         let total_start = Instant::now();
@@ -234,11 +234,12 @@ impl BoxBuilder {
             .ok_or_else(|| BoxliteError::Internal("guest_init task must run first".into()))?;
 
         // Update container_id in database
-        let _ = ctx
-            .runtime
-            .box_manager
-            .update_container_id(&ctx.config.id, guest_output.container_id.clone());
+        if let Ok(mut state) = ctx.runtime.box_manager.update_box(&ctx.config.id) {
+            state.container_id = Some(guest_output.container_id.clone());
+            let _ = ctx.runtime.box_manager.save_box(&ctx.config.id, &state);
+        }
 
+        #[cfg(target_os = "linux")]
         let fs_output = ctx
             .fs_output
             .take()
@@ -248,18 +249,23 @@ impl BoxBuilder {
             .take()
             .ok_or_else(|| BoxliteError::Internal("vmm_config task must run first".into()))?;
 
-        let box_home = fs_output.layout.root().to_path_buf();
+        // Build final BoxImpl with all resources
+        // Update state to Running now that initialization is complete
+        let mut state = ctx.state.clone();
+        state.set_status(BoxStatus::Running);
 
-        Ok(BoxInner {
-            box_home,
-            handler: std::sync::Mutex::new(handler),
-            guest_session: guest_output.guest_session,
+        Ok(BoxImpl::new(
+            ctx.config.clone(),
+            state,
+            Arc::clone(&ctx.runtime),
+            handler,
+            guest_output.guest_session,
             metrics,
-            _container_rootfs_disk: config_output.disk,
-            guest_rootfs_disk: config_output.init_disk,
-            container_id: guest_output.container_id,
+            config_output.disk,
+            config_output.init_disk,
+            guest_output.container_id.to_string(),
             #[cfg(target_os = "linux")]
-            bind_mount: fs_output.bind_mount,
-        })
+            fs_output.bind_mount,
+        ))
     }
 }

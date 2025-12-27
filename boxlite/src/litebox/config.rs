@@ -7,7 +7,7 @@ use std::path::PathBuf;
 /// Static box configuration (set once at creation, never changes).
 ///
 /// This is persisted to database and remains immutable throughout the box lifecycle.
-/// Follows the Podman pattern of separating config from state.
+/// Separates static configuration from dynamic state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BoxConfig {
     // === Identity & Timestamps ===

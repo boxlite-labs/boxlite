@@ -9,4 +9,4 @@ mod core;
 pub(crate) mod rt_impl;
 
 pub use core::BoxliteRuntime;
-pub(crate) use rt_impl::RuntimeInner;
+pub(crate) use rt_impl::SharedRuntimeImpl;

@@ -1,10 +1,8 @@
-//! Command execution
+//! Command execution types
 //!
-//! Handles exec() requests and execution lifecycle.
+//! Type definitions for executing commands in a box.
+//! The actual execution logic is in BoxImpl::exec().
 
-use super::LiteBox;
-use super::lifecycle;
-use super::metrics;
 use crate::portal::interfaces::ExecutionInterface;
 use boxlite_shared::errors::BoxliteResult;
 use futures::Stream;
@@ -322,48 +320,4 @@ impl Stream for ExecStderr {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.receiver.poll_recv(cx)
     }
-}
-
-/// Execute a command in the box (NEW API - returns Execution).
-pub(crate) async fn exec(litebox: &LiteBox, command: BoxCommand) -> BoxliteResult<Execution> {
-    use boxlite_shared::constants::executor as executor_const;
-
-    let inner = lifecycle::ensure_ready(litebox).await?;
-
-    // Inject BOXLITE_EXECUTOR env var only if not already set by user
-    let has_executor_env = command
-        .env
-        .as_ref()
-        .map(|env| env.iter().any(|(k, _)| k == executor_const::ENV_VAR))
-        .unwrap_or(false);
-
-    let command = if has_executor_env {
-        command
-    } else {
-        command.env(
-            executor_const::ENV_VAR,
-            format!("{}={}", executor_const::CONTAINER_KEY, inner.container_id),
-        )
-    };
-
-    // Get execution interface
-    let mut exec_interface = inner.guest_session.execution().await?;
-
-    // Execute command and get components
-    let result = exec_interface.exec(command).await;
-
-    // Instrument metrics
-    metrics::instrument_exec_metrics(litebox, &inner, result.is_err());
-
-    // Assemble Execution from components
-    let components = result?;
-
-    Ok(Execution::new(
-        components.execution_id,
-        exec_interface,
-        components.result_rx,
-        Some(ExecStdin::new(components.stdin_tx)),
-        Some(ExecStdout::new(components.stdout_rx)),
-        Some(ExecStderr::new(components.stderr_rx)),
-    ))
 }

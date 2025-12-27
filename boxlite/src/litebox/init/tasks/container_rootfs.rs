@@ -197,7 +197,7 @@ fn create_cow_disk(
 }
 
 async fn pull_image(
-    runtime: &crate::runtime::RuntimeInner,
+    runtime: &crate::runtime::SharedRuntimeImpl,
     image_ref: &str,
 ) -> BoxliteResult<crate::images::ImageObject> {
     // ImageManager has internal locking - direct access
@@ -248,7 +248,7 @@ async fn prepare_overlayfs_layers(
 /// 2. If not, merges layers and creates an ext4 disk image
 /// 3. Returns the path to the base disk for COW overlay creation
 async fn prepare_disk_rootfs(
-    runtime: &crate::runtime::RuntimeInner,
+    runtime: &crate::runtime::SharedRuntimeImpl,
     image: &crate::images::ImageObject,
 ) -> BoxliteResult<ContainerRootfsPrepResult> {
     // Check if we already have a cached disk image for this image

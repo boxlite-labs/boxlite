@@ -20,13 +20,16 @@ impl PyBox {
     }
 
     #[getter]
-    fn name(&self) -> PyResult<Option<String>> {
-        Ok(self.handle.name().map(|s| s.to_string()))
+    fn name(&self) -> Option<String> {
+        self.handle.name().map(|s| s.to_string())
     }
 
-    fn info(&self) -> PyResult<PyBoxInfo> {
-        let info = self.handle.info().map_err(map_err)?;
-        Ok(PyBoxInfo::from(info))
+    fn info<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
+        let handle = Arc::clone(&self.handle);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let info = handle.info().await.map_err(map_err)?;
+            Ok(PyBoxInfo::from(info))
+        })
     }
 
     #[pyo3(signature = (command, args=None, env=None, tty=false))]
@@ -105,15 +108,6 @@ impl PyBox {
     }
 
     fn __repr__(&self) -> String {
-        let info_str = self
-            .handle
-            .info()
-            .map(|i| format!("{:?}", i))
-            .unwrap_or_else(|_| "<unavailable>".to_string());
-        format!(
-            "Box(id={:?} info={})",
-            self.handle.id().to_string(),
-            info_str
-        )
+        format!("Box(id={:?})", self.handle.id().to_string())
     }
 }

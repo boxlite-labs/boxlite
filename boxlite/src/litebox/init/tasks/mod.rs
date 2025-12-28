@@ -5,7 +5,7 @@
 //! ```text
 //! Filesystem ─────┐
 //!                 │
-//! Rootfs ─────────┼──→ VmmSpawn ──→ GuestConnect ──→ GuestInit
+//! ContainerRootfs ┼──→ VmmSpawn ──→ GuestConnect ──→ GuestInit
 //!                 │
 //! GuestRootfs ────┘
 //!

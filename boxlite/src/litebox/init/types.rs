@@ -206,6 +206,8 @@ pub struct InitPipelineContext {
     pub runtime: SharedRuntimeImpl,
     pub guard: CleanupGuard,
     pub reuse_rootfs: bool,
+    /// Skip waiting for guest ready signal (for reattach to running box).
+    pub skip_guest_wait: bool,
 
     pub layout: Option<BoxFilesystemLayout>,
     pub container_image_config: Option<ContainerImageConfig>,
@@ -221,13 +223,19 @@ pub struct InitPipelineContext {
 }
 
 impl InitPipelineContext {
-    pub fn new(config: BoxConfig, runtime: SharedRuntimeImpl, reuse_rootfs: bool) -> Self {
+    pub fn new(
+        config: BoxConfig,
+        runtime: SharedRuntimeImpl,
+        reuse_rootfs: bool,
+        skip_guest_wait: bool,
+    ) -> Self {
         let guard = CleanupGuard::new(runtime.clone(), config.id.clone());
         Self {
             config,
             runtime,
             guard,
             reuse_rootfs,
+            skip_guest_wait,
             layout: None,
             container_image_config: None,
             container_disk: None,

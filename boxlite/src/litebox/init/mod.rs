@@ -185,8 +185,9 @@ impl BoxBuilder {
 
         let status = state.status;
         let reuse_rootfs = status == BoxStatus::Stopped;
+        let skip_guest_wait = status == BoxStatus::Running;
 
-        let ctx = InitPipelineContext::new(config, runtime.clone(), reuse_rootfs);
+        let ctx = InitPipelineContext::new(config, runtime.clone(), reuse_rootfs, skip_guest_wait);
         let ctx = Arc::new(Mutex::new(ctx));
 
         if status != BoxStatus::Starting {

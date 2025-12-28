@@ -5,7 +5,7 @@
 // ============================================================================
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::RwLock;
 use tokio::sync::OnceCell;
@@ -94,6 +94,7 @@ pub(crate) struct BoxImpl {
     pub(crate) config: BoxConfig,
     pub(crate) state: RwLock<BoxState>,
     pub(crate) runtime: SharedRuntimeImpl,
+    is_shutdown: AtomicBool,
 
     // --- Lazily initialized ---
     live: OnceCell<LiveState>,
@@ -112,6 +113,7 @@ impl BoxImpl {
             config,
             state: RwLock::new(state),
             runtime,
+            is_shutdown: AtomicBool::new(false),
             live: OnceCell::new(),
         }
     }
@@ -154,6 +156,11 @@ impl BoxImpl {
 
     pub(crate) async fn exec(&self, command: BoxCommand) -> BoxliteResult<Execution> {
         use boxlite_shared::constants::executor as executor_const;
+
+        // Check if box is stopped before proceeding
+        if self.is_shutdown.load(Ordering::SeqCst) {
+            return Err(BoxliteError::InvalidState("Box is stopped".into()));
+        }
 
         let live = self.live_state().await?;
 
@@ -202,6 +209,11 @@ impl BoxImpl {
     }
 
     pub(crate) async fn metrics(&self) -> BoxliteResult<BoxMetrics> {
+        // Check if box is stopped before proceeding
+        if self.is_shutdown.load(Ordering::SeqCst) {
+            return Err(BoxliteError::InvalidState("Box is stopped".into()));
+        }
+
         let live = self.live_state().await?;
         let handler = live
             .handler
@@ -221,6 +233,8 @@ impl BoxImpl {
     }
 
     pub(crate) async fn stop(&self) -> BoxliteResult<()> {
+        self.is_shutdown.store(true, Ordering::SeqCst);
+
         // Only try to stop VM if LiveState exists
         if let Some(live) = self.live.get() {
             // Gracefully shut down guest
@@ -239,6 +253,9 @@ impl BoxImpl {
             state.set_status(BoxStatus::Stopped);
             state.set_pid(None);
         })?;
+
+        // Invalidate cache so new handles get fresh BoxImpl
+        self.runtime.invalidate_box_impl(self.id());
 
         tracing::info!("Stopped box {}", self.id());
 

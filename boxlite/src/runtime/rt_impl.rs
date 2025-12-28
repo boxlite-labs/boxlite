@@ -2,7 +2,7 @@ use crate::db::{BoxStore, Database};
 use crate::images::ImageManager;
 use crate::init_logging_for;
 use crate::litebox::config::BoxConfig;
-use crate::litebox::{BoxManager, LiteBox};
+use crate::litebox::{BoxManager, LiteBox, SharedBoxImpl};
 use crate::metrics::{RuntimeMetrics, RuntimeMetricsStorage};
 use crate::runtime::constants::filenames;
 use crate::runtime::guest_rootfs::GuestRootfs;
@@ -13,7 +13,9 @@ use crate::runtime::types::{BoxID, BoxInfo, BoxState, BoxStatus, ContainerId, ge
 use crate::vmm::VmmKind;
 use boxlite_shared::{BoxliteError, BoxliteResult, Transport};
 use chrono::Utc;
-use std::sync::{Arc, RwLock};
+use parking_lot::RwLock as ParkingRwLock;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock, Weak};
 use tokio::sync::OnceCell;
 
 /// Internal runtime state protected by single lock.
@@ -56,6 +58,13 @@ pub struct RuntimeImpl {
     /// Runtime filesystem lock (held for lifetime). Prevent from multiple process run on same
     /// BOXLITE_HOME directory
     pub(crate) _runtime_lock: RuntimeLock,
+
+    // ========================================================================
+    // BOXLITE HANDLE CACHE: Share BoxImpl between handles
+    // ========================================================================
+    /// Cache of active BoxImpl instances.
+    /// Uses Weak to allow automatic cleanup when all handles are dropped.
+    active_boxes: ParkingRwLock<HashMap<BoxID, Weak<crate::litebox::box_impl::BoxImpl>>>,
 }
 
 /// Empty coordination lock.
@@ -132,6 +141,7 @@ impl RuntimeImpl {
             guest_rootfs: Arc::new(OnceCell::new()),
             runtime_metrics: RuntimeMetricsStorage::new(),
             _runtime_lock: runtime_lock,
+            active_boxes: ParkingRwLock::new(HashMap::new()),
         });
 
         tracing::debug!("initialized runtime");
@@ -180,14 +190,18 @@ impl RuntimeImpl {
             .boxes_created
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Create LiteBox handle
-        Ok(LiteBox::new(Arc::clone(self), config, state))
+        // Create LiteBox handle with shared BoxImpl
+        let box_impl = self.get_or_create_box_impl(config, state);
+        Ok(LiteBox::new(box_impl))
     }
 
     /// Get a handle to an existing box by ID or name.
     ///
     /// Returns a LiteBox handle that can be used to operate on the box.
     /// Tries exact ID match, then name match, then ID prefix match.
+    ///
+    /// If another handle to the same box exists, they share the same BoxImpl
+    /// (and thus the same LiveState if initialized).
     pub fn get(self: &Arc<Self>, id_or_name: &str) -> BoxliteResult<Option<LiteBox>> {
         tracing::trace!(id_or_name = %id_or_name, "RuntimeInnerImpl::get called");
 
@@ -196,12 +210,12 @@ impl RuntimeImpl {
             tracing::trace!(
                 box_id = %config.id,
                 name = ?config.name,
-                "Retrieved box from manager, creating LiteBox"
+                "Retrieved box from manager, getting or creating BoxImpl"
             );
 
-            let litebox = LiteBox::new(Arc::clone(self), config, state);
+            let box_impl = self.get_or_create_box_impl(config, state);
             tracing::trace!(id_or_name = %id_or_name, "LiteBox created successfully");
-            return Ok(Some(litebox));
+            return Ok(Some(LiteBox::new(box_impl)));
         }
 
         tracing::trace!(id_or_name = %id_or_name, "Box not found in manager");
@@ -311,6 +325,9 @@ impl RuntimeImpl {
 
         // Remove from BoxManager (database-first)
         self.box_manager.remove_box(id)?;
+
+        // Invalidate cache so new handles get fresh BoxImpl
+        self.invalidate_box_impl(id);
 
         // Delete box directory
         let box_home = config.box_home;
@@ -434,6 +451,59 @@ impl RuntimeImpl {
 
         tracing::info!("Box recovery complete");
         Ok(())
+    }
+
+    // ========================================================================
+    // INTERNAL - BOX IMPL CACHE
+    // ========================================================================
+
+    /// Get existing BoxImpl from cache or create new one.
+    ///
+    /// If an active BoxImpl exists (some LiteBox handle is alive), returns a clone of its Arc.
+    /// Otherwise, creates a new BoxImpl from config/state.
+    fn get_or_create_box_impl(
+        self: &Arc<Self>,
+        config: BoxConfig,
+        state: BoxState,
+    ) -> SharedBoxImpl {
+        use crate::litebox::box_impl::BoxImpl;
+
+        let box_id = config.id.clone();
+
+        // Fast path: read lock
+        {
+            let cache = self.active_boxes.read();
+            if let Some(weak) = cache.get(&box_id) {
+                if let Some(strong) = weak.upgrade() {
+                    tracing::trace!(box_id = %box_id, "Reusing cached BoxImpl");
+                    return strong;
+                }
+            }
+        }
+
+        // Slow path: write lock with double-check
+        let mut cache = self.active_boxes.write();
+        if let Some(weak) = cache.get(&box_id) {
+            if let Some(strong) = weak.upgrade() {
+                tracing::trace!(box_id = %box_id, "Reusing cached BoxImpl (after write lock)");
+                return strong;
+            }
+        }
+
+        // Create and cache
+        let box_impl = Arc::new(BoxImpl::new(config, state, Arc::clone(self)));
+        cache.insert(box_id.clone(), Arc::downgrade(&box_impl));
+        tracing::trace!(box_id = %box_id, "Created and cached new BoxImpl");
+        box_impl
+    }
+
+    /// Remove BoxImpl from cache.
+    ///
+    /// Called when box is stopped or removed. Existing handles become stale;
+    /// new handles from runtime.get() will get a fresh BoxImpl.
+    pub(crate) fn invalidate_box_impl(&self, box_id: &BoxID) {
+        self.active_boxes.write().remove(box_id);
+        tracing::trace!(box_id = %box_id, "Invalidated BoxImpl cache");
     }
 
     /// Acquire coordination lock for multi-step atomic operations.

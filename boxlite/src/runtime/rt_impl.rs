@@ -473,21 +473,21 @@ impl RuntimeImpl {
         // Fast path: read lock
         {
             let cache = self.active_boxes.read();
-            if let Some(weak) = cache.get(&box_id) {
-                if let Some(strong) = weak.upgrade() {
-                    tracing::trace!(box_id = %box_id, "Reusing cached BoxImpl");
-                    return strong;
-                }
+            if let Some(weak) = cache.get(&box_id)
+                && let Some(strong) = weak.upgrade()
+            {
+                tracing::trace!(box_id = %box_id, "Reusing cached BoxImpl");
+                return strong;
             }
         }
 
         // Slow path: write lock with double-check
         let mut cache = self.active_boxes.write();
-        if let Some(weak) = cache.get(&box_id) {
-            if let Some(strong) = weak.upgrade() {
-                tracing::trace!(box_id = %box_id, "Reusing cached BoxImpl (after write lock)");
-                return strong;
-            }
+        if let Some(weak) = cache.get(&box_id)
+            && let Some(strong) = weak.upgrade()
+        {
+            tracing::trace!(box_id = %box_id, "Reusing cached BoxImpl (after write lock)");
+            return strong;
         }
 
         // Create and cache

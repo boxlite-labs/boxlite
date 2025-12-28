@@ -41,13 +41,13 @@ impl BoxManager {
     /// Add a new box to the database.
     pub fn add_box(&self, config: &BoxConfig, state: &BoxState) -> BoxliteResult<()> {
         // Check name uniqueness if name is set
-        if let Some(ref name) = config.name {
-            if self.lookup_box_id(name)?.is_some() {
-                return Err(BoxliteError::InvalidState(format!(
-                    "box with name '{}' already exists",
-                    name
-                )));
-            }
+        if let Some(ref name) = config.name
+            && self.lookup_box_id(name)?.is_some()
+        {
+            return Err(BoxliteError::InvalidState(format!(
+                "box with name '{}' already exists",
+                name
+            )));
         }
 
         // Check ID uniqueness

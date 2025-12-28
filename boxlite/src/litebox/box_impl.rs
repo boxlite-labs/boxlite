@@ -120,19 +120,15 @@ impl BoxImpl {
     // ACCESSORS (no VM required)
     // ========================================================================
 
-    pub fn id(&self) -> &BoxID {
+    pub(crate) fn id(&self) -> &BoxID {
         &self.config.id
     }
 
-    pub fn container_id(&self) -> &str {
+    pub(crate) fn container_id(&self) -> &str {
         self.config.container.id.as_str()
     }
 
-    pub fn auto_remove(&self) -> bool {
-        self.config.options.auto_remove
-    }
-
-    pub fn info(&self) -> BoxInfo {
+    pub(crate) fn info(&self) -> BoxInfo {
         let state = self.state.read();
         BoxInfo::new(&self.config, &state)
     }
@@ -142,7 +138,7 @@ impl BoxImpl {
     // ========================================================================
 
     /// Update state locally and sync to database.
-    pub fn update_state<F>(&self, f: F) -> BoxliteResult<()>
+    fn update_state<F>(&self, f: F) -> BoxliteResult<()>
     where
         F: FnOnce(&mut BoxState),
     {
@@ -156,7 +152,7 @@ impl BoxImpl {
     // OPERATIONS (require VM)
     // ========================================================================
 
-    pub async fn exec(&self, command: BoxCommand) -> BoxliteResult<Execution> {
+    pub(crate) async fn exec(&self, command: BoxCommand) -> BoxliteResult<Execution> {
         use boxlite_shared::constants::executor as executor_const;
 
         let live = self.live_state().await?;
@@ -205,7 +201,7 @@ impl BoxImpl {
         ))
     }
 
-    pub async fn metrics(&self) -> BoxliteResult<BoxMetrics> {
+    pub(crate) async fn metrics(&self) -> BoxliteResult<BoxMetrics> {
         let live = self.live_state().await?;
         let handler = live
             .handler
@@ -224,7 +220,7 @@ impl BoxImpl {
         ))
     }
 
-    pub async fn stop(&self) -> BoxliteResult<()> {
+    pub(crate) async fn stop(&self) -> BoxliteResult<()> {
         // Only try to stop VM if LiveState exists
         if let Some(live) = self.live.get() {
             // Gracefully shut down guest
@@ -246,7 +242,7 @@ impl BoxImpl {
 
         tracing::info!("Stopped box {}", self.id());
 
-        if self.auto_remove() {
+        if self.config.options.auto_remove {
             self.runtime.remove_box(self.id(), false)?;
         }
 

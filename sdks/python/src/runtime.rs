@@ -40,7 +40,11 @@ impl PyBoxlite {
 
     #[pyo3(signature = (options, name=None))]
     fn create(&self, options: PyBoxOptions, name: Option<String>) -> PyResult<PyBox> {
-        let handle = self.runtime.create(options.into(), name).map_err(map_err)?;
+        let image = options.image_ref();
+        let handle = self
+            .runtime
+            .create(&image, options.into(), name)
+            .map_err(map_err)?;
 
         Ok(PyBox {
             handle: Arc::new(handle),

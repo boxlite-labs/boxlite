@@ -1,14 +1,14 @@
-//! Container configuration extracted from OCI images config
+//! Container image configuration extracted from OCI images config
 
 use serde::{Deserialize, Serialize};
 
-/// Container runtime configuration extracted from OCI images
+/// Container image configuration extracted from OCI images.
 ///
-/// This struct contains the runtime configuration needed to start a container
-/// from an OCI images, including entrypoint, environment variables, working
-/// directory, and exposed ports.
+/// This struct contains the configuration baked into the container image,
+/// including entrypoint, environment variables, working directory, and
+/// exposed ports.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContainerConfig {
+pub struct ContainerImageConfig {
     /// Entrypoint command (e.g., ["/bin/python", "-u", "app.py"])
     ///
     /// This combines the images's ENTRYPOINT and CMD directives.
@@ -27,8 +27,8 @@ pub struct ContainerConfig {
     pub working_dir: String,
 }
 
-impl ContainerConfig {
-    /// Create a new ContainerConfig with defaults
+impl ContainerImageConfig {
+    /// Create a new ContainerImageConfig with defaults
     #[allow(dead_code)]
     pub fn new() -> Self {
         Self::default()
@@ -108,7 +108,7 @@ impl ContainerConfig {
         self.env = env_vec;
     }
 
-    /// Convert OCI ImageConfiguration to ContainerConfig
+    /// Convert OCI ImageConfiguration to ContainerImageConfig
     ///
     /// Extracts container runtime configuration from OCI images config,
     /// including entrypoint (combined ENTRYPOINT + CMD), environment variables,
@@ -118,7 +118,7 @@ impl ContainerConfig {
     /// * `image_config` - OCI ImageConfiguration from images config.json
     ///
     /// # Returns
-    /// ContainerConfig with extracted runtime configuration
+    /// ContainerImageConfig with extracted image configuration
     pub fn from_oci_config(
         image_config: &oci_spec::image::ImageConfiguration,
     ) -> boxlite_shared::errors::BoxliteResult<Self> {
@@ -150,7 +150,7 @@ impl ContainerConfig {
         // Extract exposed ports
         let exposed_ports = config.exposed_ports().clone().unwrap_or_default();
 
-        Ok(ContainerConfig {
+        Ok(ContainerImageConfig {
             cmd: entrypoint,
             env,
             working_dir: workdir,
@@ -159,7 +159,7 @@ impl ContainerConfig {
     }
 }
 
-impl Default for ContainerConfig {
+impl Default for ContainerImageConfig {
     fn default() -> Self {
         Self {
             cmd: vec!["/bin/sh".to_string()],
@@ -179,23 +179,23 @@ mod tests {
     #[test]
     fn test_parse_exposed_port() {
         assert_eq!(
-            ContainerConfig::parse_exposed_port("8080/tcp"),
+            ContainerImageConfig::parse_exposed_port("8080/tcp"),
             Some((8080, "tcp"))
         );
         assert_eq!(
-            ContainerConfig::parse_exposed_port("53/udp"),
+            ContainerImageConfig::parse_exposed_port("53/udp"),
             Some((53, "udp"))
         );
         assert_eq!(
-            ContainerConfig::parse_exposed_port("8080"),
+            ContainerImageConfig::parse_exposed_port("8080"),
             Some((8080, "tcp"))
         );
-        assert_eq!(ContainerConfig::parse_exposed_port("invalid"), None);
+        assert_eq!(ContainerImageConfig::parse_exposed_port("invalid"), None);
     }
 
     #[test]
     fn test_tcp_ports() {
-        let config = ContainerConfig {
+        let config = ContainerImageConfig {
             cmd: vec![],
             env: vec![],
             working_dir: "/".to_string(),
@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn test_udp_ports() {
-        let config = ContainerConfig {
+        let config = ContainerImageConfig {
             cmd: vec![],
             env: vec![],
             working_dir: "/".to_string(),

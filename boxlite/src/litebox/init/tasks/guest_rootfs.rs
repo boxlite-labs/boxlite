@@ -5,16 +5,15 @@
 
 use super::{InitCtx, log_task_error, task_start};
 use crate::disk::{BackingFormat, Disk, DiskFormat, Qcow2Helper, create_ext4_from_dir};
-use crate::litebox::init::types::{GuestRootfsInput, GuestRootfsOutput};
 use crate::pipeline::PipelineTask;
 use crate::rootfs::RootfsBuilder;
 use crate::runtime::constants::images;
 use crate::runtime::guest_rootfs::{GuestRootfs, Strategy};
 use crate::runtime::layout::BoxFilesystemLayout;
+use crate::runtime::rt_impl::SharedRuntimeImpl;
 use crate::util;
 use async_trait::async_trait;
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
-use std::sync::Arc;
 
 pub struct GuestRootfsTask;
 
@@ -24,33 +23,21 @@ impl PipelineTask<InitCtx> for GuestRootfsTask {
         let task_name = self.name();
         let box_id = task_start(&ctx, task_name).await;
 
-        let (runtime, guest_rootfs_cell, layout, reuse_rootfs) = {
+        let (runtime, layout, reuse_rootfs) = {
             let ctx = ctx.lock().await;
             let layout = ctx
-                .fs_output
-                .as_ref()
-                .ok_or_else(|| BoxliteError::Internal("filesystem task must run first".into()))?
                 .layout
-                .clone();
-            (
-                ctx.runtime.clone(),
-                Arc::clone(&ctx.guest_rootfs_cell),
-                layout,
-                ctx.should_reuse_rootfs(),
-            )
+                .clone()
+                .ok_or_else(|| BoxliteError::Internal("filesystem task must run first".into()))?;
+            (ctx.runtime.clone(), layout, ctx.reuse_rootfs)
         };
 
-        let output = run_guest_rootfs(GuestRootfsInput {
-            runtime: &runtime,
-            guest_rootfs_cell: &guest_rootfs_cell,
-            layout: &layout,
-            reuse_rootfs,
-        })
-        .await
-        .inspect_err(|e| log_task_error(&box_id, task_name, e))?;
+        let disk = run_guest_rootfs(&runtime, &layout, reuse_rootfs)
+            .await
+            .inspect_err(|e| log_task_error(&box_id, task_name, e))?;
 
         let mut ctx = ctx.lock().await;
-        ctx.guest_rootfs_output = Some(output);
+        ctx.guest_disk = disk;
 
         Ok(())
     }
@@ -61,19 +48,23 @@ impl PipelineTask<InitCtx> for GuestRootfsTask {
 }
 
 /// Get or initialize bootstrap guest rootfs, then create/reuse per-box COW disk.
-async fn run_guest_rootfs(input: GuestRootfsInput<'_>) -> BoxliteResult<GuestRootfsOutput> {
+async fn run_guest_rootfs(
+    runtime: &SharedRuntimeImpl,
+    layout: &BoxFilesystemLayout,
+    reuse_rootfs: bool,
+) -> BoxliteResult<Option<Disk>> {
     // First, get or create the shared base guest rootfs
-    let guest_rootfs = input
-        .guest_rootfs_cell
+    let guest_rootfs = runtime
+        .guest_rootfs
         .get_or_try_init(|| async {
             tracing::info!(
                 "Initializing bootstrap guest rootfs {} (first time only)",
                 images::INIT_ROOTFS
             );
 
-            let base_image = pull_guest_rootfs_image(input.runtime).await?;
+            let base_image = pull_guest_rootfs_image(runtime).await?;
             let env = extract_env_from_image(&base_image).await?;
-            let guest_rootfs = prepare_guest_rootfs(input.runtime, &base_image, env).await?;
+            let guest_rootfs = prepare_guest_rootfs(runtime, &base_image, env).await?;
 
             tracing::info!("Bootstrap guest rootfs ready: {:?}", guest_rootfs.strategy);
 
@@ -83,13 +74,10 @@ async fn run_guest_rootfs(input: GuestRootfsInput<'_>) -> BoxliteResult<GuestRoo
         .clone();
 
     // Now create or reuse the per-box COW disk
-    let (updated_guest_rootfs, disk) =
-        create_or_reuse_cow_disk(&guest_rootfs, input.layout, input.reuse_rootfs)?;
+    let (_updated_guest_rootfs, disk) =
+        create_or_reuse_cow_disk(&guest_rootfs, layout, reuse_rootfs)?;
 
-    Ok(GuestRootfsOutput {
-        guest_rootfs: updated_guest_rootfs,
-        disk,
-    })
+    Ok(disk)
 }
 
 /// Create new COW disk or reuse existing one for restart.

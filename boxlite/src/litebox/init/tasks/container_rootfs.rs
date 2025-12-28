@@ -8,12 +8,12 @@
 
 use super::{InitCtx, log_task_error, task_start};
 use crate::disk::{BackingFormat, Disk, DiskFormat, Qcow2Helper, create_ext4_from_dir};
-use crate::images::ContainerConfig;
-use crate::litebox::init::types::{
-    ContainerRootfsInput, ContainerRootfsOutput, ContainerRootfsPrepResult, USE_DISK_ROOTFS,
-    USE_OVERLAYFS,
-};
+use crate::images::ContainerImageConfig;
+use crate::litebox::init::types::{ContainerRootfsPrepResult, USE_DISK_ROOTFS, USE_OVERLAYFS};
 use crate::pipeline::PipelineTask;
+use crate::runtime::layout::BoxFilesystemLayout;
+use crate::runtime::options::RootfsSpec;
+use crate::runtime::rt_impl::SharedRuntimeImpl;
 use async_trait::async_trait;
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 
@@ -25,33 +25,29 @@ impl PipelineTask<InitCtx> for ContainerRootfsTask {
         let task_name = self.name();
         let box_id = task_start(&ctx, task_name).await;
 
-        let (options, runtime, layout, reuse_rootfs) = {
+        let (rootfs_spec, env, runtime, layout, reuse_rootfs) = {
             let ctx = ctx.lock().await;
             let layout = ctx
-                .fs_output
-                .as_ref()
-                .ok_or_else(|| BoxliteError::Internal("filesystem task must run first".into()))?
                 .layout
-                .clone();
+                .clone()
+                .ok_or_else(|| BoxliteError::Internal("filesystem task must run first".into()))?;
             (
-                ctx.config.options.clone(),
+                ctx.config.container.image.clone(),
+                ctx.config.options.env.clone(),
                 ctx.runtime.clone(),
                 layout,
-                ctx.should_reuse_rootfs(),
+                ctx.reuse_rootfs,
             )
         };
 
-        let output = run_container_rootfs(ContainerRootfsInput {
-            options: &options,
-            runtime: &runtime,
-            layout: &layout,
-            reuse_rootfs,
-        })
-        .await
-        .inspect_err(|e| log_task_error(&box_id, task_name, e))?;
+        let (container_image_config, disk) =
+            run_container_rootfs(&rootfs_spec, &env, &runtime, &layout, reuse_rootfs)
+                .await
+                .inspect_err(|e| log_task_error(&box_id, task_name, e))?;
 
         let mut ctx = ctx.lock().await;
-        ctx.rootfs_output = Some(output);
+        ctx.container_image_config = Some(container_image_config);
+        ctx.container_disk = Some(disk);
 
         Ok(())
     }
@@ -62,16 +58,17 @@ impl PipelineTask<InitCtx> for ContainerRootfsTask {
 }
 
 /// Pull image and prepare rootfs, then create or reuse COW disk.
-///
-/// For fresh start: creates new COW disk from base image
-/// For restart: reuses existing COW disk (preserves user data)
 async fn run_container_rootfs(
-    input: ContainerRootfsInput<'_>,
-) -> BoxliteResult<ContainerRootfsOutput> {
-    let disk_path = input.layout.disk_path();
+    rootfs_spec: &RootfsSpec,
+    env: &[(String, String)],
+    runtime: &SharedRuntimeImpl,
+    layout: &BoxFilesystemLayout,
+    reuse_rootfs: bool,
+) -> BoxliteResult<(ContainerImageConfig, Disk)> {
+    let disk_path = layout.disk_path();
 
     // For restart, reuse existing COW disk
-    if input.reuse_rootfs {
+    if reuse_rootfs {
         tracing::info!(
             disk_path = %disk_path.display(),
             "Restart mode: reusing existing container rootfs disk"
@@ -84,50 +81,40 @@ async fn run_container_rootfs(
             )));
         }
 
-        // Open existing disk as persistent (won't be deleted on drop)
         let disk = Disk::new(disk_path.clone(), DiskFormat::Qcow2, true);
 
-        // For restart, we still need container_config for environment etc.
-        // Pull image to get config (uses cache, fast)
-        let image_ref = match &input.options.rootfs {
-            crate::runtime::options::RootfsSpec::Image(r) => r,
-            crate::runtime::options::RootfsSpec::RootfsPath(_) => {
+        let image_ref = match rootfs_spec {
+            RootfsSpec::Image(r) => r,
+            RootfsSpec::RootfsPath(_) => {
                 return Err(BoxliteError::Storage(
                     "Direct rootfs paths not yet supported".into(),
                 ));
             }
         };
-        let image = pull_image(input.runtime, image_ref).await?;
+        let image = pull_image(runtime, image_ref).await?;
         let image_config = image.load_config().await?;
-        let mut container_config = ContainerConfig::from_oci_config(&image_config)?;
-        if !input.options.env.is_empty() {
-            container_config.merge_env(input.options.env.clone());
+        let mut container_image_config = ContainerImageConfig::from_oci_config(&image_config)?;
+        if !env.is_empty() {
+            container_image_config.merge_env(env.to_vec());
         }
 
-        // For restart, rootfs_init is not used (container already exists)
-        // but we need a placeholder - use DiskImage with empty device path
-        return Ok(ContainerRootfsOutput {
-            container_config,
-            disk,
-        });
+        return Ok((container_image_config, disk));
     }
 
     // Fresh start: pull image and prepare rootfs
-    let image_ref = match &input.options.rootfs {
-        crate::runtime::options::RootfsSpec::Image(r) => r,
-        crate::runtime::options::RootfsSpec::RootfsPath(_) => {
+    let image_ref = match rootfs_spec {
+        RootfsSpec::Image(r) => r,
+        RootfsSpec::RootfsPath(_) => {
             return Err(BoxliteError::Storage(
                 "Direct rootfs paths not yet supported".into(),
             ));
         }
     };
 
-    // Pull image (returns cached if already pulled)
-    let image = pull_image(input.runtime, image_ref).await?;
+    let image = pull_image(runtime, image_ref).await?;
 
-    // Prepare base rootfs (get or create cached base disk)
     let rootfs_result = if USE_DISK_ROOTFS {
-        prepare_disk_rootfs(input.runtime, &image).await?
+        prepare_disk_rootfs(runtime, &image).await?
     } else if USE_OVERLAYFS {
         prepare_overlayfs_layers(&image).await?
     } else {
@@ -136,22 +123,16 @@ async fn run_container_rootfs(
         ));
     };
 
-    // Create COW disk from base
-    let disk = create_cow_disk(&rootfs_result, input.layout)?;
+    let disk = create_cow_disk(&rootfs_result, layout)?;
 
-    // Load container config
     let image_config = image.load_config().await?;
-    let mut container_config = ContainerConfig::from_oci_config(&image_config)?;
+    let mut container_image_config = ContainerImageConfig::from_oci_config(&image_config)?;
 
-    // Merge user environment variables
-    if !input.options.env.is_empty() {
-        container_config.merge_env(input.options.env.clone());
+    if !env.is_empty() {
+        container_image_config.merge_env(env.to_vec());
     }
 
-    Ok(ContainerRootfsOutput {
-        container_config,
-        disk,
-    })
+    Ok((container_image_config, disk))
 }
 
 /// Create COW disk from base rootfs.

@@ -19,16 +19,15 @@ pub(crate) use init::BoxBuilder;
 use crate::metrics::BoxMetrics;
 use crate::runtime::rt_impl::SharedRuntimeImpl;
 use crate::{BoxID, BoxInfo};
-use boxlite_shared::errors::{BoxliteError, BoxliteResult};
+use boxlite_shared::errors::BoxliteResult;
 pub use config::BoxConfig;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::OnceCell;
 
 /// LiteBox - Handle to a box.
 ///
-/// Thin wrapper around BoxImpl with lazy initialization.
-/// All operations delegate to the inner implementation after ensuring it's ready.
+/// Thin wrapper around BoxImpl. BoxImpl is created immediately with config,
+/// but VM resources (LiveState) are lazily initialized on first use.
 ///
 /// Following the same pattern as BoxliteRuntime wrapping RuntimeImpl.
 pub struct LiteBox {
@@ -36,31 +35,31 @@ pub struct LiteBox {
     id: BoxID,
     /// Box name for quick access without locking.
     name: Option<String>,
-    /// Runtime reference for building.
-    runtime: SharedRuntimeImpl,
-    /// Lazily initialized box implementation.
-    inner: OnceCell<SharedBoxImpl>,
+    /// Box implementation (created immediately, LiveState is lazy).
+    inner: SharedBoxImpl,
     /// Whether shutdown has been requested.
     is_shutdown: AtomicBool,
 }
 
 impl LiteBox {
-    /// Create a LiteBox from ID and runtime.
+    /// Create a LiteBox with config and state.
     ///
-    /// Does NOT initialize VM immediately. Use operations that require the VM
-    /// to trigger lazy initialization.
-    pub(crate) fn new(runtime: SharedRuntimeImpl, id: BoxID, name: Option<String>) -> Self {
+    /// BoxImpl is created immediately but VM resources (LiveState) are NOT
+    /// initialized. Use operations that require the VM to trigger lazy initialization.
+    pub(crate) fn new(runtime: SharedRuntimeImpl, config: BoxConfig, state: BoxState) -> Self {
+        let id = config.id.clone();
+        let name = config.name.clone();
+        let inner = Arc::new(box_impl::BoxImpl::new(config, state, runtime));
         Self {
             id,
             name,
-            runtime,
-            inner: OnceCell::new(),
+            inner,
             is_shutdown: AtomicBool::new(false),
         }
     }
 
     // ========================================================================
-    // Accessors - all delegate to BoxImpl
+    // Accessors (no VM required)
     // ========================================================================
 
     pub fn id(&self) -> &BoxID {
@@ -71,63 +70,26 @@ impl LiteBox {
         self.name.as_deref()
     }
 
-    pub async fn info(&self) -> BoxliteResult<BoxInfo> {
-        Ok(self.box_impl().await?.info())
+    /// Get box info without triggering VM initialization.
+    pub fn info(&self) -> BoxInfo {
+        self.inner.info()
     }
 
     // ========================================================================
-    // Operations - all delegate to BoxImpl
+    // Operations (trigger VM initialization)
     // ========================================================================
 
     pub async fn exec(&self, command: BoxCommand) -> BoxliteResult<Execution> {
-        self.box_impl().await?.exec(command).await
+        self.inner.exec(command).await
     }
 
     pub async fn metrics(&self) -> BoxliteResult<BoxMetrics> {
-        self.box_impl().await?.metrics()
+        self.inner.metrics().await
     }
 
     pub async fn stop(&self) -> BoxliteResult<()> {
         self.is_shutdown.store(true, Ordering::SeqCst);
-
-        if let Some(inner) = self.inner.get() {
-            inner.stop().await
-        } else {
-            // Box was never started - just update database, don't initialize VM
-            let mut state = self.runtime.box_manager.update_box(&self.id)?;
-            state.set_status(BoxStatus::Stopped);
-            state.set_pid(None);
-            self.runtime.box_manager.save_box(&self.id, &state)?;
-            Ok(())
-        }
-    }
-
-    /// Get the inner BoxImpl, initializing it if necessary.
-    async fn box_impl(&self) -> BoxliteResult<&SharedBoxImpl> {
-        self.inner.get_or_try_init(|| self.init_box_impl()).await
-    }
-
-    /// Initialize and return BoxImpl.
-    async fn init_box_impl(&self) -> BoxliteResult<SharedBoxImpl> {
-        let (config, state) = self
-            .runtime
-            .box_manager
-            .lookup_box(&self.id)?
-            .ok_or_else(|| BoxliteError::NotFound(format!("box {} not found", self.id)))?;
-
-        let inner = if state.status == BoxStatus::Running {
-            // Reattach to running box
-            let pid = state
-                .pid
-                .ok_or_else(|| BoxliteError::InvalidState("Running box has no PID".into()))?;
-            box_impl::BoxImpl::reconnect(config, state, Arc::clone(&self.runtime), pid)?
-        } else {
-            // Build new box (Starting or Stopped)
-            let builder = BoxBuilder::new(Arc::clone(&self.runtime), config, state)?;
-            builder.build().await?
-        };
-
-        Ok(Arc::new(inner))
+        self.inner.stop().await
     }
 }
 

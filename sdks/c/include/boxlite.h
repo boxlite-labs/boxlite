@@ -69,10 +69,11 @@ struct CBoxliteRuntime *boxlite_runtime_new(const char *home_dir, char **out_err
  * # Example
  * ```c
  * const char *opts = "{\"images\":{\"Reference\":\"alpine:3.19\"}}";
- * BoxHandle *box = boxlite_create_box(runtime, opts, &error);
+ * BoxHandle *box = boxlite_create_box(runtime, image, opts, &error);
  * ```
  */
 struct CBoxHandle *boxlite_create_box(struct CBoxliteRuntime *runtime,
+                                      const char *image,
                                       const char *options_json,
                                       char **out_error);
 

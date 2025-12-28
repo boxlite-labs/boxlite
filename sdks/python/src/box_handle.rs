@@ -24,12 +24,8 @@ impl PyBox {
         self.handle.name().map(|s| s.to_string())
     }
 
-    fn info<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
-        let handle = Arc::clone(&self.handle);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let info = handle.info().await.map_err(map_err)?;
-            Ok(PyBoxInfo::from(info))
-        })
+    fn info(&self) -> PyBoxInfo {
+        PyBoxInfo::from(self.handle.info())
     }
 
     #[pyo3(signature = (command, args=None, env=None, tty=false))]

@@ -172,7 +172,7 @@ impl BoxInfo {
             last_updated: state.last_updated,
             pid: state.pid,
             transport: config.transport.clone(),
-            image: match &config.options.rootfs {
+            image: match &config.container.image {
                 RootfsSpec::Image(r) => r.clone(),
                 RootfsSpec::RootfsPath(p) => format!("rootfs:{}", p),
             },
@@ -206,7 +206,7 @@ impl PartialEq for BoxInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::litebox::config::BoxConfig;
+    use crate::litebox::config::{BoxConfig, ContainerRuntimeConfig};
     use crate::runtime::options::{BoxOptions, RootfsSpec};
     use std::path::PathBuf;
 
@@ -235,10 +235,14 @@ mod tests {
             id: "01HJK4TNRPQSXYZ8WM6NCVT9R5".to_string(),
             name: None,
             created_at: now,
+            container: ContainerRuntimeConfig {
+                id: ContainerId::new(),
+                image: RootfsSpec::Image("python:3.11".to_string()),
+                image_config: None,
+            },
             options: BoxOptions {
                 cpus: Some(4),
                 memory_mib: Some(1024),
-                rootfs: RootfsSpec::Image("python:3.11".to_string()),
                 ..Default::default()
             },
             engine_kind: crate::vmm::VmmKind::Libkrun,

@@ -17,14 +17,20 @@ impl PipelineTask<InitCtx> for VmmAttachTask {
         let task_name = self.name();
         let box_id = task_start(&ctx, task_name).await;
 
-        let (pid, _state_status) = {
+        let (runtime, config_id) = {
             let ctx = ctx.lock().await;
-            let pid = ctx
-                .state
-                .pid
-                .ok_or_else(|| BoxliteError::InvalidState("Running box has no PID".into()))?;
-            (pid, ctx.state.status)
+            (ctx.runtime.clone(), ctx.config.id.clone())
         };
+
+        // Load state from box_manager to get PID
+        let (_config, state) = runtime
+            .box_manager
+            .box_by_id(&config_id)?
+            .ok_or_else(|| BoxliteError::NotFound(config_id.clone()))?;
+
+        let pid = state
+            .pid
+            .ok_or_else(|| BoxliteError::InvalidState("Running box has no PID".into()))?;
 
         // Verify process is still alive
         if !crate::util::is_process_alive(pid) {

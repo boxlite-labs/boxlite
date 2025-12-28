@@ -8,8 +8,8 @@ use crate::runtime::constants::filenames;
 use crate::runtime::guest_rootfs::GuestRootfs;
 use crate::runtime::layout::{FilesystemLayout, FsLayoutConfig};
 use crate::runtime::lock::RuntimeLock;
-use crate::runtime::options::{BoxOptions, BoxliteOptions};
-use crate::runtime::types::{BoxID, BoxInfo, BoxState, BoxStatus, generate_box_id};
+use crate::runtime::options::{BoxOptions, BoxliteOptions, RootfsSpec};
+use crate::runtime::types::{BoxID, BoxInfo, BoxState, BoxStatus, ContainerId, generate_box_id};
 use crate::vmm::VmmKind;
 use boxlite_shared::{BoxliteError, BoxliteResult, Transport};
 use chrono::Utc;
@@ -152,6 +152,7 @@ impl RuntimeImpl {
     /// Box startup) is deferred until the first API call on the handle.
     pub fn create(
         self: &Arc<Self>,
+        image: &str,
         options: BoxOptions,
         name: Option<String>,
     ) -> BoxliteResult<LiteBox> {
@@ -165,8 +166,11 @@ impl RuntimeImpl {
             )));
         }
 
+        // Parse image reference
+        let rootfs_spec = RootfsSpec::Image(image.to_string());
+
         // Initialize box variables with defaults
-        let (config, state) = self.init_box_variables(&options, name);
+        let (config, state) = self.init_box_variables(rootfs_spec, &options, name);
 
         // Register in BoxManager (handles DB persistence internally)
         self.box_manager.add_box(&config, &state)?;
@@ -177,11 +181,7 @@ impl RuntimeImpl {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Create LiteBox handle
-        Ok(LiteBox::new(
-            Arc::clone(self),
-            config.id.clone(),
-            config.name.clone(),
-        ))
+        Ok(LiteBox::new(Arc::clone(self), config, state))
     }
 
     /// Get a handle to an existing box by ID or name.
@@ -196,12 +196,10 @@ impl RuntimeImpl {
             tracing::trace!(
                 box_id = %config.id,
                 name = ?config.name,
-                status = ?state.status,
-                pid = ?state.pid,
                 "Retrieved box from manager, creating LiteBox"
             );
 
-            let litebox = LiteBox::new(Arc::clone(self), config.id.clone(), config.name.clone());
+            let litebox = LiteBox::new(Arc::clone(self), config, state);
             tracing::trace!(id_or_name = %id_or_name, "LiteBox created successfully");
             return Ok(Some(litebox));
         }
@@ -338,11 +336,17 @@ impl RuntimeImpl {
     /// Initialize box variables with defaults.
     fn init_box_variables(
         &self,
+        rootfs_spec: RootfsSpec,
         options: &BoxOptions,
         name: Option<String>,
     ) -> (BoxConfig, BoxState) {
+        use crate::litebox::config::ContainerRuntimeConfig;
+
         // Generate unique ID (26 chars, ULID format, sortable by time)
         let box_id = generate_box_id();
+
+        // Generate container ID (64-char hex)
+        let container_id = ContainerId::new();
 
         // Record creation timestamp
         let now = Utc::now();
@@ -352,11 +356,19 @@ impl RuntimeImpl {
         let socket_path = filenames::unix_socket_path(self.layout.home_dir(), &box_id);
         let ready_socket_path = box_home.join("sockets").join("ready.sock");
 
+        // Create container runtime config
+        let container = ContainerRuntimeConfig {
+            id: container_id,
+            image: rootfs_spec,
+            image_config: None, // Populated during initialization
+        };
+
         // Create config with defaults + user options
         let config = BoxConfig {
             id: box_id,
             name,
             created_at: now,
+            container,
             options: options.clone(),
             engine_kind: VmmKind::Libkrun,
             transport: Transport::unix(socket_path),

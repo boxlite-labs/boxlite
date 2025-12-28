@@ -28,13 +28,15 @@ impl Default for BoxliteOptions {
 }
 
 /// Options used when constructing a box.
+///
+/// These are user-provided options at creation time.
+/// The image/rootfs is specified separately via `ContainerRuntimeConfig`.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BoxOptions {
     pub cpus: Option<u8>,
     pub memory_mib: Option<u32>,
     pub working_dir: Option<String>,
     pub env: Vec<(String, String)>,
-    pub rootfs: RootfsSpec,
     pub volumes: Vec<VolumeSpec>,
     pub network: NetworkSpec,
     pub ports: Vec<PortSpec>,
@@ -71,7 +73,6 @@ impl Default for BoxOptions {
             memory_mib: None,
             working_dir: None,
             env: Vec::new(),
-            rootfs: RootfsSpec::default(),
             volumes: Vec::new(),
             network: NetworkSpec::default(),
             ports: Vec::new(),

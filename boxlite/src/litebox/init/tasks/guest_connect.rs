@@ -9,6 +9,7 @@ use super::{InitCtx, log_task_error, task_start};
 use crate::pipeline::PipelineTask;
 use crate::portal::GuestSession;
 use async_trait::async_trait;
+use boxlite_shared::Transport;
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 use std::time::Duration;
 
@@ -22,13 +23,9 @@ impl PipelineTask<InitCtx> for GuestConnectTask {
 
         let (transport, ready_transport) = {
             let ctx = ctx.lock().await;
-            let config_output = ctx
-                .config_output
-                .as_ref()
-                .expect("config_output must be set before guest_connect");
             (
                 ctx.config.transport.clone(),
-                config_output.box_config.ready_transport.clone(),
+                Transport::unix(ctx.config.ready_socket_path.clone()),
             )
         };
 

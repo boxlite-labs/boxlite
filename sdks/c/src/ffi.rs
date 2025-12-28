@@ -157,11 +157,12 @@ pub unsafe extern "C" fn boxlite_runtime_new(
 /// # Example
 /// ```c
 /// const char *opts = "{\"images\":{\"Reference\":\"alpine:3.19\"}}";
-/// BoxHandle *box = boxlite_create_box(runtime, opts, &error);
+/// BoxHandle *box = boxlite_create_box(runtime, image, opts, &error);
 /// ```
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn boxlite_create_box(
     runtime: *mut CBoxliteRuntime,
+    image: *const c_char,
     options_json: *const c_char,
     out_error: *mut *mut c_char,
 ) -> *mut CBoxHandle {
@@ -173,6 +174,17 @@ pub unsafe extern "C" fn boxlite_create_box(
     }
 
     let runtime_ref = &mut *runtime;
+
+    // Parse image string
+    let image_str = match c_str_to_string(image) {
+        Ok(s) => s,
+        Err(e) => {
+            if !out_error.is_null() {
+                *out_error = error_to_c_string(e);
+            }
+            return ptr::null_mut();
+        }
+    };
 
     // Parse JSON options
     let options_str = match c_str_to_string(options_json) {
@@ -199,7 +211,7 @@ pub unsafe extern "C" fn boxlite_create_box(
     };
 
     // Create box (no name support in C API yet)
-    let result = runtime_ref.runtime.create(options, None);
+    let result = runtime_ref.runtime.create(&image_str, options, None);
 
     match result {
         Ok(handle) => {

@@ -332,7 +332,8 @@ fn get_boot_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::types::BoxStatus;
+    use crate::litebox::config::ContainerRuntimeConfig;
+    use crate::runtime::types::{BoxStatus, ContainerId};
     use crate::vmm::VmmKind;
     use boxlite_shared::Transport;
     use std::path::PathBuf;
@@ -352,10 +353,14 @@ mod tests {
             id: id.to_string(),
             name: None,
             created_at: now,
+            container: ContainerRuntimeConfig {
+                id: ContainerId::new(),
+                image: RootfsSpec::Image("test:latest".to_string()),
+                image_config: None,
+            },
             options: BoxOptions {
                 cpus: Some(2),
                 memory_mib: Some(512),
-                rootfs: RootfsSpec::Image("test:latest".to_string()),
                 ..Default::default()
             },
             engine_kind: VmmKind::Libkrun,

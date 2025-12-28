@@ -1,4 +1,16 @@
-//! Box implementation - holds initialized box state and VM resources.
+//! Box implementation - holds config, state, and lazily-initialized VM resources.
+
+// ============================================================================
+// IMPORTS
+// ============================================================================
+
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+
+use parking_lot::RwLock;
+use tokio::sync::OnceCell;
+
+use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 
 use crate::disk::Disk;
 #[cfg(target_os = "linux")]
@@ -9,57 +21,111 @@ use crate::runtime::rt_impl::SharedRuntimeImpl;
 use crate::runtime::types::BoxStatus;
 use crate::vmm::controller::VmmHandler;
 use crate::{BoxID, BoxInfo};
-use boxlite_shared::errors::{BoxliteError, BoxliteResult};
-use parking_lot::RwLock;
-use std::sync::atomic::Ordering;
 
 use super::config::BoxConfig;
 use super::exec::{BoxCommand, ExecStderr, ExecStdin, ExecStdout, Execution};
 use super::state::BoxState;
-use std::sync::Arc;
+
+// ============================================================================
+// TYPE ALIASES
+// ============================================================================
 
 /// Shared reference to BoxImpl.
 pub type SharedBoxImpl = Arc<BoxImpl>;
 
-/// Box implementation - created lazily, holds all state after initialization.
-pub(crate) struct BoxImpl {
-    // Core identity
-    pub(crate) config: BoxConfig,
-    pub(crate) state: RwLock<BoxState>,
-    pub(crate) runtime: SharedRuntimeImpl,
+// ============================================================================
+// LIVE STATE
+// ============================================================================
 
-    // VM resources
+/// Live VM state - initialized when VM is started.
+///
+/// Contains all resources related to a running VM instance.
+/// Separated from BoxImpl to allow operations like `info()` without starting the VM.
+pub(crate) struct LiveState {
+    // VM process control
     handler: std::sync::Mutex<Box<dyn VmmHandler>>,
     guest_session: GuestSession,
+
+    // Metrics
     metrics: BoxMetricsStorage,
+
+    // Disk resources (kept for lifecycle management)
     _container_rootfs_disk: Disk,
     #[allow(dead_code)]
     guest_rootfs_disk: Option<Disk>,
-    container_id: String,
+
+    // Platform-specific
     #[cfg(target_os = "linux")]
     #[allow(dead_code)]
     bind_mount: Option<BindMountHandle>,
 }
 
+impl LiveState {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        handler: Box<dyn VmmHandler>,
+        guest_session: GuestSession,
+        metrics: BoxMetricsStorage,
+        container_rootfs_disk: Disk,
+        guest_rootfs_disk: Option<Disk>,
+        #[cfg(target_os = "linux")] bind_mount: Option<BindMountHandle>,
+    ) -> Self {
+        Self {
+            handler: std::sync::Mutex::new(handler),
+            guest_session,
+            metrics,
+            _container_rootfs_disk: container_rootfs_disk,
+            guest_rootfs_disk,
+            #[cfg(target_os = "linux")]
+            bind_mount,
+        }
+    }
+}
+
+// ============================================================================
+// BOX IMPL
+// ============================================================================
+
+/// Box implementation - created immediately, holds config and state.
+///
+/// VM resources are held in LiveState and lazily initialized on first use.
+pub(crate) struct BoxImpl {
+    // --- Always available ---
+    pub(crate) config: BoxConfig,
+    pub(crate) state: RwLock<BoxState>,
+    pub(crate) runtime: SharedRuntimeImpl,
+
+    // --- Lazily initialized ---
+    live: OnceCell<LiveState>,
+}
+
 impl BoxImpl {
     // ========================================================================
-    // Accessors
+    // CONSTRUCTION
+    // ========================================================================
+
+    /// Create BoxImpl with config and state (VM not started yet).
+    ///
+    /// LiveState will be lazily initialized when operations requiring VM are called.
+    pub(crate) fn new(config: BoxConfig, state: BoxState, runtime: SharedRuntimeImpl) -> Self {
+        Self {
+            config,
+            state: RwLock::new(state),
+            runtime,
+            live: OnceCell::new(),
+        }
+    }
+
+    // ========================================================================
+    // ACCESSORS (no VM required)
     // ========================================================================
 
     pub fn id(&self) -> &BoxID {
         &self.config.id
     }
 
-    pub fn name(&self) -> Option<&str> {
-        self.config.name.as_deref()
-    }
-
-    pub fn config(&self) -> &BoxConfig {
-        &self.config
-    }
-
-    pub fn status(&self) -> BoxStatus {
-        self.state.read().status
+    pub fn container_id(&self) -> &str {
+        self.config.container.id.as_str()
     }
 
     pub fn auto_remove(&self) -> bool {
@@ -72,30 +138,30 @@ impl BoxImpl {
     }
 
     // ========================================================================
-    // State management
+    // STATE MANAGEMENT (no VM required)
     // ========================================================================
 
-    pub fn save(&self) -> BoxliteResult<()> {
-        let state = self.state.read();
+    /// Update state locally and sync to database.
+    pub fn update_state<F>(&self, f: F) -> BoxliteResult<()>
+    where
+        F: FnOnce(&mut BoxState),
+    {
+        let mut state = self.state.write();
+        f(&mut state);
         self.runtime.box_manager.save_box(&self.config.id, &state)?;
         Ok(())
     }
 
-    pub fn set_status(&self, status: BoxStatus) {
-        self.state.write().set_status(status);
-    }
-
-    pub fn set_pid(&self, pid: Option<u32>) {
-        self.state.write().set_pid(pid);
-    }
-
     // ========================================================================
-    // Operations
+    // OPERATIONS (require VM)
     // ========================================================================
 
     pub async fn exec(&self, command: BoxCommand) -> BoxliteResult<Execution> {
         use boxlite_shared::constants::executor as executor_const;
 
+        let live = self.live_state().await?;
+
+        // Inject container ID into environment if not already set
         let command = if command
             .env
             .as_ref()
@@ -106,22 +172,22 @@ impl BoxImpl {
         } else {
             command.env(
                 executor_const::ENV_VAR,
-                format!("{}={}", executor_const::CONTAINER_KEY, self.container_id),
+                format!("{}={}", executor_const::CONTAINER_KEY, self.container_id()),
             )
         };
 
-        let mut exec_interface = self.guest_session.execution().await?;
+        let mut exec_interface = live.guest_session.execution().await?;
         let result = exec_interface.exec(command).await;
 
         // Instrument metrics
-        self.metrics.increment_commands_executed();
+        live.metrics.increment_commands_executed();
         self.runtime
             .runtime_metrics
             .total_commands
             .fetch_add(1, Ordering::Relaxed);
 
         if result.is_err() {
-            self.metrics.increment_exec_errors();
+            live.metrics.increment_exec_errors();
             self.runtime
                 .runtime_metrics
                 .total_exec_errors
@@ -139,15 +205,16 @@ impl BoxImpl {
         ))
     }
 
-    pub fn metrics(&self) -> BoxliteResult<BoxMetrics> {
-        let handler = self
+    pub async fn metrics(&self) -> BoxliteResult<BoxMetrics> {
+        let live = self.live_state().await?;
+        let handler = live
             .handler
             .lock()
             .map_err(|e| BoxliteError::Internal(format!("handler lock poisoned: {}", e)))?;
         let raw = handler.metrics()?;
 
         Ok(BoxMetrics::from_storage(
-            &self.metrics,
+            &live.metrics,
             raw.cpu_percent,
             raw.memory_bytes,
             None,
@@ -158,19 +225,24 @@ impl BoxImpl {
     }
 
     pub async fn stop(&self) -> BoxliteResult<()> {
-        // Gracefully shut down guest
-        if let Ok(mut guest) = self.guest_session.guest().await {
-            let _ = guest.shutdown().await;
+        // Only try to stop VM if LiveState exists
+        if let Some(live) = self.live.get() {
+            // Gracefully shut down guest
+            if let Ok(mut guest) = live.guest_session.guest().await {
+                let _ = guest.shutdown().await;
+            }
+
+            // Stop handler
+            if let Ok(mut handler) = live.handler.lock() {
+                handler.stop()?;
+            }
         }
 
-        // Stop handler
-        if let Ok(mut handler) = self.handler.lock() {
-            handler.stop()?;
-        }
-
-        self.set_status(BoxStatus::Stopped);
-        self.set_pid(None);
-        self.save()?;
+        // Update state in database
+        self.update_state(|state| {
+            state.set_status(BoxStatus::Stopped);
+            state.set_pid(None);
+        })?;
 
         tracing::info!("Stopped box {}", self.id());
 
@@ -182,68 +254,25 @@ impl BoxImpl {
     }
 
     // ========================================================================
-    // Construction (called by BoxBuilder)
+    // LIVE STATE INITIALIZATION (internal)
     // ========================================================================
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        config: BoxConfig,
-        state: BoxState,
-        runtime: SharedRuntimeImpl,
-        handler: Box<dyn VmmHandler>,
-        guest_session: GuestSession,
-        metrics: BoxMetricsStorage,
-        container_rootfs_disk: Disk,
-        guest_rootfs_disk: Option<Disk>,
-        container_id: String,
-        #[cfg(target_os = "linux")] bind_mount: Option<BindMountHandle>,
-    ) -> Self {
-        Self {
-            config,
-            state: RwLock::new(state),
-            runtime,
-            handler: std::sync::Mutex::new(handler),
-            guest_session,
-            metrics,
-            _container_rootfs_disk: container_rootfs_disk,
-            guest_rootfs_disk,
-            container_id,
-            #[cfg(target_os = "linux")]
-            bind_mount,
-        }
+    /// Ensure LiveState is initialized, lazily starting the VM if needed.
+    async fn live_state(&self) -> BoxliteResult<&LiveState> {
+        self.live.get_or_try_init(|| self.init_live_state()).await
     }
 
-    /// Reconnect to an already-running box.
-    pub(crate) fn reconnect(
-        config: BoxConfig,
-        state: BoxState,
-        runtime: SharedRuntimeImpl,
-        pid: u32,
-    ) -> BoxliteResult<Self> {
-        use crate::disk::DiskFormat;
-        use crate::vmm::controller::ShimHandler;
+    /// Initialize LiveState via BoxBuilder.
+    ///
+    /// BoxBuilder handles all status types with different execution plans:
+    /// - Starting: full pipeline (filesystem, rootfs, spawn, connect, init)
+    /// - Stopped: restart pipeline (reuse rootfs, spawn, connect, init)
+    /// - Running: attach pipeline (attach, connect)
+    async fn init_live_state(&self) -> BoxliteResult<LiveState> {
+        use super::BoxBuilder;
 
-        let container_id = state
-            .container_id
-            .clone()
-            .ok_or_else(|| BoxliteError::InvalidState("Running box has no container_id".into()))?;
-
-        let handler = ShimHandler::from_pid(pid, config.id.clone());
-        let guest_session = GuestSession::new(config.transport.clone());
-        let disk = Disk::new(config.box_home.join("root.qcow2"), DiskFormat::Qcow2, true);
-
-        Ok(Self {
-            config,
-            state: RwLock::new(state),
-            runtime,
-            handler: std::sync::Mutex::new(Box::new(handler)),
-            guest_session,
-            metrics: BoxMetricsStorage::new(),
-            _container_rootfs_disk: disk,
-            guest_rootfs_disk: None,
-            container_id: container_id.to_string(),
-            #[cfg(target_os = "linux")]
-            bind_mount: None,
-        })
+        let state = self.state.read().clone();
+        let builder = BoxBuilder::new(Arc::clone(&self.runtime), self.config.clone(), state)?;
+        builder.build().await
     }
 }

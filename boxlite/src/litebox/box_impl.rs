@@ -37,10 +37,10 @@ pub type SharedBoxImpl = Arc<BoxImpl>;
 // LIVE STATE
 // ============================================================================
 
-/// Live VM state - initialized when VM is started.
+/// Live state - lazily initialized when VM is started.
 ///
 /// Contains all resources related to a running VM instance.
-/// Separated from BoxImpl to allow operations like `info()` without starting the VM.
+/// Separated from BoxImpl to allow operations like `info()` without initializing LiveState.
 pub(crate) struct LiveState {
     // VM process control
     handler: std::sync::Mutex<Box<dyn VmmHandler>>,
@@ -104,9 +104,9 @@ impl BoxImpl {
     // CONSTRUCTION
     // ========================================================================
 
-    /// Create BoxImpl with config and state (VM not started yet).
+    /// Create BoxImpl with config and state (LiveState not initialized yet).
     ///
-    /// LiveState will be lazily initialized when operations requiring VM are called.
+    /// LiveState will be lazily initialized when operations requiring it are called.
     pub(crate) fn new(config: BoxConfig, state: BoxState, runtime: SharedRuntimeImpl) -> Self {
         Self {
             config,
@@ -117,7 +117,7 @@ impl BoxImpl {
     }
 
     // ========================================================================
-    // ACCESSORS (no VM required)
+    // ACCESSORS (no LiveState required)
     // ========================================================================
 
     pub(crate) fn id(&self) -> &BoxID {
@@ -134,7 +134,7 @@ impl BoxImpl {
     }
 
     // ========================================================================
-    // STATE MANAGEMENT (no VM required)
+    // STATE MANAGEMENT (no LiveState required)
     // ========================================================================
 
     /// Update state locally and sync to database.
@@ -149,7 +149,7 @@ impl BoxImpl {
     }
 
     // ========================================================================
-    // OPERATIONS (require VM)
+    // OPERATIONS (require LiveState)
     // ========================================================================
 
     pub(crate) async fn exec(&self, command: BoxCommand) -> BoxliteResult<Execution> {
@@ -253,7 +253,7 @@ impl BoxImpl {
     // LIVE STATE INITIALIZATION (internal)
     // ========================================================================
 
-    /// Ensure LiveState is initialized, lazily starting the VM if needed.
+    /// Get LiveState, lazily initializing it if needed.
     async fn live_state(&self) -> BoxliteResult<&LiveState> {
         self.live.get_or_try_init(|| self.init_live_state()).await
     }

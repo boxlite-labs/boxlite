@@ -12,19 +12,19 @@ use tokio::sync::OnceCell;
 
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 
+use super::config::BoxConfig;
+use super::exec::{BoxCommand, ExecStderr, ExecStdin, ExecStdout, Execution};
+use super::state::BoxState;
 use crate::disk::Disk;
 #[cfg(target_os = "linux")]
 use crate::fs::BindMountHandle;
+use crate::lock::LockGuard;
 use crate::metrics::{BoxMetrics, BoxMetricsStorage};
 use crate::portal::GuestSession;
 use crate::runtime::rt_impl::SharedRuntimeImpl;
 use crate::runtime::types::BoxStatus;
 use crate::vmm::controller::VmmHandler;
 use crate::{BoxID, BoxInfo};
-
-use super::config::BoxConfig;
-use super::exec::{BoxCommand, ExecStderr, ExecStdin, ExecStdout, Execution};
-use super::state::BoxState;
 
 // ============================================================================
 // TYPE ALIASES
@@ -136,21 +136,6 @@ impl BoxImpl {
     }
 
     // ========================================================================
-    // STATE MANAGEMENT (no LiveState required)
-    // ========================================================================
-
-    /// Update state locally and sync to database.
-    fn update_state<F>(&self, f: F) -> BoxliteResult<()>
-    where
-        F: FnOnce(&mut BoxState),
-    {
-        let mut state = self.state.write();
-        f(&mut state);
-        self.runtime.box_manager.save_box(&self.config.id, &state)?;
-        Ok(())
-    }
-
-    // ========================================================================
     // OPERATIONS (require LiveState)
     // ========================================================================
 
@@ -248,14 +233,27 @@ impl BoxImpl {
             }
         }
 
-        // Update state in database
-        self.update_state(|state| {
+        // Check if box was persisted
+        let was_persisted = self.state.read().lock_id.is_some();
+
+        // Update state
+        {
+            let mut state = self.state.write();
             state.set_status(BoxStatus::Stopped);
             state.set_pid(None);
-        })?;
+
+            if was_persisted {
+                // Box was persisted - sync to DB
+                self.runtime.box_manager.save_box(&self.config.id, &state)?;
+            } else {
+                // Box was never started - persist now so it survives restarts
+                self.runtime.box_manager.add_box(&self.config, &state)?;
+            }
+        }
 
         // Invalidate cache so new handles get fresh BoxImpl
-        self.runtime.invalidate_box_impl(self.id());
+        self.runtime
+            .invalidate_box_impl(self.id(), self.config.name.as_deref());
 
         tracing::info!("Stopped box {}", self.id());
 
@@ -281,11 +279,99 @@ impl BoxImpl {
     /// - Starting: full pipeline (filesystem, rootfs, spawn, connect, init)
     /// - Stopped: restart pipeline (reuse rootfs, spawn, connect, init)
     /// - Running: attach pipeline (attach, connect)
+    ///
+    /// For Starting (new boxes), this also allocates a lock and persists to database
+    /// after successful build.
     async fn init_live_state(&self) -> BoxliteResult<LiveState> {
         use super::BoxBuilder;
+        use std::sync::Arc;
 
         let state = self.state.read().clone();
+        let is_new_box = state.status == BoxStatus::Starting;
+
+        // Acquire lock before build
+        // - New boxes: allocate new lock
+        // - Existing boxes: retrieve existing lock
+        let locker = if is_new_box {
+            let lock_id = self.runtime.lock_manager.allocate()?;
+            let locker = self.runtime.lock_manager.retrieve(lock_id)?;
+            tracing::debug!(
+                box_id = %self.config.id,
+                lock_id = %lock_id,
+                "Allocated and acquired lock for new box"
+            );
+            locker
+        } else if let Some(lock_id) = state.lock_id {
+            let locker = self.runtime.lock_manager.retrieve(lock_id)?;
+            tracing::debug!(
+                box_id = %self.config.id,
+                lock_id = %lock_id,
+                "Acquired lock for existing box"
+            );
+            locker
+        } else {
+            // Existing box without lock_id - should never happen in normal operation
+            return Err(BoxliteError::Internal(format!(
+                "box {} is missing lock_id (status: {:?})",
+                self.config.id, state.status
+            )));
+        };
+
+        // Hold the lock for the duration of build and persist operations.
+        // LockGuard acquires lock on creation and releases on drop.
+        let _guard = LockGuard::new(&*locker);
+
+        // Build the box (lock is held)
         let builder = BoxBuilder::new(Arc::clone(&self.runtime), self.config.clone(), state)?;
-        builder.build().await
+        let live_state = match builder.build().await {
+            Ok(live_state) => live_state,
+            Err(e) => {
+                // Build failed - free the lock only if newly allocated
+                // (unlock happens automatically when _guard drops)
+                if is_new_box {
+                    let lock_id = locker.id();
+                    if let Err(free_err) = self.runtime.lock_manager.free(lock_id) {
+                        tracing::error!(
+                            lock_id = %lock_id,
+                            error = %free_err,
+                            "Failed to free lock after build error"
+                        );
+                    }
+                }
+                return Err(e);
+            }
+        };
+
+        // Build succeeded - persist to DB for new boxes (lock still held)
+        if is_new_box {
+            let lock_id = locker.id();
+
+            // Hold the state lock while updating lock_id and persisting to DB
+            let mut state = self.state.write();
+            state.set_lock_id(lock_id);
+
+            if let Err(e) = self.runtime.box_manager.add_box(&self.config, &state) {
+                // Failed to persist - free the lock
+                // (unlock happens automatically when _guard drops)
+                drop(state);
+                if let Err(free_err) = self.runtime.lock_manager.free(lock_id) {
+                    tracing::error!(
+                        lock_id = %lock_id,
+                        error = %free_err,
+                        "Failed to free lock after DB persist error"
+                    );
+                }
+                return Err(e);
+            }
+
+            tracing::debug!(
+                box_id = %self.config.id,
+                lock_id = %lock_id,
+                "Persisted new box to database"
+            );
+        }
+
+        // Lock is automatically released when _guard drops
+        Ok(live_state)
     }
 }

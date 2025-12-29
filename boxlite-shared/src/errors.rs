@@ -47,6 +47,10 @@ pub enum BoxliteError {
     #[error("box not found: {0}")]
     NotFound(String),
 
+    /// Box or resource already exists.
+    #[error("already exists: {0}")]
+    AlreadyExists(String),
+
     /// Box is in wrong state for the requested operation.
     #[error("invalid state: {0}")]
     InvalidState(String),

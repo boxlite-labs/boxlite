@@ -7,7 +7,7 @@
 //! Each table has queryable columns for efficient filtering + JSON blob for full data.
 
 /// Current schema version.
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 
 /// Schema version tracking table.
 pub const SCHEMA_VERSION_TABLE: &str = r#"
@@ -21,15 +21,18 @@ CREATE TABLE IF NOT EXISTS schema_version (
 /// BoxConfig table schema.
 ///
 /// Stores immutable box configuration. JSON blob contains full BoxConfig struct.
-/// Queryable columns: id, created_at (for sorting/filtering).
+/// Queryable columns: id, name, created_at (for sorting/filtering).
+/// Name is UNIQUE but allows NULL (multiple unnamed boxes are allowed).
 pub const BOX_CONFIG_TABLE: &str = r#"
 CREATE TABLE IF NOT EXISTS box_config (
     id TEXT PRIMARY KEY NOT NULL,
+    name TEXT UNIQUE,
     created_at INTEGER NOT NULL,
     json TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_box_config_created_at ON box_config(created_at);
+CREATE INDEX IF NOT EXISTS idx_box_config_name ON box_config(name);
 "#;
 
 /// BoxState table schema.

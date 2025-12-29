@@ -181,6 +181,7 @@ impl Drop for CleanupGuard {
 
         // Remove from BoxManager (which handles DB delete via database-first pattern)
         // First mark as crashed so remove_box() doesn't fail the active check
+        // TODO(@DorianZheng) Check if this is necessary
         if let Ok(mut state) = self.runtime.box_manager.update_box(&self.box_id) {
             state.mark_crashed();
             let _ = self.runtime.box_manager.save_box(&self.box_id, &state);

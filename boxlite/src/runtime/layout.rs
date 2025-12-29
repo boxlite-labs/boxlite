@@ -83,6 +83,14 @@ impl FilesystemLayout {
         self.home_dir.join(const_dirs::BOXES_DIR)
     }
 
+    /// Per-entity locks directory: ~/.boxlite/locks
+    ///
+    /// Contains lock files managed by FileLockManager for multiprocess-safe
+    /// locking of individual entities (boxes, volumes, etc.).
+    pub fn locks_dir(&self) -> PathBuf {
+        self.home_dir.join(const_dirs::LOCKS_DIR)
+    }
+
     /// Temporary directory for transient files: ~/.boxlite/tmp
     /// Used for disk image creation and other operations that need
     /// temp files on the same filesystem as the final destination.

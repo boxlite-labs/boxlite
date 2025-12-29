@@ -3,6 +3,7 @@
 //! Defines the possible states of a box and valid transitions between them.
 
 use crate::ContainerID;
+use crate::lock::LockId;
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -154,6 +155,11 @@ pub struct BoxState {
     pub container_id: Option<ContainerID>,
     /// Last state change timestamp (UTC).
     pub last_updated: DateTime<Utc>,
+    /// Lock ID for multiprocess-safe locking.
+    ///
+    /// Allocated when the box is first initialized (not at creation time).
+    /// Used to retrieve the lock across process restarts.
+    pub lock_id: Option<LockId>,
 }
 
 impl BoxState {
@@ -164,7 +170,14 @@ impl BoxState {
             pid: None,
             container_id: None,
             last_updated: Utc::now(),
+            lock_id: None,
         }
+    }
+
+    /// Set lock ID and update timestamp.
+    pub fn set_lock_id(&mut self, lock_id: LockId) {
+        self.lock_id = Some(lock_id);
+        self.last_updated = Utc::now();
     }
 
     /// Attempt state transition with validation.

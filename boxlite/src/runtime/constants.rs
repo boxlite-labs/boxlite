@@ -64,6 +64,9 @@ pub mod dirs {
 
     /// Subdirectory for disk images
     pub const DISKS_DIR: &str = "disks";
+
+    /// Subdirectory for per-entity locks
+    pub const LOCKS_DIR: &str = "locks";
 }
 
 /// Filesystem and mount options

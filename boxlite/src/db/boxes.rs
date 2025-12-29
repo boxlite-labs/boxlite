@@ -138,10 +138,15 @@ impl BoxStore {
         let state_json = serde_json::to_string(state)
             .map_err(|e| BoxliteError::Database(format!("Failed to serialize state: {}", e)))?;
 
-        // Insert config
+        // Insert config (name has UNIQUE constraint, will fail on duplicate)
         db_err!(tx.execute(
-            "INSERT INTO box_config (id, created_at, json) VALUES (?1, ?2, ?3)",
-            params![config.id, config.created_at.timestamp(), config_json],
+            "INSERT INTO box_config (id, name, created_at, json) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                config.id,
+                config.name.as_deref(),
+                config.created_at.timestamp(),
+                config_json
+            ],
         ))?;
 
         // Insert state

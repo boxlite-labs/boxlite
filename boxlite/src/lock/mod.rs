@@ -22,7 +22,7 @@ use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 ///
 /// Lock IDs are assigned by the [`LockManager`] and persisted alongside
 /// entity configuration. The same ID always refers to the same underlying lock.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct LockId(pub u32);
 
 impl std::fmt::Display for LockId {

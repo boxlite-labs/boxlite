@@ -195,7 +195,7 @@ mod tests {
     use super::*;
     use crate::db::Database;
     use crate::litebox::config::ContainerRuntimeConfig;
-    use crate::runtime::types::{BoxStatus, ContainerId};
+    use crate::runtime::types::{BoxID, BoxStatus, ContainerID};
     use crate::vmm::VmmKind;
     use boxlite_shared::Transport;
     use chrono::Utc;
@@ -212,11 +212,11 @@ mod tests {
     fn create_test_config(id: &str) -> BoxConfig {
         use crate::runtime::options::{BoxOptions, RootfsSpec};
         BoxConfig {
-            id: id.to_string(),
+            id: BoxID::parse(id).unwrap(),
             name: None,
             created_at: Utc::now(),
             container: ContainerRuntimeConfig {
-                id: ContainerId::new(),
+                id: ContainerID::new(),
             },
             options: BoxOptions {
                 rootfs: RootfsSpec::Image("test:latest".to_string()),
@@ -237,11 +237,16 @@ mod tests {
         state
     }
 
+    // Valid ULID test IDs
+    const TEST_ID_1: &str = "01HJK4TNRPQSXYZ8WM6NCVT9R1";
+    const TEST_ID_2: &str = "01HJK4TNRPQSXYZ8WM6NCVT9R2";
+    const TEST_ID_3: &str = "01HJK4TNRPQSXYZ8WM6NCVT9R3";
+
     #[test]
     fn test_add_box_and_box_by_id() {
         let store = create_test_store();
         let manager = BoxManager::new(store);
-        let config = create_test_config("test-id");
+        let config = create_test_config(TEST_ID_1);
         let state = BoxState::new();
 
         manager.add_box(&config, &state).unwrap();
@@ -255,7 +260,7 @@ mod tests {
     fn test_add_box_duplicate_id_fails() {
         let store = create_test_store();
         let manager = BoxManager::new(store);
-        let config = create_test_config("test-id");
+        let config = create_test_config(TEST_ID_1);
         let state = BoxState::new();
 
         manager.add_box(&config, &state).unwrap();
@@ -270,11 +275,11 @@ mod tests {
         let store = create_test_store();
         let manager = BoxManager::new(store);
 
-        let mut config1 = create_test_config("test-id-1");
+        let mut config1 = create_test_config(TEST_ID_1);
         config1.name = Some("my-box".to_string());
         let state1 = BoxState::new();
 
-        let mut config2 = create_test_config("test-id-2");
+        let mut config2 = create_test_config(TEST_ID_2);
         config2.name = Some("my-box".to_string());
         let state2 = BoxState::new();
 
@@ -289,7 +294,7 @@ mod tests {
     fn test_has_box() {
         let store = create_test_store();
         let manager = BoxManager::new(store);
-        let config = create_test_config("test-id");
+        let config = create_test_config(TEST_ID_1);
         let state = BoxState::new();
 
         assert!(!manager.has_box(&config.id).unwrap());
@@ -302,7 +307,7 @@ mod tests {
         let store = create_test_store();
         let manager = BoxManager::new(store);
 
-        let mut config = create_test_config("test-id-12345");
+        let mut config = create_test_config(TEST_ID_1);
         config.name = Some("my-box".to_string());
         let state = BoxState::new();
 
@@ -310,21 +315,22 @@ mod tests {
 
         let result = manager.lookup_box("my-box").unwrap();
         assert!(result.is_some());
-        assert_eq!(result.unwrap().0.id, "test-id-12345");
+        assert_eq!(result.unwrap().0.id.as_str(), TEST_ID_1);
     }
 
     #[test]
     fn test_lookup_box_by_id_prefix() {
         let store = create_test_store();
         let manager = BoxManager::new(store);
-        let config = create_test_config("test-id-12345");
+        let config = create_test_config(TEST_ID_1);
         let state = BoxState::new();
 
         manager.add_box(&config, &state).unwrap();
 
-        let result = manager.lookup_box("test-id-123").unwrap();
+        // Use first 12 chars as prefix
+        let result = manager.lookup_box(&TEST_ID_1[..12]).unwrap();
         assert!(result.is_some());
-        assert_eq!(result.unwrap().0.id, "test-id-12345");
+        assert_eq!(result.unwrap().0.id.as_str(), TEST_ID_1);
     }
 
     #[test]
@@ -332,14 +338,16 @@ mod tests {
         let store = create_test_store();
         let manager = BoxManager::new(store);
 
+        // Use IDs with same prefix
         manager
-            .add_box(&create_test_config("test-id-1"), &BoxState::new())
+            .add_box(&create_test_config(TEST_ID_1), &BoxState::new())
             .unwrap();
         manager
-            .add_box(&create_test_config("test-id-2"), &BoxState::new())
+            .add_box(&create_test_config(TEST_ID_2), &BoxState::new())
             .unwrap();
 
-        let result = manager.lookup_box("test-id");
+        // Common prefix for TEST_ID_1 and TEST_ID_2
+        let result = manager.lookup_box("01HJK4TNRPQSXYZ8WM6NCVT9R");
         assert!(result.is_err());
         assert!(
             result
@@ -356,19 +364,19 @@ mod tests {
 
         manager
             .add_box(
-                &create_test_config("id1"),
+                &create_test_config(TEST_ID_1),
                 &create_test_state(BoxStatus::Running),
             )
             .unwrap();
         manager
             .add_box(
-                &create_test_config("id2"),
+                &create_test_config(TEST_ID_2),
                 &create_test_state(BoxStatus::Stopped),
             )
             .unwrap();
         manager
             .add_box(
-                &create_test_config("id3"),
+                &create_test_config(TEST_ID_3),
                 &create_test_state(BoxStatus::Running),
             )
             .unwrap();
@@ -381,7 +389,7 @@ mod tests {
     fn test_remove_box() {
         let store = create_test_store();
         let manager = BoxManager::new(store);
-        let config = create_test_config("test-id");
+        let config = create_test_config(TEST_ID_1);
         let state = BoxState::new();
 
         manager.add_box(&config, &state).unwrap();
@@ -394,7 +402,7 @@ mod tests {
     fn test_save_and_update_box() {
         let store = create_test_store();
         let manager = BoxManager::new(store);
-        let config = create_test_config("test-id");
+        let config = create_test_config(TEST_ID_1);
         let state = BoxState::new();
 
         manager.add_box(&config, &state).unwrap();

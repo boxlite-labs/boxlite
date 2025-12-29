@@ -2,7 +2,7 @@
 
 use boxlite::BoxliteRuntime;
 use boxlite::runtime::options::{BoxOptions, BoxliteOptions, RootfsSpec};
-use boxlite::runtime::types::BoxStatus;
+use boxlite::runtime::types::{BoxID, BoxStatus};
 use boxlite_shared::Transport;
 use tempfile::TempDir;
 
@@ -72,14 +72,14 @@ async fn create_generates_unique_ulid_ids() {
     assert_ne!(box1.id(), box2.id());
 
     // IDs should be 26 characters (ULID format)
-    assert_eq!(box1.id().len(), 26);
-    assert_eq!(box2.id().len(), 26);
+    assert_eq!(box1.id().as_str().len(), 26);
+    assert_eq!(box2.id().as_str().len(), 26);
 
     // Cleanup
     box1.stop().await.unwrap();
     box2.stop().await.unwrap();
-    ctx.runtime.remove(box1.id(), false).await.unwrap();
-    ctx.runtime.remove(box2.id(), false).await.unwrap();
+    ctx.runtime.remove(box1.id().as_str(), false).await.unwrap();
+    ctx.runtime.remove(box2.id().as_str(), false).await.unwrap();
 }
 
 #[tokio::test]
@@ -95,7 +95,7 @@ async fn create_stores_custom_options() {
     let handle = ctx.runtime.create(options, None).unwrap();
     let box_id = handle.id().clone();
 
-    let info = ctx.runtime.get_info(&box_id).unwrap().unwrap();
+    let info = ctx.runtime.get_info(box_id.as_str()).unwrap().unwrap();
 
     // Verify metadata was stored correctly
     assert_eq!(info.cpus, 4);
@@ -112,7 +112,7 @@ async fn create_stores_custom_options() {
 
     // Cleanup
     handle.stop().await.unwrap();
-    ctx.runtime.remove(&box_id, false).await.unwrap();
+    ctx.runtime.remove(box_id.as_str(), false).await.unwrap();
 }
 
 // ============================================================================
@@ -159,8 +159,8 @@ async fn list_info_returns_all_boxes() {
     // Cleanup
     box1.stop().await.unwrap();
     box2.stop().await.unwrap();
-    ctx.runtime.remove(box1.id(), false).await.unwrap();
-    ctx.runtime.remove(box2.id(), false).await.unwrap();
+    ctx.runtime.remove(box1.id().as_str(), false).await.unwrap();
+    ctx.runtime.remove(box2.id().as_str(), false).await.unwrap();
 }
 
 #[tokio::test]
@@ -215,9 +215,9 @@ async fn list_info_sorted_by_creation_time_newest_first() {
     box1.stop().await.unwrap();
     box2.stop().await.unwrap();
     box3.stop().await.unwrap();
-    ctx.runtime.remove(&box1_id, false).await.unwrap();
-    ctx.runtime.remove(&box2_id, false).await.unwrap();
-    ctx.runtime.remove(&box3_id, false).await.unwrap();
+    ctx.runtime.remove(box1_id.as_str(), false).await.unwrap();
+    ctx.runtime.remove(box2_id.as_str(), false).await.unwrap();
+    ctx.runtime.remove(box3_id.as_str(), false).await.unwrap();
 }
 
 // ============================================================================
@@ -240,7 +240,7 @@ async fn get_info_returns_box_metadata() {
     let box_id = handle.id().clone();
 
     // Get info from runtime
-    let info = ctx.runtime.get_info(&box_id).unwrap().unwrap();
+    let info = ctx.runtime.get_info(box_id.as_str()).unwrap().unwrap();
     assert_eq!(info.id, box_id);
     assert!(
         info.status == BoxStatus::Starting || info.status == BoxStatus::Running,
@@ -249,7 +249,7 @@ async fn get_info_returns_box_metadata() {
     );
 
     // Cleanup
-    ctx.runtime.remove(&box_id, true).await.unwrap();
+    ctx.runtime.remove(box_id.as_str(), true).await.unwrap();
 }
 
 #[tokio::test]
@@ -274,10 +274,10 @@ async fn exists_returns_true_for_existing_box() {
         .unwrap();
     let box_id = handle.id().clone();
 
-    assert!(ctx.runtime.exists(&box_id).unwrap());
+    assert!(ctx.runtime.exists(box_id.as_str()).unwrap());
 
     // Cleanup
-    ctx.runtime.remove(&box_id, true).await.unwrap();
+    ctx.runtime.remove(box_id.as_str(), true).await.unwrap();
 }
 
 #[tokio::test]
@@ -323,10 +323,10 @@ async fn remove_stopped_box_succeeds() {
     handle.stop().await.unwrap();
 
     // Remove without force should succeed on stopped box
-    ctx.runtime.remove(&box_id, false).await.unwrap();
+    ctx.runtime.remove(box_id.as_str(), false).await.unwrap();
 
     // Box should no longer exist
-    assert!(!ctx.runtime.exists(&box_id).unwrap());
+    assert!(!ctx.runtime.exists(box_id.as_str()).unwrap());
 }
 
 #[tokio::test]
@@ -345,11 +345,11 @@ async fn remove_active_without_force_fails() {
     let box_id = handle.id().clone();
 
     // Box is in Starting state (active)
-    let info = ctx.runtime.get_info(&box_id).unwrap().unwrap();
+    let info = ctx.runtime.get_info(box_id.as_str()).unwrap().unwrap();
     assert!(info.status.is_active());
 
     // Remove without force should fail
-    let result = ctx.runtime.remove(&box_id, false).await;
+    let result = ctx.runtime.remove(box_id.as_str(), false).await;
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
@@ -359,10 +359,10 @@ async fn remove_active_without_force_fails() {
     );
 
     // Box should still exist
-    assert!(ctx.runtime.exists(&box_id).unwrap());
+    assert!(ctx.runtime.exists(box_id.as_str()).unwrap());
 
     // Cleanup with force
-    ctx.runtime.remove(&box_id, true).await.unwrap();
+    ctx.runtime.remove(box_id.as_str(), true).await.unwrap();
 }
 
 #[tokio::test]
@@ -381,14 +381,14 @@ async fn remove_active_with_force_stops_and_removes() {
     let box_id = handle.id().clone();
 
     // Box is in Starting state (active)
-    let info = ctx.runtime.get_info(&box_id).unwrap().unwrap();
+    let info = ctx.runtime.get_info(box_id.as_str()).unwrap().unwrap();
     assert!(info.status.is_active());
 
     // Force remove should succeed
-    ctx.runtime.remove(&box_id, true).await.unwrap();
+    ctx.runtime.remove(box_id.as_str(), true).await.unwrap();
 
     // Box should no longer exist
-    assert!(!ctx.runtime.exists(&box_id).unwrap());
+    assert!(!ctx.runtime.exists(box_id.as_str()).unwrap());
 }
 
 #[tokio::test]
@@ -407,13 +407,13 @@ async fn remove_deletes_box_from_database() {
     let box_id = handle.id().clone();
 
     // Verify box exists before removal
-    assert!(ctx.runtime.exists(&box_id).unwrap());
+    assert!(ctx.runtime.exists(box_id.as_str()).unwrap());
 
     // Force remove
-    ctx.runtime.remove(&box_id, true).await.unwrap();
+    ctx.runtime.remove(box_id.as_str(), true).await.unwrap();
 
     // Box should no longer exist in database
-    assert!(!ctx.runtime.exists(&box_id).unwrap());
+    assert!(!ctx.runtime.exists(box_id.as_str()).unwrap());
 }
 
 // ============================================================================
@@ -439,11 +439,11 @@ async fn stop_marks_box_as_stopped() {
     handle.stop().await.unwrap();
 
     // Status should be Stopped
-    let info = ctx.runtime.get_info(&box_id).unwrap().unwrap();
+    let info = ctx.runtime.get_info(box_id.as_str()).unwrap().unwrap();
     assert_eq!(info.status, BoxStatus::Stopped);
 
     // Cleanup
-    ctx.runtime.remove(&box_id, false).await.unwrap();
+    ctx.runtime.remove(box_id.as_str(), false).await.unwrap();
 }
 
 // ============================================================================
@@ -468,7 +468,7 @@ async fn litebox_info_returns_correct_metadata() {
     // Get info from runtime (handle.info() requires VM initialization)
     let info = ctx
         .runtime
-        .get_info(&box_id)
+        .get_info(box_id.as_str())
         .unwrap()
         .expect("info should be available");
     assert_eq!(info.id, box_id);
@@ -477,7 +477,7 @@ async fn litebox_info_returns_correct_metadata() {
     assert_eq!(info.memory_mib, 512); // Default value
 
     // Cleanup
-    ctx.runtime.remove(&box_id, true).await.unwrap();
+    ctx.runtime.remove(box_id.as_str(), true).await.unwrap();
 }
 
 // ============================================================================
@@ -518,8 +518,8 @@ async fn multiple_runtimes_are_isolated() {
     assert_eq!(ctx2.runtime.list_info().unwrap()[0].id, *box2.id());
 
     // Cleanup
-    ctx1.runtime.remove(box1.id(), true).await.unwrap();
-    ctx2.runtime.remove(box2.id(), true).await.unwrap();
+    ctx1.runtime.remove(box1.id().as_str(), true).await.unwrap();
+    ctx2.runtime.remove(box2.id().as_str(), true).await.unwrap();
 }
 
 // ============================================================================
@@ -531,7 +531,7 @@ async fn boxes_persist_across_runtime_restart() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let home_dir = temp_dir.path().to_path_buf();
 
-    let box_id: String;
+    let box_id: BoxID;
 
     // Create runtime and a box
     {
@@ -572,6 +572,6 @@ async fn boxes_persist_across_runtime_restart() {
         assert_eq!(status, &BoxStatus::Stopped);
 
         // Cleanup
-        runtime.remove(&box_id, false).await.unwrap();
+        runtime.remove(box_id.as_str(), false).await.unwrap();
     }
 }

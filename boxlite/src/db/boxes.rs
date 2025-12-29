@@ -333,7 +333,7 @@ fn get_boot_id() -> String {
 mod tests {
     use super::*;
     use crate::litebox::config::ContainerRuntimeConfig;
-    use crate::runtime::types::{BoxStatus, ContainerId};
+    use crate::runtime::types::{BoxID, BoxStatus, ContainerID};
     use crate::vmm::VmmKind;
     use boxlite_shared::Transport;
     use std::path::PathBuf;
@@ -350,11 +350,11 @@ mod tests {
         use crate::runtime::options::{BoxOptions, RootfsSpec};
         let now = Utc::now();
         BoxConfig {
-            id: id.to_string(),
+            id: BoxID::parse(id).unwrap(),
             name: None,
             created_at: now,
             container: ContainerRuntimeConfig {
-                id: ContainerId::new(),
+                id: ContainerID::new(),
             },
             options: BoxOptions {
                 rootfs: RootfsSpec::Image("test:latest".to_string()),
@@ -369,15 +369,20 @@ mod tests {
         }
     }
 
+    // Valid ULID test IDs
+    const TEST_ID_1: &str = "01HJK4TNRPQSXYZ8WM6NCVT9R1";
+    const TEST_ID_2: &str = "01HJK4TNRPQSXYZ8WM6NCVT9R2";
+    const TEST_ID_3: &str = "01HJK4TNRPQSXYZ8WM6NCVT9R3";
+
     #[test]
     fn test_save_and_load_config() {
         let (store, _dir) = create_test_db();
-        let config = create_test_config("test1");
+        let config = create_test_config(TEST_ID_1);
         let state = BoxState::new();
 
         store.save(&config, &state).unwrap();
 
-        let loaded = store.load_config(&config.id).unwrap();
+        let loaded = store.load_config(config.id.as_str()).unwrap();
         assert!(loaded.is_some());
         assert_eq!(loaded.unwrap().id, config.id);
     }
@@ -385,12 +390,12 @@ mod tests {
     #[test]
     fn test_save_and_load_state() {
         let (store, _dir) = create_test_db();
-        let config = create_test_config("test1");
+        let config = create_test_config(TEST_ID_1);
         let state = BoxState::new();
 
         store.save(&config, &state).unwrap();
 
-        let loaded = store.load_state(&config.id).unwrap();
+        let loaded = store.load_state(config.id.as_str()).unwrap();
         assert!(loaded.is_some());
         assert_eq!(loaded.unwrap().status, BoxStatus::Starting);
     }
@@ -398,7 +403,7 @@ mod tests {
     #[test]
     fn test_update_state() {
         let (store, _dir) = create_test_db();
-        let config = create_test_config("test1");
+        let config = create_test_config(TEST_ID_1);
         let state = BoxState::new();
 
         store.save(&config, &state).unwrap();
@@ -407,9 +412,9 @@ mod tests {
         let mut new_state = state.clone();
         new_state.set_status(BoxStatus::Running);
         new_state.set_pid(Some(12345));
-        store.update_state(&config.id, &new_state).unwrap();
+        store.update_state(config.id.as_str(), &new_state).unwrap();
 
-        let loaded = store.load_state(&config.id).unwrap().unwrap();
+        let loaded = store.load_state(config.id.as_str()).unwrap().unwrap();
         assert_eq!(loaded.status, BoxStatus::Running);
         assert_eq!(loaded.pid, Some(12345));
     }
@@ -417,14 +422,14 @@ mod tests {
     #[test]
     fn test_delete() {
         let (store, _dir) = create_test_db();
-        let config = create_test_config("test1");
+        let config = create_test_config(TEST_ID_1);
         let state = BoxState::new();
 
         store.save(&config, &state).unwrap();
-        assert!(store.load(&config.id).unwrap().is_some());
+        assert!(store.load(config.id.as_str()).unwrap().is_some());
 
-        store.delete(&config.id).unwrap();
-        assert!(store.load(&config.id).unwrap().is_none());
+        store.delete(config.id.as_str()).unwrap();
+        assert!(store.load(config.id.as_str()).unwrap().is_none());
     }
 
     #[test]
@@ -432,8 +437,9 @@ mod tests {
         let (store, _dir) = create_test_db();
 
         // Create multiple boxes
-        for i in 0..3 {
-            let config = create_test_config(&format!("test{}", i));
+        let ids = [TEST_ID_1, TEST_ID_2, TEST_ID_3];
+        for id in ids {
+            let config = create_test_config(id);
             let state = BoxState::new();
             store.save(&config, &state).unwrap();
         }
@@ -447,20 +453,20 @@ mod tests {
         let (store, _dir) = create_test_db();
 
         // Create running box
-        let config1 = create_test_config("running1");
+        let config1 = create_test_config(TEST_ID_1);
         let mut state1 = BoxState::new();
         state1.set_status(BoxStatus::Running);
         store.save(&config1, &state1).unwrap();
 
         // Create stopped box
-        let config2 = create_test_config("stopped1");
+        let config2 = create_test_config(TEST_ID_2);
         let mut state2 = BoxState::new();
         state2.set_status(BoxStatus::Stopped);
         store.save(&config2, &state2).unwrap();
 
         let active = store.list_active().unwrap();
         assert_eq!(active.len(), 1);
-        assert_eq!(active[0].0.id, "running1");
+        assert_eq!(active[0].0.id.as_str(), TEST_ID_1);
     }
 
     #[test]
@@ -481,7 +487,7 @@ mod tests {
         let (store, _dir) = create_test_db();
 
         // Create running box
-        let config = create_test_config("test1");
+        let config = create_test_config(TEST_ID_1);
         let mut state = BoxState::new();
         state.set_status(BoxStatus::Running);
         state.set_pid(Some(12345));
@@ -490,10 +496,10 @@ mod tests {
         // Reset active boxes after reboot
         let reset_ids = store.reset_active_boxes_after_reboot().unwrap();
         assert_eq!(reset_ids.len(), 1);
-        assert_eq!(reset_ids[0], "test1");
+        assert_eq!(reset_ids[0].as_str(), TEST_ID_1);
 
         // Verify state changed to Stopped (not Crashed - rootfs preserved)
-        let loaded = store.load_state(&config.id).unwrap().unwrap();
+        let loaded = store.load_state(config.id.as_str()).unwrap().unwrap();
         assert_eq!(loaded.status, BoxStatus::Stopped);
         assert_eq!(loaded.pid, None);
     }

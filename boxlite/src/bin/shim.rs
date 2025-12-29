@@ -15,7 +15,7 @@
 use std::path::Path;
 
 use boxlite::{
-    runtime::{constants, layout},
+    runtime::layout,
     util,
     vmm::{self, InstanceSpec, VmmConfig, VmmKind},
 };

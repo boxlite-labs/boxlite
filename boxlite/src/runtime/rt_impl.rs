@@ -13,7 +13,6 @@ use crate::runtime::types::{BoxID, BoxInfo, BoxState, BoxStatus, ContainerId, ge
 use crate::vmm::VmmKind;
 use boxlite_shared::{BoxliteError, BoxliteResult, Transport};
 use chrono::Utc;
-use parking_lot::RwLock as ParkingRwLock;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, Weak};
 use tokio::sync::OnceCell;
@@ -58,20 +57,17 @@ pub struct RuntimeImpl {
     /// Runtime filesystem lock (held for lifetime). Prevent from multiple process run on same
     /// BOXLITE_HOME directory
     pub(crate) _runtime_lock: RuntimeLock,
-
-    // ========================================================================
-    // BOXLITE HANDLE CACHE: Share BoxImpl between handles
-    // ========================================================================
-    /// Cache of active BoxImpl instances.
-    /// Uses Weak to allow automatic cleanup when all handles are dropped.
-    active_boxes: ParkingRwLock<HashMap<BoxID, Weak<crate::litebox::box_impl::BoxImpl>>>,
 }
 
-/// Empty coordination lock.
+/// Synchronized state protected by RwLock.
 ///
 /// Acquire this when you need atomicity across multiple operations on
 /// box_manager or image_manager.
-pub struct SynchronizedState;
+pub struct SynchronizedState {
+    /// Cache of active BoxImpl instances.
+    /// Uses Weak to allow automatic cleanup when all handles are dropped.
+    active_boxes: HashMap<BoxID, Weak<crate::litebox::box_impl::BoxImpl>>,
+}
 
 impl RuntimeImpl {
     // ========================================================================
@@ -134,14 +130,15 @@ impl RuntimeImpl {
         let box_store = BoxStore::new(db);
 
         let inner = Arc::new(Self {
-            sync_state: RwLock::new(SynchronizedState),
+            sync_state: RwLock::new(SynchronizedState {
+                active_boxes: HashMap::new(),
+            }),
             box_manager: BoxManager::new(box_store),
             image_manager,
             layout,
             guest_rootfs: Arc::new(OnceCell::new()),
             runtime_metrics: RuntimeMetricsStorage::new(),
             _runtime_lock: runtime_lock,
-            active_boxes: ParkingRwLock::new(HashMap::new()),
         });
 
         tracing::debug!("initialized runtime");
@@ -463,8 +460,8 @@ impl RuntimeImpl {
 
         // Fast path: read lock
         {
-            let cache = self.active_boxes.read();
-            if let Some(weak) = cache.get(&box_id)
+            let sync = self.sync_state.read().unwrap();
+            if let Some(weak) = sync.active_boxes.get(&box_id)
                 && let Some(strong) = weak.upgrade()
             {
                 tracing::trace!(box_id = %box_id, "Reusing cached BoxImpl");
@@ -473,8 +470,8 @@ impl RuntimeImpl {
         }
 
         // Slow path: write lock with double-check
-        let mut cache = self.active_boxes.write();
-        if let Some(weak) = cache.get(&box_id)
+        let mut sync = self.sync_state.write().unwrap();
+        if let Some(weak) = sync.active_boxes.get(&box_id)
             && let Some(strong) = weak.upgrade()
         {
             tracing::trace!(box_id = %box_id, "Reusing cached BoxImpl (after write lock)");
@@ -483,7 +480,8 @@ impl RuntimeImpl {
 
         // Create and cache
         let box_impl = Arc::new(BoxImpl::new(config, state, Arc::clone(self)));
-        cache.insert(box_id.clone(), Arc::downgrade(&box_impl));
+        sync.active_boxes
+            .insert(box_id.clone(), Arc::downgrade(&box_impl));
         tracing::trace!(box_id = %box_id, "Created and cached new BoxImpl");
         box_impl
     }
@@ -493,7 +491,7 @@ impl RuntimeImpl {
     /// Called when box is stopped or removed. Existing handles become stale;
     /// new handles from runtime.get() will get a fresh BoxImpl.
     pub(crate) fn invalidate_box_impl(&self, box_id: &BoxID) {
-        self.active_boxes.write().remove(box_id);
+        self.sync_state.write().unwrap().active_boxes.remove(box_id);
         tracing::trace!(box_id = %box_id, "Invalidated BoxImpl cache");
     }
 

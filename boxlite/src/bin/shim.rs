@@ -15,7 +15,7 @@
 use std::path::Path;
 
 use boxlite::{
-    runtime::constants,
+    runtime::{constants, layout},
     util,
     vmm::{self, InstanceSpec, VmmConfig, VmmKind},
 };
@@ -54,7 +54,7 @@ struct ShimArgs {
 /// Logs are written to {home_dir}/logs/boxlite-shim.log with daily rotation.
 /// Returns WorkerGuard that must be kept alive to maintain the background writer thread.
 fn init_logging(home_dir: &Path) -> tracing_appender::non_blocking::WorkerGuard {
-    let logs_dir = home_dir.join(constants::dirs::LOGS_DIR);
+    let logs_dir = home_dir.join(layout::dirs::LOGS_DIR);
 
     // Create logs directory if it doesn't exist
     std::fs::create_dir_all(&logs_dir).expect("Failed to create logs directory");

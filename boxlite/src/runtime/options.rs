@@ -1,7 +1,7 @@
 //! Configuration for Boxlite.
 
-use crate::runtime::constants::dirs as const_dirs;
 use crate::runtime::constants::envs as const_envs;
+use crate::runtime::layout::dirs as const_dirs;
 use boxlite_shared::errors::BoxliteResult;
 use dirs::home_dir;
 use std::path::PathBuf;

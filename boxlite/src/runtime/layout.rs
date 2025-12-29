@@ -1,7 +1,47 @@
-use crate::runtime::constants::dirs as const_dirs;
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 use boxlite_shared::layout::{SharedGuestLayout, dirs as shared_dirs};
 use std::path::{Path, PathBuf};
+
+/// Directory structure constants
+pub mod dirs {
+    /// Base directory name for BoxLite data
+    pub const BOXLITE_DIR: &str = ".boxlite";
+
+    pub const DB_DIR: &str = "db";
+
+    /// Subdirectory for images layers
+    pub const IMAGES_DIR: &str = "images";
+
+    /// Subdirectory for individual layer storage
+    pub const LAYERS_DIR: &str = "layers";
+
+    /// Subdirectory for images manifests
+    pub const MANIFESTS_DIR: &str = "manifests";
+
+    /// Subdirectory for running boxes
+    pub const BOXES_DIR: &str = "boxes";
+
+    /// Subdirectory for Unix domain sockets
+    pub const SOCKETS_DIR: &str = "sockets";
+
+    /// Subdirectory for overlayfs upper layer (Linux only)
+    pub const UPPER_DIR: &str = "upper";
+
+    /// Subdirectory for overlayfs work directory (Linux only)
+    pub const WORK_DIR: &str = "work";
+
+    /// Subdirectory for overlayfs (per container)
+    pub const OVERLAYFS_DIR: &str = "overlayfs";
+
+    /// Subdirectory for log files
+    pub const LOGS_DIR: &str = "logs";
+
+    /// Subdirectory for disk images
+    pub const DISKS_DIR: &str = "disks";
+
+    /// Subdirectory for per-entity locks
+    pub const LOCKS_DIR: &str = "locks";
+}
 
 /// Configuration for filesystem layout behavior.
 ///
@@ -56,31 +96,31 @@ impl FilesystemLayout {
     }
 
     pub fn db_dir(&self) -> PathBuf {
-        self.home_dir.join(const_dirs::DB_DIR)
+        self.home_dir.join(dirs::DB_DIR)
     }
 
     pub fn images_dir(&self) -> PathBuf {
-        self.home_dir.join(const_dirs::IMAGES_DIR)
+        self.home_dir.join(dirs::IMAGES_DIR)
     }
 
     pub fn logs_dir(&self) -> PathBuf {
-        self.home_dir.join(const_dirs::LOGS_DIR)
+        self.home_dir.join(dirs::LOGS_DIR)
     }
 
     /// OCI images layers storage: ~/.boxlite/images/layers
     pub fn image_layers_dir(&self) -> PathBuf {
-        self.images_dir().join(const_dirs::LAYERS_DIR)
+        self.images_dir().join(dirs::LAYERS_DIR)
     }
 
     /// OCI images manifests cache: ~/.boxlite/images/manifests
     pub fn image_manifests_dir(&self) -> PathBuf {
-        self.images_dir().join(const_dirs::MANIFESTS_DIR)
+        self.images_dir().join(dirs::MANIFESTS_DIR)
     }
 
     /// Root directory for all box workspaces: ~/.boxlite/boxes
     /// Each box gets a subdirectory containing upper/work dirs for overlayfs
     pub fn boxes_dir(&self) -> PathBuf {
-        self.home_dir.join(const_dirs::BOXES_DIR)
+        self.home_dir.join(dirs::BOXES_DIR)
     }
 
     /// Per-entity locks directory: ~/.boxlite/locks
@@ -88,7 +128,7 @@ impl FilesystemLayout {
     /// Contains lock files managed by FileLockManager for multiprocess-safe
     /// locking of individual entities (boxes, volumes, etc.).
     pub fn locks_dir(&self) -> PathBuf {
-        self.home_dir.join(const_dirs::LOCKS_DIR)
+        self.home_dir.join(dirs::LOCKS_DIR)
     }
 
     /// Temporary directory for transient files: ~/.boxlite/tmp
@@ -221,7 +261,7 @@ impl BoxFilesystemLayout {
 
     /// Sockets directory: ~/.boxlite/boxes/{box_id}/sockets
     pub fn sockets_dir(&self) -> PathBuf {
-        self.box_dir.join(const_dirs::SOCKETS_DIR)
+        self.box_dir.join(dirs::SOCKETS_DIR)
     }
 
     /// Unix socket path: ~/.boxlite/boxes/{box_id}/sockets/box.sock
@@ -362,7 +402,7 @@ impl ImageFilesystemLayout {
 
     /// Layers directory: ~/.boxlite/images/layers
     pub fn layers_dir(&self) -> PathBuf {
-        self.images_dir.join(const_dirs::LAYERS_DIR)
+        self.images_dir.join(dirs::LAYERS_DIR)
     }
 
     /// Extracted layers directory: ~/.boxlite/images/extracted
@@ -377,7 +417,7 @@ impl ImageFilesystemLayout {
 
     /// Manifests directory: ~/.boxlite/images/manifests
     pub fn manifests_dir(&self) -> PathBuf {
-        self.images_dir.join(const_dirs::MANIFESTS_DIR)
+        self.images_dir.join(dirs::MANIFESTS_DIR)
     }
 
     /// Configs directory: ~/.boxlite/images/configs

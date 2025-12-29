@@ -148,8 +148,6 @@ impl FilesystemLayout {
         std::fs::create_dir_all(self.boxes_dir())
             .map_err(|e| BoxliteError::Storage(format!("failed to create boxes dir: {e}")))?;
 
-        // Clean and recreate temp dir to avoid stale files from previous runs
-        let _ = std::fs::remove_dir_all(self.temp_dir());
         std::fs::create_dir_all(self.temp_dir())
             .map_err(|e| BoxliteError::Storage(format!("failed to create temp dir: {e}")))?;
 

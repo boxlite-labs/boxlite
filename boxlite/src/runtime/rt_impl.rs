@@ -121,6 +121,9 @@ impl RuntimeImpl {
             ))
         })?;
 
+        // Clean and recreate temp dir to avoid stale files from previous runs
+        let _ = std::fs::remove_dir_all(layout.temp_dir());
+
         let image_manager = ImageManager::new(layout.images_dir()).map_err(|e| {
             BoxliteError::Storage(format!(
                 "Failed to initialize image manager at {}: {}",

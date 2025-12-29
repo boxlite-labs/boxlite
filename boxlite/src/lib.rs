@@ -35,7 +35,7 @@ pub use litebox::{
 pub use metrics::{BoxMetrics, RuntimeMetrics};
 use runtime::layout::FilesystemLayout;
 pub use runtime::options::{BoxOptions, BoxliteOptions, RootfsSpec};
-pub use runtime::types::ContainerId;
+pub use runtime::types::ContainerID;
 pub use runtime::types::{BoxID, BoxInfo, BoxState, BoxStatus};
 
 /// Initialize tracing for Boxlite using the provided filesystem layout.

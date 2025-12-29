@@ -9,7 +9,7 @@ use crate::runtime::guest_rootfs::GuestRootfs;
 use crate::runtime::layout::{FilesystemLayout, FsLayoutConfig};
 use crate::runtime::lock::RuntimeLock;
 use crate::runtime::options::{BoxOptions, BoxliteOptions};
-use crate::runtime::types::{BoxID, BoxInfo, BoxState, BoxStatus, ContainerId, generate_box_id};
+use crate::runtime::types::{BoxID, BoxInfo, BoxState, BoxStatus, ContainerID};
 use crate::vmm::VmmKind;
 use boxlite_shared::{BoxliteError, BoxliteResult, Transport};
 use chrono::Utc;
@@ -352,17 +352,17 @@ impl RuntimeImpl {
         use crate::litebox::config::ContainerRuntimeConfig;
 
         // Generate unique ID (26 chars, ULID format, sortable by time)
-        let box_id = generate_box_id();
+        let box_id = BoxID::new();
 
         // Generate container ID (64-char hex)
-        let container_id = ContainerId::new();
+        let container_id = ContainerID::new();
 
         // Record creation timestamp
         let now = Utc::now();
 
         // Derive paths from ID (computed from layout + ID)
         let box_home = self.layout.boxes_dir().join(box_id.as_str());
-        let socket_path = filenames::unix_socket_path(self.layout.home_dir(), &box_id);
+        let socket_path = filenames::unix_socket_path(self.layout.home_dir(), box_id.as_str());
         let ready_socket_path = box_home.join("sockets").join("ready.sock");
 
         // Create container runtime config

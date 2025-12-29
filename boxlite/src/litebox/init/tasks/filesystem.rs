@@ -22,7 +22,7 @@ impl PipelineTask<InitCtx> for FilesystemTask {
 
         let layout = runtime
             .layout
-            .box_layout(&box_id, isolate_mounts)
+            .box_layout(box_id.as_str(), isolate_mounts)
             .inspect_err(|e| log_task_error(&box_id, task_name, e))?;
 
         layout

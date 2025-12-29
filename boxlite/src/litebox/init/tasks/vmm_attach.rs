@@ -26,7 +26,7 @@ impl PipelineTask<InitCtx> for VmmAttachTask {
         let (_config, state) = runtime
             .box_manager
             .box_by_id(&config_id)?
-            .ok_or_else(|| BoxliteError::NotFound(config_id.clone()))?;
+            .ok_or_else(|| BoxliteError::NotFound(config_id.to_string()))?;
 
         let pid = state
             .pid
@@ -40,7 +40,7 @@ impl PipelineTask<InitCtx> for VmmAttachTask {
         }
 
         // Attach to existing process (no log_handler for reconnect)
-        let handler = ShimHandler::from_pid(pid, box_id.clone());
+        let handler = ShimHandler::from_pid(pid, config_id);
 
         let mut ctx = ctx.lock().await;
         ctx.guard.set_handler(Box::new(handler));

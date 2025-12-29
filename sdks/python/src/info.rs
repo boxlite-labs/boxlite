@@ -35,7 +35,7 @@ impl From<BoxInfo> for PyBoxInfo {
         };
 
         PyBoxInfo {
-            id: info.id,
+            id: info.id.to_string(),
             name: info.name,
             state: state_str.to_string(),
             created_at: info.created_at.to_rfc3339(),

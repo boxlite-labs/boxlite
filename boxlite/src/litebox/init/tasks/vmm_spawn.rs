@@ -14,7 +14,7 @@ use crate::runtime::guest_rootfs::{GuestRootfs, Strategy};
 use crate::runtime::layout::BoxFilesystemLayout;
 use crate::runtime::options::BoxOptions;
 use crate::runtime::rt_impl::SharedRuntimeImpl;
-use crate::runtime::types::{BoxStatus, ContainerId};
+use crate::runtime::types::{BoxID, BoxStatus, ContainerID};
 use crate::util::find_binary;
 use crate::vmm::controller::{ShimController, VmmController, VmmHandler};
 use crate::vmm::{Entrypoint, InstanceSpec, VmmKind};
@@ -124,7 +124,7 @@ async fn build_config(
     container_disk_path: &Path,
     guest_disk_path: Option<&Path>,
     home_dir: &Path,
-    container_id: &ContainerId,
+    container_id: &ContainerID,
     runtime: &SharedRuntimeImpl,
 ) -> BoxliteResult<(
     InstanceSpec,
@@ -310,11 +310,11 @@ fn build_network_config(
 }
 
 /// Spawn VM subprocess and return handler.
-async fn spawn_vm(box_id: &str, config: &InstanceSpec) -> BoxliteResult<Box<dyn VmmHandler>> {
+async fn spawn_vm(box_id: &BoxID, config: &InstanceSpec) -> BoxliteResult<Box<dyn VmmHandler>> {
     let mut controller = ShimController::new(
         find_binary("boxlite-shim")?,
         VmmKind::Libkrun,
-        box_id.to_string(),
+        box_id.clone(),
     )?;
 
     controller.start(config).await

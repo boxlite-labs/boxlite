@@ -77,7 +77,7 @@ impl BoxManager {
             return Err(BoxliteError::NotFound(format!("box {}", id)));
         }
 
-        self.store.delete(id)?;
+        self.store.delete(id.as_str())?;
 
         tracing::debug!(box_id = %id, "Removed box from state");
 
@@ -86,7 +86,7 @@ impl BoxManager {
 
     /// Get a box by exact ID.
     pub fn box_by_id(&self, id: &BoxID) -> BoxliteResult<Option<(BoxConfig, BoxState)>> {
-        self.store.load(id)
+        self.store.load(id.as_str())
     }
 
     /// Lookup a box by ID prefix or name.
@@ -136,7 +136,7 @@ impl BoxManager {
 
     /// Check if a box exists by exact ID.
     pub fn has_box(&self, id: &BoxID) -> BoxliteResult<bool> {
-        self.store.load(id).map(|opt| opt.is_some())
+        self.store.load(id.as_str()).map(|opt| opt.is_some())
     }
 
     /// Get all boxes.
@@ -148,7 +148,7 @@ impl BoxManager {
     ///
     /// Reads state from the provided BoxState and persists to DB.
     pub fn save_box(&self, id: &BoxID, state: &BoxState) -> BoxliteResult<()> {
-        self.store.update_state(id, state)?;
+        self.store.update_state(id.as_str(), state)?;
 
         tracing::trace!(
             box_id = %id,
@@ -164,7 +164,7 @@ impl BoxManager {
     /// Returns the latest state from DB.
     pub fn update_box(&self, id: &BoxID) -> BoxliteResult<BoxState> {
         self.store
-            .load_state(id)?
+            .load_state(id.as_str())?
             .ok_or_else(|| BoxliteError::NotFound(format!("box {} state not found", id)))
     }
 

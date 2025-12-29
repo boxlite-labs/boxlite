@@ -32,19 +32,20 @@ mod vmm_attach;
 mod vmm_spawn;
 
 use super::types::InitPipelineContext;
+use crate::runtime::types::BoxID;
 use boxlite_shared::errors::BoxliteError;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub type InitCtx = Arc<Mutex<InitPipelineContext>>;
 
-async fn task_start(ctx: &InitCtx, task_name: &str) -> String {
+async fn task_start(ctx: &InitCtx, task_name: &str) -> BoxID {
     let box_id = { ctx.lock().await.config.id.clone() };
     tracing::debug!(box_id = %box_id, task = %task_name, "Executing task");
     box_id
 }
 
-fn log_task_error(box_id: &str, task_name: &str, err: &BoxliteError) {
+fn log_task_error(box_id: &BoxID, task_name: &str, err: &BoxliteError) {
     tracing::error!(box_id = %box_id, task = %task_name, "Task failed: {}", err);
 }
 

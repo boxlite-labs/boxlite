@@ -1,5 +1,5 @@
 use crate::BoxID;
-use crate::runtime::types::ContainerId;
+use crate::runtime::types::ContainerID;
 use boxlite_shared::Transport;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerRuntimeConfig {
     /// Container ID (64-char hex, generated at box creation).
-    pub id: ContainerId,
+    pub id: ContainerID,
 }
 
 /// Static box configuration (set once at creation, never changes).

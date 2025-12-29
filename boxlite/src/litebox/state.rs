@@ -2,7 +2,7 @@
 //!
 //! Defines the possible states of a box and valid transitions between them.
 
-use crate::ContainerId;
+use crate::ContainerID;
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -151,7 +151,7 @@ pub struct BoxState {
     /// Current lifecycle status.
     pub status: BoxStatus,
     pub pid: Option<u32>,
-    pub container_id: Option<ContainerId>,
+    pub container_id: Option<ContainerID>,
     /// Last state change timestamp (UTC).
     pub last_updated: DateTime<Utc>,
 }

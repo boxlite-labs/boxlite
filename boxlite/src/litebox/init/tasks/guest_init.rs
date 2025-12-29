@@ -8,7 +8,7 @@ use crate::images::ContainerImageConfig;
 use crate::pipeline::PipelineTask;
 use crate::portal::GuestSession;
 use crate::portal::interfaces::{ContainerRootfsInitConfig, GuestInitConfig, NetworkInitConfig};
-use crate::runtime::types::ContainerId;
+use crate::runtime::types::ContainerID;
 use crate::volumes::{ContainerMount, GuestVolumeManager};
 use async_trait::async_trait;
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
@@ -87,7 +87,7 @@ impl PipelineTask<InitCtx> for GuestInitTask {
 async fn run_guest_init(
     guest_session: GuestSession,
     container_image_config: &ContainerImageConfig,
-    container_id: &ContainerId,
+    container_id: &ContainerID,
     volume_mgr: &GuestVolumeManager,
     rootfs_init: &ContainerRootfsInitConfig,
     container_mounts: &[ContainerMount],

@@ -2,15 +2,22 @@
 
 use chrono::{DateTime, Utc};
 use rand::RngCore;
+use rusqlite::ToSql;
+use rusqlite::types::{ToSqlOutput, ValueRef};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fmt;
+use std::hash::Hash;
 
 use boxlite_shared::Transport;
 
 // Re-export status types from litebox module
 pub use crate::litebox::{BoxState, BoxStatus};
+
+// ============================================================================
+// BOX ID
+// ============================================================================
 
 /// Box identifier (ULID format for sortability).
 ///
@@ -19,12 +26,96 @@ pub use crate::litebox::{BoxState, BoxStatus};
 /// - 80 bits of randomness
 /// - Lexicographically sortable by creation time
 ///
-/// Example: `01HJK4TNRPQSXYZ8WM6NCVT9R5`
-pub type BoxID = String;
+/// # Example
+///
+/// ```
+/// use boxlite::runtime::types::BoxID;
+///
+/// let id = BoxID::new();
+/// assert_eq!(id.as_str().len(), 26);
+/// assert_eq!(id.short().len(), 8);
+/// ```
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BoxID(String);
 
-/// Generate a new ULID-based box ID.
-pub fn generate_box_id() -> BoxID {
-    ulid::Ulid::new().to_string()
+impl BoxID {
+    /// Length of full box ID (26 chars = ULID format).
+    pub const FULL_LENGTH: usize = 26;
+
+    /// Length of short box ID for display (8 chars).
+    pub const SHORT_LENGTH: usize = 8;
+
+    /// Generate a new ULID-based box ID.
+    pub fn new() -> Self {
+        Self(ulid::Ulid::new().to_string())
+    }
+
+    /// Parse a BoxID from an existing string.
+    ///
+    /// Returns `None` if the string is not a valid 26-char ULID string.
+    pub fn parse(s: &str) -> Option<Self> {
+        if Self::is_valid(s) {
+            Some(Self(s.to_string()))
+        } else {
+            None
+        }
+    }
+
+    /// Check if a string is a valid box ID format.
+    pub fn is_valid(s: &str) -> bool {
+        s.len() == Self::FULL_LENGTH && ulid::Ulid::from_string(s).is_ok()
+    }
+
+    /// Get the full box ID as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Get the short form (first 8 characters) for display.
+    pub fn short(&self) -> &str {
+        &self.0[..Self::SHORT_LENGTH]
+    }
+
+    /// Check if this ID starts with the given prefix.
+    pub fn starts_with(&self, prefix: &str) -> bool {
+        self.0.starts_with(prefix)
+    }
+}
+
+impl Default for BoxID {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for BoxID {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl fmt::Debug for BoxID {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "BoxID({})", self.short())
+    }
+}
+
+impl AsRef<str> for BoxID {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::borrow::Borrow<str> for BoxID {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl ToSql for BoxID {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::Borrowed(ValueRef::Text(self.0.as_bytes())))
+    }
 }
 
 // ============================================================================
@@ -39,16 +130,16 @@ pub fn generate_box_id() -> BoxID {
 /// # Example
 ///
 /// ```
-/// use boxlite::runtime::types::ContainerId;
+/// use boxlite::runtime::types::ContainerID;
 ///
-/// let id = ContainerId::new();
+/// let id = ContainerID::new();
 /// assert_eq!(id.as_str().len(), 64);
 /// assert_eq!(id.short().len(), 12);
 /// ```
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ContainerId(String);
+pub struct ContainerID(String);
 
-impl ContainerId {
+impl ContainerID {
     /// Length of full container ID (64 hex chars = 256 bits).
     pub const FULL_LENGTH: usize = 64;
 
@@ -69,7 +160,7 @@ impl ContainerId {
         Self(hex::encode(result))
     }
 
-    /// Parse a ContainerId from an existing string.
+    /// Parse a ContainerID from an existing string.
     ///
     /// Returns `None` if the string is not a valid 64-char lowercase hex string.
     pub fn parse(s: &str) -> Option<Self> {
@@ -98,25 +189,25 @@ impl ContainerId {
     }
 }
 
-impl Default for ContainerId {
+impl Default for ContainerID {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl fmt::Display for ContainerId {
+impl fmt::Display for ContainerID {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-impl fmt::Debug for ContainerId {
+impl fmt::Debug for ContainerID {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ContainerId({})", self.short())
+        write!(f, "ContainerID({})", self.short())
     }
 }
 
-impl AsRef<str> for ContainerId {
+impl AsRef<str> for ContainerID {
     fn as_ref(&self) -> &str {
         &self.0
     }
@@ -211,19 +302,55 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn test_generate_box_id() {
-        let id1 = generate_box_id();
-        let id2 = generate_box_id();
+    fn test_box_id_new() {
+        let id1 = BoxID::new();
+        let id2 = BoxID::new();
 
         // IDs should be 26 characters (ULID format)
-        assert_eq!(id1.len(), 26);
-        assert_eq!(id2.len(), 26);
+        assert_eq!(id1.as_str().len(), BoxID::FULL_LENGTH);
+        assert_eq!(id2.as_str().len(), BoxID::FULL_LENGTH);
 
         // IDs should be unique
         assert_ne!(id1, id2);
+    }
 
-        // Note: ULIDs generated in same millisecond may have random ordering,
-        // so we only test uniqueness, not ordering.
+    #[test]
+    fn test_box_id_short() {
+        let id = BoxID::new();
+
+        // Short form should be 8 characters
+        assert_eq!(id.short().len(), BoxID::SHORT_LENGTH);
+
+        // Short form should be prefix of full ID
+        assert!(id.as_str().starts_with(id.short()));
+    }
+
+    #[test]
+    fn test_box_id_parse() {
+        // Valid ULID
+        let valid = "01HJK4TNRPQSXYZ8WM6NCVT9R5";
+        assert!(BoxID::parse(valid).is_some());
+
+        // Invalid: too short
+        assert!(BoxID::parse("abc123").is_none());
+
+        // Invalid: wrong length
+        assert!(BoxID::parse("01HJK4TNRPQSXYZ8WM6NCVT9R5X").is_none());
+    }
+
+    #[test]
+    fn test_box_id_display() {
+        let id = BoxID::new();
+        let display = format!("{}", id);
+        assert_eq!(display, id.as_str());
+    }
+
+    #[test]
+    fn test_box_id_debug() {
+        let id = BoxID::new();
+        let debug = format!("{:?}", id);
+        assert!(debug.contains(id.short()));
+        assert!(debug.starts_with("BoxID("));
     }
 
     // BoxStatus and BoxState tests are in litebox/state
@@ -231,12 +358,13 @@ mod tests {
     #[test]
     fn test_config_state_to_info() {
         let now = Utc::now();
+        let box_id = BoxID::parse("01HJK4TNRPQSXYZ8WM6NCVT9R5").unwrap();
         let config = BoxConfig {
-            id: "01HJK4TNRPQSXYZ8WM6NCVT9R5".to_string(),
+            id: box_id,
             name: None,
             created_at: now,
             container: ContainerRuntimeConfig {
-                id: ContainerId::new(),
+                id: ContainerID::new(),
             },
             options: BoxOptions {
                 rootfs: RootfsSpec::Image("python:3.11".to_string()),
@@ -268,12 +396,12 @@ mod tests {
 
     #[test]
     fn test_container_id_new() {
-        let id1 = ContainerId::new();
-        let id2 = ContainerId::new();
+        let id1 = ContainerID::new();
+        let id2 = ContainerID::new();
 
         // IDs should be 64 characters
-        assert_eq!(id1.as_str().len(), ContainerId::FULL_LENGTH);
-        assert_eq!(id2.as_str().len(), ContainerId::FULL_LENGTH);
+        assert_eq!(id1.as_str().len(), ContainerID::FULL_LENGTH);
+        assert_eq!(id2.as_str().len(), ContainerID::FULL_LENGTH);
 
         // IDs should be unique
         assert_ne!(id1, id2);
@@ -288,10 +416,10 @@ mod tests {
 
     #[test]
     fn test_container_id_short() {
-        let id = ContainerId::new();
+        let id = ContainerID::new();
 
         // Short form should be 12 characters
-        assert_eq!(id.short().len(), ContainerId::SHORT_LENGTH);
+        assert_eq!(id.short().len(), ContainerID::SHORT_LENGTH);
 
         // Short form should be prefix of full ID
         assert!(id.as_str().starts_with(id.short()));
@@ -301,32 +429,32 @@ mod tests {
     fn test_container_id_from_str() {
         // Valid ID
         let valid = "a".repeat(64);
-        assert!(ContainerId::parse(&valid).is_some());
+        assert!(ContainerID::parse(&valid).is_some());
 
         // Invalid: too short
-        assert!(ContainerId::parse("abc123").is_none());
+        assert!(ContainerID::parse("abc123").is_none());
 
         // Invalid: uppercase
         let uppercase = "A".repeat(64);
-        assert!(ContainerId::parse(&uppercase).is_none());
+        assert!(ContainerID::parse(&uppercase).is_none());
 
         // Invalid: non-hex
         let non_hex = "g".repeat(64);
-        assert!(ContainerId::parse(&non_hex).is_none());
+        assert!(ContainerID::parse(&non_hex).is_none());
     }
 
     #[test]
     fn test_container_id_display() {
-        let id = ContainerId::new();
+        let id = ContainerID::new();
         let display = format!("{}", id);
         assert_eq!(display, id.as_str());
     }
 
     #[test]
     fn test_container_id_debug() {
-        let id = ContainerId::new();
+        let id = ContainerID::new();
         let debug = format!("{:?}", id);
         assert!(debug.contains(id.short()));
-        assert!(debug.starts_with("ContainerId("));
+        assert!(debug.starts_with("ContainerID("));
     }
 }

@@ -291,7 +291,7 @@ impl BoxStore {
 
         for (config, mut state) in active {
             state.reset_for_reboot();
-            self.update_state(&config.id, &state)?;
+            self.update_state(config.id.as_str(), &state)?;
             reset_ids.push(config.id);
         }
 

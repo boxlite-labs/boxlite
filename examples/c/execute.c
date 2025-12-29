@@ -30,7 +30,7 @@ int main() {
     }
 
     // Create a box with Alpine Linux
-    const char* options_json = "{\"image\":{\"Reference\":\"alpine:3.19\"}}";
+    const char* options_json = "{\"rootfs\":{\"Image\":\"alpine:3.19\"}}";
     CBoxHandle* box = boxlite_create_box(runtime, options_json, &error);
     if (!box) {
         fprintf(stderr, "Failed to create box: %s\n", error);

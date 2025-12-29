@@ -172,7 +172,7 @@ impl BoxInfo {
             last_updated: state.last_updated,
             pid: state.pid,
             transport: config.transport.clone(),
-            image: match &config.container.image {
+            image: match &config.options.rootfs {
                 RootfsSpec::Image(r) => r.clone(),
                 RootfsSpec::RootfsPath(p) => format!("rootfs:{}", p),
             },
@@ -237,10 +237,9 @@ mod tests {
             created_at: now,
             container: ContainerRuntimeConfig {
                 id: ContainerId::new(),
-                image: RootfsSpec::Image("python:3.11".to_string()),
-                image_config: None,
             },
             options: BoxOptions {
+                rootfs: RootfsSpec::Image("python:3.11".to_string()),
                 cpus: Some(4),
                 memory_mib: Some(1024),
                 ..Default::default()

@@ -217,10 +217,9 @@ mod tests {
             created_at: Utc::now(),
             container: ContainerRuntimeConfig {
                 id: ContainerId::new(),
-                image: RootfsSpec::Image("test:latest".to_string()),
-                image_config: None,
             },
             options: BoxOptions {
+                rootfs: RootfsSpec::Image("test:latest".to_string()),
                 cpus: Some(2),
                 memory_mib: Some(512),
                 ..Default::default()

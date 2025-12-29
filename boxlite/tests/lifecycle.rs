@@ -1,7 +1,7 @@
 //! Integration tests for box lifecycle (create, list, get, remove, stop).
 
 use boxlite::BoxliteRuntime;
-use boxlite::runtime::options::{BoxOptions, BoxliteOptions};
+use boxlite::runtime::options::{BoxOptions, BoxliteOptions, RootfsSpec};
 use boxlite::runtime::types::BoxStatus;
 use boxlite_shared::Transport;
 use tempfile::TempDir;
@@ -49,11 +49,23 @@ async fn create_generates_unique_ulid_ids() {
     let ctx = TestContext::new();
     let box1 = ctx
         .runtime
-        .create("alpine:latest", BoxOptions::default(), None)
+        .create(
+            BoxOptions {
+                rootfs: RootfsSpec::Image("alpine:latest".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     let box2 = ctx
         .runtime
-        .create("alpine:latest", BoxOptions::default(), None)
+        .create(
+            BoxOptions {
+                rootfs: RootfsSpec::Image("alpine:latest".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
 
     // IDs should be unique
@@ -73,13 +85,14 @@ async fn create_generates_unique_ulid_ids() {
 #[tokio::test]
 async fn create_stores_custom_options() {
     let options = BoxOptions {
+        rootfs: RootfsSpec::Image("alpine:latest".into()),
         cpus: Some(4),
         memory_mib: Some(1024),
         ..Default::default()
     };
 
     let ctx = TestContext::new();
-    let handle = ctx.runtime.create("alpine:latest", options, None).unwrap();
+    let handle = ctx.runtime.create(options, None).unwrap();
     let box_id = handle.id().clone();
 
     let info = ctx.runtime.get_info(&box_id).unwrap().unwrap();
@@ -116,11 +129,23 @@ async fn list_info_returns_all_boxes() {
     // Create two boxes
     let box1 = ctx
         .runtime
-        .create("alpine:latest", BoxOptions::default(), None)
+        .create(
+            BoxOptions {
+                rootfs: RootfsSpec::Image("alpine:latest".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     let box2 = ctx
         .runtime
-        .create("alpine:latest", BoxOptions::default(), None)
+        .create(
+            BoxOptions {
+                rootfs: RootfsSpec::Image("alpine:latest".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
 
     // List should show both boxes
@@ -145,17 +170,35 @@ async fn list_info_sorted_by_creation_time_newest_first() {
     // Create boxes with small delay to ensure different timestamps
     let box1 = ctx
         .runtime
-        .create("alpine:latest", BoxOptions::default(), None)
+        .create(
+            BoxOptions {
+                rootfs: RootfsSpec::Image("alpine:latest".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     let box2 = ctx
         .runtime
-        .create("alpine:latest", BoxOptions::default(), None)
+        .create(
+            BoxOptions {
+                rootfs: RootfsSpec::Image("alpine:latest".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     let box3 = ctx
         .runtime
-        .create("alpine:latest", BoxOptions::default(), None)
+        .create(
+            BoxOptions {
+                rootfs: RootfsSpec::Image("alpine:latest".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
 
     // List should be sorted newest first
@@ -186,7 +229,13 @@ async fn get_info_returns_box_metadata() {
     let ctx = TestContext::new();
     let handle = ctx
         .runtime
-        .create("alpine:latest", BoxOptions::default(), None)
+        .create(
+            BoxOptions {
+                rootfs: RootfsSpec::Image("alpine:latest".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     let box_id = handle.id().clone();
 
@@ -215,7 +264,13 @@ async fn exists_returns_true_for_existing_box() {
     let ctx = TestContext::new();
     let handle = ctx
         .runtime
-        .create("alpine:latest", BoxOptions::default(), None)
+        .create(
+            BoxOptions {
+                rootfs: RootfsSpec::Image("alpine:latest".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     let box_id = handle.id().clone();
 
@@ -254,7 +309,13 @@ async fn remove_stopped_box_succeeds() {
     let ctx = TestContext::new();
     let handle = ctx
         .runtime
-        .create("alpine:latest", BoxOptions::default(), None)
+        .create(
+            BoxOptions {
+                rootfs: RootfsSpec::Image("alpine:latest".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     let box_id = handle.id().clone();
 
@@ -273,7 +334,13 @@ async fn remove_active_without_force_fails() {
     let ctx = TestContext::new();
     let handle = ctx
         .runtime
-        .create("alpine:latest", BoxOptions::default(), None)
+        .create(
+            BoxOptions {
+                rootfs: RootfsSpec::Image("alpine:latest".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     let box_id = handle.id().clone();
 
@@ -303,7 +370,13 @@ async fn remove_active_with_force_stops_and_removes() {
     let ctx = TestContext::new();
     let handle = ctx
         .runtime
-        .create("alpine:latest", BoxOptions::default(), None)
+        .create(
+            BoxOptions {
+                rootfs: RootfsSpec::Image("alpine:latest".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     let box_id = handle.id().clone();
 
@@ -323,7 +396,13 @@ async fn remove_deletes_box_from_database() {
     let ctx = TestContext::new();
     let handle = ctx
         .runtime
-        .create("alpine:latest", BoxOptions::default(), None)
+        .create(
+            BoxOptions {
+                rootfs: RootfsSpec::Image("alpine:latest".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     let box_id = handle.id().clone();
 
@@ -346,7 +425,13 @@ async fn stop_marks_box_as_stopped() {
     let ctx = TestContext::new();
     let handle = ctx
         .runtime
-        .create("alpine:latest", BoxOptions::default(), None)
+        .create(
+            BoxOptions {
+                rootfs: RootfsSpec::Image("alpine:latest".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     let box_id = handle.id().clone();
 
@@ -370,7 +455,13 @@ async fn litebox_info_returns_correct_metadata() {
     let ctx = TestContext::new();
     let handle = ctx
         .runtime
-        .create("alpine:latest", BoxOptions::default(), None)
+        .create(
+            BoxOptions {
+                rootfs: RootfsSpec::Image("alpine:latest".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     let box_id = handle.id().clone();
 
@@ -400,11 +491,23 @@ async fn multiple_runtimes_are_isolated() {
 
     let box1 = ctx1
         .runtime
-        .create("alpine:latest", BoxOptions::default(), None)
+        .create(
+            BoxOptions {
+                rootfs: RootfsSpec::Image("alpine:latest".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     let box2 = ctx2
         .runtime
-        .create("alpine:latest", BoxOptions::default(), None)
+        .create(
+            BoxOptions {
+                rootfs: RootfsSpec::Image("alpine:latest".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
 
     // Each runtime should only see its own box
@@ -437,7 +540,13 @@ async fn boxes_persist_across_runtime_restart() {
         };
         let runtime = BoxliteRuntime::new(options).expect("Failed to create runtime");
         let litebox = runtime
-            .create("alpine:latest", BoxOptions::default(), None)
+            .create(
+                BoxOptions {
+                    rootfs: RootfsSpec::Image("alpine:latest".into()),
+                    ..Default::default()
+                },
+                None,
+            )
             .unwrap();
         box_id = litebox.id().clone();
 

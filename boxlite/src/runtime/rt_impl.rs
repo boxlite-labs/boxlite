@@ -8,7 +8,7 @@ use crate::runtime::constants::filenames;
 use crate::runtime::guest_rootfs::GuestRootfs;
 use crate::runtime::layout::{FilesystemLayout, FsLayoutConfig};
 use crate::runtime::lock::RuntimeLock;
-use crate::runtime::options::{BoxOptions, BoxliteOptions, RootfsSpec};
+use crate::runtime::options::{BoxOptions, BoxliteOptions};
 use crate::runtime::types::{BoxID, BoxInfo, BoxState, BoxStatus, ContainerId, generate_box_id};
 use crate::vmm::VmmKind;
 use boxlite_shared::{BoxliteError, BoxliteResult, Transport};
@@ -162,7 +162,6 @@ impl RuntimeImpl {
     /// Box startup) is deferred until the first API call on the handle.
     pub fn create(
         self: &Arc<Self>,
-        image: &str,
         options: BoxOptions,
         name: Option<String>,
     ) -> BoxliteResult<LiteBox> {
@@ -176,11 +175,8 @@ impl RuntimeImpl {
             )));
         }
 
-        // Parse image reference
-        let rootfs_spec = RootfsSpec::Image(image.to_string());
-
         // Initialize box variables with defaults
-        let (config, state) = self.init_box_variables(rootfs_spec, &options, name);
+        let (config, state) = self.init_box_variables(&options, name);
 
         // Register in BoxManager (handles DB persistence internally)
         self.box_manager.add_box(&config, &state)?;
@@ -353,7 +349,6 @@ impl RuntimeImpl {
     /// Initialize box variables with defaults.
     fn init_box_variables(
         &self,
-        rootfs_spec: RootfsSpec,
         options: &BoxOptions,
         name: Option<String>,
     ) -> (BoxConfig, BoxState) {
@@ -374,11 +369,7 @@ impl RuntimeImpl {
         let ready_socket_path = box_home.join("sockets").join("ready.sock");
 
         // Create container runtime config
-        let container = ContainerRuntimeConfig {
-            id: container_id,
-            image: rootfs_spec,
-            image_config: None, // Populated during initialization
-        };
+        let container = ContainerRuntimeConfig { id: container_id };
 
         // Create config with defaults + user options
         let config = BoxConfig {

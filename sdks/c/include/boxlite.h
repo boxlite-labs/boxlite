@@ -60,7 +60,7 @@ struct CBoxliteRuntime *boxlite_runtime_new(const char *home_dir, char **out_err
  * # Arguments
  * * `runtime` - BoxLite runtime instance
  * * `options_json` - JSON-encoded BoxOptions, e.g.:
- *                    `{"images": {"Reference": "alpine:3.19"}, "working_dir": "/workspace"}`
+ *                    `{"rootfs": {"Image": "alpine:3.19"}, "working_dir": "/workspace"}`
  * * `out_error` - Output parameter for error message
  *
  * # Returns
@@ -68,12 +68,11 @@ struct CBoxliteRuntime *boxlite_runtime_new(const char *home_dir, char **out_err
  *
  * # Example
  * ```c
- * const char *opts = "{\"images\":{\"Reference\":\"alpine:3.19\"}}";
- * BoxHandle *box = boxlite_create_box(runtime, image, opts, &error);
+ * const char *opts = "{\"rootfs\":{\"Image\":\"alpine:3.19\"}}";
+ * BoxHandle *box = boxlite_create_box(runtime, opts, &error);
  * ```
  */
 struct CBoxHandle *boxlite_create_box(struct CBoxliteRuntime *runtime,
-                                      const char *image,
                                       const char *options_json,
                                       char **out_error);
 

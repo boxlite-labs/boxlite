@@ -32,7 +32,7 @@ impl PipelineTask<InitCtx> for ContainerRootfsTask {
                 .clone()
                 .ok_or_else(|| BoxliteError::Internal("filesystem task must run first".into()))?;
             (
-                ctx.config.container.image.clone(),
+                ctx.config.options.rootfs.clone(),
                 ctx.config.options.env.clone(),
                 ctx.runtime.clone(),
                 layout,

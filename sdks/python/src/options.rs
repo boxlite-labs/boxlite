@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use boxlite::runtime::constants::images;
 use boxlite::runtime::options::{
-    BoxOptions, BoxliteOptions, NetworkSpec, PortProtocol, PortSpec, VolumeSpec,
+    BoxOptions, BoxliteOptions, NetworkSpec, PortProtocol, PortSpec, RootfsSpec, VolumeSpec,
 };
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -113,19 +113,6 @@ impl PyBoxOptions {
     }
 }
 
-impl PyBoxOptions {
-    /// Extract the image reference string from options.
-    pub fn image_ref(&self) -> String {
-        match &self.rootfs_path {
-            Some(path) if !path.is_empty() => format!("rootfs:{}", path),
-            _ => self
-                .image
-                .clone()
-                .unwrap_or_else(|| images::DEFAULT.to_string()),
-        }
-    }
-}
-
 impl From<PyBoxOptions> for BoxOptions {
     fn from(py_opts: PyBoxOptions) -> Self {
         let volumes = py_opts.volumes.into_iter().map(VolumeSpec::from).collect();
@@ -139,11 +126,24 @@ impl From<PyBoxOptions> for BoxOptions {
 
         let ports = py_opts.ports.into_iter().map(PortSpec::from).collect();
 
+        // Convert image/rootfs_path to RootfsSpec
+        let rootfs = match &py_opts.rootfs_path {
+            Some(path) if !path.is_empty() => RootfsSpec::RootfsPath(path.clone()),
+            _ => {
+                let image = py_opts
+                    .image
+                    .clone()
+                    .unwrap_or_else(|| images::DEFAULT.to_string());
+                RootfsSpec::Image(image)
+            }
+        };
+
         let mut opts = BoxOptions {
             cpus: py_opts.cpus,
             memory_mib: py_opts.memory_mib,
             working_dir: py_opts.working_dir,
             env: py_opts.env,
+            rootfs,
             volumes,
             network,
             ports,

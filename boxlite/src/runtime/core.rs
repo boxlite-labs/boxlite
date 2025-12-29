@@ -168,13 +168,8 @@ impl BoxliteRuntime {
     ///
     /// Returns immediately with a LiteBox handle. Heavy initialization (image pulling,
     /// Box startup) is deferred until the first API call on the handle.
-    pub fn create(
-        &self,
-        image: &str,
-        options: BoxOptions,
-        name: Option<String>,
-    ) -> BoxliteResult<LiteBox> {
-        self.rt_impl.create(image, options, name)
+    pub fn create(&self, options: BoxOptions, name: Option<String>) -> BoxliteResult<LiteBox> {
+        self.rt_impl.create(options, name)
     }
 
     /// Get a handle to an existing box by ID or name.

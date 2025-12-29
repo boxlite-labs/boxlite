@@ -1,6 +1,4 @@
 use crate::BoxID;
-use crate::images::ContainerImageConfig;
-use crate::runtime::options::RootfsSpec;
 use crate::runtime::types::ContainerId;
 use boxlite_shared::Transport;
 use chrono::{DateTime, Utc};
@@ -9,17 +7,12 @@ use std::path::PathBuf;
 
 /// Container runtime configuration.
 ///
-/// Holds the container's identity, image reference, and extracted image config.
+/// Holds the container's identity.
 /// Owned by BoxConfig since each box runs exactly one container.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerRuntimeConfig {
     /// Container ID (64-char hex, generated at box creation).
     pub id: ContainerId,
-    /// Image reference or rootfs path.
-    pub image: RootfsSpec,
-    /// Container image config extracted from OCI image.
-    /// None until image is pulled during initialization.
-    pub image_config: Option<ContainerImageConfig>,
 }
 
 /// Static box configuration (set once at creation, never changes).
@@ -37,7 +30,7 @@ pub struct BoxConfig {
     pub created_at: DateTime<Utc>,
 
     // === Container Configuration ===
-    /// Container configuration (id, image, image_config).
+    /// Container configuration (id).
     pub container: ContainerRuntimeConfig,
 
     // === User Options (preserved for restart) ===

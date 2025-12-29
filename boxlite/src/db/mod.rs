@@ -110,7 +110,7 @@ impl Database {
                 // Strict version check: any mismatch is an error
                 return Err(BoxliteError::Database(format!(
                     "Schema version mismatch: database has v{}, process expects v{}. \
-                     Run `boxlite migrate` or use matching boxlite version.",
+                     Remove the database file in $BOXLITE_HOME/db to reset.",
                     v,
                     schema::SCHEMA_VERSION
                 )));

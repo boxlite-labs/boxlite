@@ -1,6 +1,5 @@
 mod archive;
 mod config;
-mod index;
 mod manager;
 mod object;
 mod storage;

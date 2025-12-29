@@ -419,8 +419,7 @@ impl ImageStorage {
     /// Get the images directory path.
     ///
     /// **Mutability**: Immutable - returns reference to stored path.
-    ///
-    /// This is used by ImageIndex for saving/loading the index file.
+    #[allow(dead_code)]
     pub fn images_dir(&self) -> &Path {
         self.layout.root()
     }

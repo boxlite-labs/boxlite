@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::object::ImageObject;
+use crate::db::Database;
 use crate::images::store::{ImageStore, SharedImageStore};
 use boxlite_shared::errors::BoxliteResult;
 
@@ -50,10 +51,12 @@ pub(super) struct LayerInfo {
 ///
 /// ```no_run
 /// use boxlite::images::ImageManager;
+/// use boxlite::db::Database;
 /// use std::path::PathBuf;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let manager = ImageManager::new(PathBuf::from("/tmp/images"))?;
+/// let db = Database::open(&PathBuf::from("/tmp/boxlite.db"))?;
+/// let manager = ImageManager::new(PathBuf::from("/tmp/images"), db)?;
 ///
 /// // Pull an image
 /// let image = manager.pull("python:alpine").await?;
@@ -77,8 +80,8 @@ impl std::fmt::Debug for ImageManager {
 
 impl ImageManager {
     /// Create a new image manager for the given images directory.
-    pub fn new(images_dir: PathBuf) -> BoxliteResult<Self> {
-        let store = Arc::new(ImageStore::new(images_dir)?);
+    pub fn new(images_dir: PathBuf, db: Database) -> BoxliteResult<Self> {
+        let store = Arc::new(ImageStore::new(images_dir, db)?);
         Ok(Self { store })
     }
 

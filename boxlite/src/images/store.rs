@@ -13,7 +13,7 @@
 //! - `layer_tarball()` - Get layer tarball path
 //! - `layer_extracted()` - Get extracted layer path (extracts if needed)
 
-use crate::images::index::{CachedImage, ImageIndex};
+use crate::db::{CachedImage, Database, ImageIndexStore};
 use crate::images::manager::{ImageManifest, LayerInfo};
 use crate::images::storage::ImageStorage;
 use boxlite_shared::{BoxliteError, BoxliteResult};
@@ -33,14 +33,14 @@ use tokio::sync::RwLock;
 /// This struct contains all mutable state but has NO locking - it's wrapped
 /// by `ImageStore` which provides thread-safe access.
 struct ImageStoreInner {
-    index: ImageIndex,
+    index: ImageIndexStore,
     storage: ImageStorage,
 }
 
 impl ImageStoreInner {
-    fn new(images_dir: PathBuf) -> BoxliteResult<Self> {
-        let storage = ImageStorage::new(images_dir.clone())?;
-        let index = ImageIndex::load(&images_dir)?;
+    fn new(images_dir: PathBuf, db: Database) -> BoxliteResult<Self> {
+        let storage = ImageStorage::new(images_dir)?;
+        let index = ImageIndexStore::new(db);
         Ok(Self { index, storage })
     }
 }
@@ -87,8 +87,8 @@ impl std::fmt::Debug for ImageStore {
 
 impl ImageStore {
     /// Create a new image store for the given images' directory.
-    pub fn new(images_dir: PathBuf) -> BoxliteResult<Self> {
-        let inner = ImageStoreInner::new(images_dir)?;
+    pub fn new(images_dir: PathBuf, db: Database) -> BoxliteResult<Self> {
+        let inner = ImageStoreInner::new(images_dir, db)?;
         Ok(Self {
             client: oci_client::Client::new(Default::default()),
             inner: RwLock::new(inner),
@@ -278,8 +278,8 @@ impl ImageStore {
         image_ref: &str,
     ) -> BoxliteResult<Option<ImageManifest>> {
         // Check if image exists in index
-        let cached = match inner.index.get(image_ref) {
-            Some(c) if c.complete => c.clone(),
+        let cached = match inner.index.get(image_ref)? {
+            Some(c) if c.complete => c,
             _ => {
                 tracing::debug!("Image not in cache or incomplete: {}", image_ref);
                 return Ok(None);
@@ -398,7 +398,7 @@ impl ImageStore {
 
     /// Update index with newly pulled image.
     async fn update_index(&self, image_ref: &str, manifest: &ImageManifest) -> BoxliteResult<()> {
-        let mut inner = self.inner.write().await;
+        let inner = self.inner.read().await;
 
         let cached_image = CachedImage {
             manifest_digest: manifest.manifest_digest.clone(),
@@ -408,11 +408,7 @@ impl ImageStore {
             complete: true,
         };
 
-        inner.index.upsert(image_ref.to_string(), cached_image);
-
-        if let Err(e) = inner.index.save(inner.storage.images_dir()) {
-            tracing::warn!("Failed to save index to disk: {}", e);
-        }
+        inner.index.upsert(image_ref, &cached_image)?;
 
         tracing::debug!("Updated index for image: {}", image_ref);
         Ok(())

@@ -7,6 +7,7 @@
 //! Uses JSON blob pattern for flexibility with queryable columns for performance.
 
 mod boxes;
+mod images;
 mod schema;
 
 use std::path::Path;
@@ -19,6 +20,7 @@ use rusqlite::{Connection, OptionalExtension};
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 
 pub use boxes::BoxStore;
+pub use images::{CachedImage, ImageIndexStore};
 
 /// Helper macro to convert rusqlite errors to BoxliteError.
 macro_rules! db_err {
@@ -162,6 +164,15 @@ impl Database {
             ))?;
 
             current = 3;
+        }
+
+        // Migration 3 -> 4: Add image_index table
+        if current == 3 {
+            tracing::info!("Running migration 3 -> 4: Adding image_index table");
+
+            db_err!(conn.execute_batch(schema::IMAGE_INDEX_TABLE))?;
+
+            current = 4;
         }
 
         // Update schema version

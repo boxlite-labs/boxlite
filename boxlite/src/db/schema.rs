@@ -7,7 +7,7 @@
 //! Each table has queryable columns for efficient filtering + JSON blob for full data.
 
 /// Current schema version.
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
 /// Schema version tracking table.
 pub const SCHEMA_VERSION_TABLE: &str = r#"
@@ -63,6 +63,23 @@ CREATE TABLE IF NOT EXISTS alive (
 );
 "#;
 
+/// Image index table schema.
+///
+/// Stores cached image metadata. Maps image references to their cached metadata.
+/// Queryable columns for efficient lookup + layers stored as JSON array.
+pub const IMAGE_INDEX_TABLE: &str = r#"
+CREATE TABLE IF NOT EXISTS image_index (
+    reference TEXT PRIMARY KEY NOT NULL,
+    manifest_digest TEXT NOT NULL,
+    config_digest TEXT NOT NULL,
+    layers TEXT NOT NULL,
+    cached_at TEXT NOT NULL,
+    complete INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_image_index_manifest_digest ON image_index(manifest_digest);
+"#;
+
 /// Get all schema creation statements.
 pub fn all_schemas() -> Vec<&'static str> {
     vec![
@@ -70,5 +87,6 @@ pub fn all_schemas() -> Vec<&'static str> {
         BOX_CONFIG_TABLE,
         BOX_STATE_TABLE,
         ALIVE_TABLE,
+        IMAGE_INDEX_TABLE,
     ]
 }

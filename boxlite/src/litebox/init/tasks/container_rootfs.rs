@@ -25,7 +25,7 @@ impl PipelineTask<InitCtx> for ContainerRootfsTask {
         let task_name = self.name();
         let box_id = task_start(&ctx, task_name).await;
 
-        let (rootfs_spec, env, runtime, layout, reuse_rootfs) = {
+        let (rootfs_spec, env, runtime, layout, reuse_rootfs, disk_size_gb) = {
             let ctx = ctx.lock().await;
             let layout = ctx
                 .layout
@@ -37,13 +37,20 @@ impl PipelineTask<InitCtx> for ContainerRootfsTask {
                 ctx.runtime.clone(),
                 layout,
                 ctx.reuse_rootfs,
+                ctx.config.options.disk_size_gb,
             )
         };
 
-        let (container_image_config, disk) =
-            run_container_rootfs(&rootfs_spec, &env, &runtime, &layout, reuse_rootfs)
-                .await
-                .inspect_err(|e| log_task_error(&box_id, task_name, e))?;
+        let (container_image_config, disk) = run_container_rootfs(
+            &rootfs_spec,
+            &env,
+            &runtime,
+            &layout,
+            reuse_rootfs,
+            disk_size_gb,
+        )
+        .await
+        .inspect_err(|e| log_task_error(&box_id, task_name, e))?;
 
         let mut ctx = ctx.lock().await;
         ctx.container_image_config = Some(container_image_config);
@@ -64,6 +71,7 @@ async fn run_container_rootfs(
     runtime: &SharedRuntimeImpl,
     layout: &BoxFilesystemLayout,
     reuse_rootfs: bool,
+    disk_size_gb: Option<u64>,
 ) -> BoxliteResult<(ContainerImageConfig, Disk)> {
     let disk_path = layout.disk_path();
 
@@ -123,7 +131,7 @@ async fn run_container_rootfs(
         ));
     };
 
-    let disk = create_cow_disk(&rootfs_result, layout)?;
+    let disk = create_cow_disk(&rootfs_result, layout, disk_size_gb)?;
 
     let image_config = image.load_config().await?;
     let mut container_image_config = ContainerImageConfig::from_oci_config(&image_config)?;
@@ -136,22 +144,37 @@ async fn run_container_rootfs(
 }
 
 /// Create COW disk from base rootfs.
+///
+/// # Arguments
+/// * `rootfs_result` - Result of rootfs preparation (disk image or layers)
+/// * `layout` - Box filesystem layout for disk paths
+/// * `disk_size_gb` - Optional user-specified disk size in GB. If set, the COW disk
+///   will have this virtual size (or the base disk size, whichever is larger).
 fn create_cow_disk(
     rootfs_result: &ContainerRootfsPrepResult,
     layout: &crate::runtime::layout::BoxFilesystemLayout,
+    disk_size_gb: Option<u64>,
 ) -> BoxliteResult<Disk> {
     match rootfs_result {
         ContainerRootfsPrepResult::DiskImage {
             base_disk_path,
-            disk_size,
+            disk_size: base_disk_size,
         } => {
+            // Calculate target disk size: use max of user-specified size and base disk size
+            let target_disk_size = if let Some(size_gb) = disk_size_gb {
+                let user_size_bytes = size_gb * 1024 * 1024 * 1024;
+                std::cmp::max(user_size_bytes, *base_disk_size)
+            } else {
+                *base_disk_size
+            };
+
             let qcow2_helper = Qcow2Helper::new();
             let cow_disk_path = layout.disk_path();
             let temp_disk = qcow2_helper.create_cow_child_disk(
                 base_disk_path,
                 BackingFormat::Raw,
                 &cow_disk_path,
-                *disk_size,
+                target_disk_size,
             )?;
 
             // Make disk persistent so it survives stop/restart
@@ -163,6 +186,7 @@ fn create_cow_disk(
             tracing::info!(
                 cow_disk = %cow_disk_path.display(),
                 base_disk = %base_disk_path.display(),
+                virtual_size_mb = target_disk_size / (1024 * 1024),
                 "Created container rootfs COW overlay (persistent)"
             );
 

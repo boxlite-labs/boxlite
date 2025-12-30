@@ -52,6 +52,8 @@ pub(crate) struct PyBoxOptions {
     #[pyo3(get, set)]
     pub(crate) memory_mib: Option<u32>,
     #[pyo3(get, set)]
+    pub(crate) disk_size_gb: Option<u64>,
+    #[pyo3(get, set)]
     pub(crate) working_dir: Option<String>,
     #[pyo3(get, set)]
     pub(crate) env: Vec<(String, String)>,
@@ -71,6 +73,7 @@ impl PyBoxOptions {
         rootfs_path=None,
         cpus=None,
         memory_mib=None,
+        disk_size_gb=None,
         working_dir=None,
         env=vec![],
         volumes=vec![],
@@ -84,6 +87,7 @@ impl PyBoxOptions {
         rootfs_path: Option<String>,
         cpus: Option<u8>,
         memory_mib: Option<u32>,
+        disk_size_gb: Option<u64>,
         working_dir: Option<String>,
         env: Vec<(String, String)>,
         volumes: Vec<PyVolumeSpec>,
@@ -96,6 +100,7 @@ impl PyBoxOptions {
             rootfs_path,
             cpus,
             memory_mib,
+            disk_size_gb,
             working_dir,
             env,
             volumes,
@@ -141,6 +146,7 @@ impl From<PyBoxOptions> for BoxOptions {
         let mut opts = BoxOptions {
             cpus: py_opts.cpus,
             memory_mib: py_opts.memory_mib,
+            disk_size_gb: py_opts.disk_size_gb,
             working_dir: py_opts.working_dir,
             env: py_opts.env,
             rootfs,

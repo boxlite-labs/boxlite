@@ -45,6 +45,9 @@ pub mod vm_defaults {
 
     /// Default memory in MiB allocated to a Box
     pub const DEFAULT_MEMORY_MIB: u32 = 2048;
+
+    /// Default disk size in GB for the container rootfs (sparse, grows as needed)
+    pub const DEFAULT_DISK_SIZE_GB: u64 = 10;
 }
 
 /// File naming patterns

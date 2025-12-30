@@ -32,6 +32,12 @@ impl Default for BoxliteOptions {
 pub struct BoxOptions {
     pub cpus: Option<u8>,
     pub memory_mib: Option<u32>,
+    /// Disk size in GB for the container rootfs (sparse, grows as needed).
+    ///
+    /// The actual disk will be at least as large as the base image.
+    /// If set, the COW overlay will have this virtual size, allowing
+    /// the container to write more data than the base image size.
+    pub disk_size_gb: Option<u64>,
     pub working_dir: Option<String>,
     pub env: Vec<(String, String)>,
     pub rootfs: RootfsSpec,
@@ -69,6 +75,7 @@ impl Default for BoxOptions {
         Self {
             cpus: None,
             memory_mib: None,
+            disk_size_gb: None,
             working_dir: None,
             env: Vec::new(),
             rootfs: RootfsSpec::default(),

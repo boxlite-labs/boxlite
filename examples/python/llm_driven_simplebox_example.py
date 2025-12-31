@@ -11,12 +11,11 @@ Demonstrates how to let an LLM explore a sandbox via tool calls:
 
 import asyncio
 import json
+import os
 from contextlib import AsyncExitStack
 
 import boxlite
 from openai import AsyncOpenAI
-
-OPENAI_API_KEY = None # YOUR_OPENAI_API_KEY_HERE
 
 TOOLS = [
     {
@@ -39,9 +38,12 @@ TOOLS = [
 
 
 def build_client():
-    api_key = OPENAI_API_KEY
+    api_key = os.getenv('OPENAI_API_KEY')
     if not api_key:
-        raise RuntimeError('OPENAI_API_KEY is not set. Export it before running this example.')
+        raise RuntimeError(
+            "OPENAI_API_KEY is not set. Export it before running, e.g.: "
+            "`export OPENAI_API_KEY=sk-...`"
+        )
     return AsyncOpenAI(api_key=api_key)
 
 

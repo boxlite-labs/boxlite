@@ -140,8 +140,7 @@ impl RootfsBuilder {
                 );
 
                 // Copy this layer on top, whiteouts handled during copy
-                // copy_directory_overlay(layer_dir, dest)?;
-                copy_directory_overlay(layer_dir, dest).unwrap();
+                copy_directory_overlay(layer_dir, dest)?;
             }
         }
 
@@ -243,6 +242,87 @@ fn is_symlink_loop(path: &Path) -> bool {
     false
 }
 
+/// Execute cp command with metadata preservation and CoW support
+///
+/// Platform-specific behavior:
+/// - macOS: Tries `cp -ac` (clonefile) first, falls back to `cp -a` on cross-device errors
+/// - Linux: Uses `cp -a --reflink=auto` (auto-fallback built-in)
+fn execute_copy_with_metadata(src: &Path, dst: &Path) -> BoxliteResult<()> {
+    use std::process::Command;
+
+    std::fs::create_dir_all(dst).map_err(|e| {
+        BoxliteError::Storage(format!("Failed to create dst dir {}: {}", dst.display(), e))
+    })?;
+
+    #[cfg(target_os = "macos")]
+    {
+        // Try with clonefile first
+        let output = Command::new("cp")
+            .args(["-ac", "--"])
+            .arg(format!("{}/.", src.display()))
+            .arg(dst)
+            .output()
+            .map_err(|e| BoxliteError::Storage(format!("Failed to execute cp: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            // If clonefile fails due to cross-device link, retry with regular copy
+            if stderr.contains("clonefile failed") && stderr.contains("Cross-device link") {
+                tracing::debug!(
+                    "clonefile failed with cross-device error, retrying with regular copy"
+                );
+
+                let output_retry = Command::new("cp")
+                    .args(["-a", "--"])
+                    .arg(format!("{}/.", src.display()))
+                    .arg(dst)
+                    .output()
+                    .map_err(|e| BoxliteError::Storage(format!("Failed to execute cp: {}", e)))?;
+
+                if !output_retry.status.success() {
+                    let stderr_retry = String::from_utf8_lossy(&output_retry.stderr);
+                    return Err(BoxliteError::Storage(format!(
+                        "cp -a {} -> {} failed: {}",
+                        src.display(),
+                        dst.display(),
+                        stderr_retry.trim()
+                    )));
+                }
+            } else {
+                return Err(BoxliteError::Storage(format!(
+                    "cp -a {} -> {} failed: {}",
+                    src.display(),
+                    dst.display(),
+                    stderr.trim()
+                )));
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let output = Command::new("cp")
+            .args(["-a", "--reflink=auto", "--"])
+            .arg(format!("{}/.", src.display()))
+            .arg(dst)
+            .output()
+            .map_err(|e| BoxliteError::Storage(format!("Failed to execute cp: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(BoxliteError::Storage(format!(
+                "cp -a {} -> {} failed: {}",
+                src.display(),
+                dst.display(),
+                stderr.trim()
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 /// Copy a directory on top of another, overlaying files and processing whiteouts
 ///
 /// This simulates overlay filesystem behavior with OCI whiteout support:
@@ -255,7 +335,6 @@ fn is_symlink_loop(path: &Path) -> bool {
 /// - Circular symlinks in dst are handled specially to avoid ELOOP errors
 fn copy_directory_overlay(src: &Path, dst: &Path) -> BoxliteResult<()> {
     use std::collections::HashSet;
-    use std::process::Command;
     use std::time::Instant;
     use walkdir::WalkDir;
 
@@ -385,34 +464,7 @@ fn copy_directory_overlay(src: &Path, dst: &Path) -> BoxliteResult<()> {
 
     // Step 2b: Copy with full metadata preservation using cp -a with CoW
     let step2b_start = Instant::now();
-    std::fs::create_dir_all(dst).map_err(|e| {
-        BoxliteError::Storage(format!("Failed to create dst dir {}: {}", dst.display(), e))
-    })?;
-
-    // Use copy-on-write when available:
-    // - macOS APFS: cp -c (clonefile)
-    // - Linux btrfs/XFS: cp --reflink=auto
-    #[cfg(target_os = "macos")]
-    let cp_args = ["-ac", "--"];
-    #[cfg(not(target_os = "macos"))]
-    let cp_args = ["-a", "--reflink=auto", "--"];
-
-    let output = Command::new("cp")
-        .args(cp_args)
-        .arg(format!("{}/.", src.display()))
-        .arg(dst)
-        .output()
-        .map_err(|e| BoxliteError::Storage(format!("Failed to execute cp: {}", e)))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(BoxliteError::Storage(format!(
-            "cp -a {} -> {} failed: {}",
-            src.display(),
-            dst.display(),
-            stderr.trim()
-        )));
-    }
+    execute_copy_with_metadata(src, dst)?;
     tracing::debug!("Step 2b (cp -a): {:?}", step2b_start.elapsed());
 
     // Step 2c: Recreate circular symlinks that weren't replaced by src

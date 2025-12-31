@@ -148,13 +148,27 @@ async fn build_config(
     // SHARED virtiofs - needed by all strategies
     volume_mgr.add_fs_share(mount_tags::SHARED, layout.shared_dir(), None, false, None);
 
-    // Add container rootfs disk
-    let rootfs_device =
-        volume_mgr.add_block_device(container_disk_path, DiskFormat::Qcow2, false, None);
+    // Add container rootfs disk (COW overlay workflow):
+    // 1. Base disk: Pre-built ext4 image with container layers merged
+    // 2. COW disk: QCOW2 overlay with copy-on-write semantics
+    //    - Inherits formatted ext4 from base (need_format=false)
+    //    - May have larger virtual size if disk_size_gb specified
+    // 3. Guest mount: If disk was resized, expand ext4 to fill space (need_resize=true)
+    let need_resize = options.disk_size_gb.is_some();
+    let rootfs_device = volume_mgr.add_block_device(
+        container_disk_path,
+        DiskFormat::Qcow2,
+        false,
+        None,
+        false,       // need_format: COW child inherits formatted base
+        need_resize, // need_resize: expand ext4 if virtual size > base size
+    );
 
-    // Update rootfs_init with actual device path
+    // Update rootfs_init with actual device path and resize flag
     let rootfs_init = crate::portal::interfaces::ContainerRootfsInitConfig::DiskImage {
         device: rootfs_device,
+        need_format: false, // COW child uses pre-formatted base
+        need_resize,        // Expand ext4 if disk_size_gb was specified
     };
 
     // Add user volumes via ContainerVolumeManager
@@ -218,9 +232,15 @@ fn configure_guest_rootfs(
     if let Some(disk_path_input) = guest_disk_path
         && let Strategy::Disk { ref disk_path, .. } = guest_rootfs.strategy
     {
-        // Add disk to volume manager
-        let device_path =
-            volume_mgr.add_block_device(disk_path_input, DiskFormat::Qcow2, false, None);
+        // Add disk to volume manager (guest rootfs - no format/resize needed)
+        let device_path = volume_mgr.add_block_device(
+            disk_path_input,
+            DiskFormat::Qcow2,
+            false,
+            None,
+            false, // need_format
+            false, // need_resize
+        );
 
         // Update strategy with device path
         guest_rootfs.strategy = Strategy::Disk {

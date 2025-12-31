@@ -35,6 +35,10 @@ pub struct BlockDeviceEntry {
     pub format: DiskFormat,
     pub read_only: bool,
     pub guest_mount: Option<String>,
+    /// If true, guest should format device before mounting
+    pub need_format: bool,
+    /// If true, guest should resize filesystem after mounting
+    pub need_resize: bool,
 }
 
 /// VMM layer mount configuration.
@@ -93,12 +97,22 @@ impl GuestVolumeManager {
     /// Add a block device.
     ///
     /// Returns the device path in guest (e.g., "/dev/vda").
+    ///
+    /// # Arguments
+    /// * `disk_path` - Path to disk image on host
+    /// * `format` - Disk format (Ext4/Qcow2)
+    /// * `read_only` - Mount read-only
+    /// * `guest_mount` - Where to mount in guest (None = don't mount)
+    /// * `need_format` - Guest should format device before mounting
+    /// * `need_resize` - Guest should resize filesystem after mounting
     pub fn add_block_device(
         &mut self,
         disk_path: &Path,
         format: DiskFormat,
         read_only: bool,
         guest_mount: Option<&str>,
+        need_format: bool,
+        need_resize: bool,
     ) -> String {
         let block_id = Self::block_id_from_index(self.next_block_index);
         self.next_block_index += 1;
@@ -112,6 +126,8 @@ impl GuestVolumeManager {
             format,
             read_only,
             guest_mount: guest_mount.map(String::from),
+            need_format,
+            need_resize,
         });
 
         tracing::debug!(
@@ -119,6 +135,8 @@ impl GuestVolumeManager {
             disk = %disk_path.display(),
             read_only = %read_only,
             guest_mount = ?guest_mount,
+            need_format = %need_format,
+            need_resize = %need_resize,
             "Added block device"
         );
 
@@ -182,7 +200,9 @@ impl GuestVolumeManager {
                 volumes.push(VolumeConfig::block_device(
                     &entry.device_path,
                     mount_path,
-                    boxlite_shared::Filesystem::Unspecified,
+                    boxlite_shared::Filesystem::Ext4,
+                    entry.need_format,
+                    entry.need_resize,
                 ));
             }
         }

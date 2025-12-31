@@ -28,6 +28,10 @@ pub enum ContainerRootfsInitConfig {
     DiskImage {
         /// Block device path (e.g., "/dev/vda")
         device: String,
+        /// Whether to format the device before mounting
+        need_format: bool,
+        /// Whether to resize filesystem after mounting to fill disk
+        need_resize: bool,
     },
 }
 
@@ -50,9 +54,15 @@ impl ContainerRootfsInitConfig {
                     },
                 )),
             },
-            ContainerRootfsInitConfig::DiskImage { device } => RootfsInit {
+            ContainerRootfsInitConfig::DiskImage {
+                device,
+                need_format,
+                need_resize,
+            } => RootfsInit {
                 strategy: Some(boxlite_shared::rootfs_init::Strategy::Disk(DiskRootfs {
                     device,
+                    need_format,
+                    need_resize,
                 })),
             },
         }

@@ -70,7 +70,13 @@ pub fn mount_volume(vol: &Volume) -> BoxliteResult<()> {
         Some(volume::Source::BlockDevice(block)) => {
             let mount_point = Path::new(&vol.mount_point);
             let filesystem = Filesystem::try_from(block.filesystem).unwrap_or(Filesystem::Ext4);
-            BlockDeviceMount::mount(Path::new(&block.device), mount_point, filesystem)
+            BlockDeviceMount::mount(
+                Path::new(&block.device),
+                mount_point,
+                filesystem,
+                block.need_format,
+                block.need_resize,
+            )
         }
         None => {
             tracing::warn!("Volume {} has no source, skipping", vol.mount_point);

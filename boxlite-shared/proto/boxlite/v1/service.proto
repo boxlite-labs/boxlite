@@ -92,9 +92,17 @@ message VirtiofsSource {
 }
 
 // Block device volume source
+//
+// Controls how block devices are mounted in the guest:
+// - filesystem: Target filesystem type (only EXT4 supported for resize)
+// - need_format: If true, format device before mounting (use for fresh disks)
+// - need_resize: If true, resize filesystem after mounting to fill available space
+//                (use when QCOW2 virtual size > filesystem size)
 message BlockDeviceSource {
   string device = 1;           // device path (e.g., "/dev/vda")
-  Filesystem filesystem = 2;   // filesystem type
+  Filesystem filesystem = 2;   // target filesystem type (e.g., EXT4)
+  bool need_format = 3;        // if true, format device with filesystem before mount
+  bool need_resize = 4;        // if true, run resize2fs after mount to fill disk
 }
 
 // Supported filesystem types
@@ -123,8 +131,16 @@ message OverlayRootfs {
 }
 
 // Disk-based rootfs - block device mounted directly as container rootfs
+//
+// COW (copy-on-write) workflow:
+// - Base disk: Pre-built ext4 image with merged container layers
+// - COW disk: QCOW2 overlay that inherits from base, may have larger virtual size
+// - need_format: Usually false (COW inherits formatted base)
+// - need_resize: True if COW virtual size > base size (expands ext4 to fill disk)
 message DiskRootfs {
-  string device = 1;  // block device path (e.g., "/dev/vda")
+  string device = 1;           // block device path (e.g., "/dev/vda")
+  bool need_format = 2;        // if true, format device before mounting
+  bool need_resize = 3;        // if true, resize filesystem after mounting to fill disk
 }
 
 // Network initialization

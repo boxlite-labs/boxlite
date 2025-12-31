@@ -69,11 +69,13 @@ fn prepare_rootfs(
             std::fs::create_dir_all(shared_rootfs)
                 .map_err(|e| format!("Failed to create shared rootfs directory: {}", e))?;
 
-            // Use Unspecified to skip formatting - the COW disk already contains the rootfs
+            // Mount container rootfs disk with options from host
             BlockDeviceMount::mount(
                 Path::new(&disk.device),
                 shared_rootfs,
-                Filesystem::Unspecified,
+                Filesystem::Ext4,
+                disk.need_format,
+                disk.need_resize,
             )
             .map_err(|e| format!("Failed to mount rootfs disk: {}", e))?;
 

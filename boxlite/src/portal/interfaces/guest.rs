@@ -102,8 +102,12 @@ pub enum VolumeConfig {
         device: String,
         /// Mount point in guest
         mount_point: String,
-        /// Filesystem type (UNSPECIFIED = don't format, use existing)
+        /// Filesystem type
         filesystem: Filesystem,
+        /// If true, format device before mounting
+        need_format: bool,
+        /// If true, resize filesystem after mounting to fill disk
+        need_resize: bool,
     },
 }
 
@@ -128,11 +132,15 @@ impl VolumeConfig {
         device: impl Into<String>,
         mount_point: impl Into<String>,
         filesystem: Filesystem,
+        need_format: bool,
+        need_resize: bool,
     ) -> Self {
         Self::BlockDevice {
             device: device.into(),
             mount_point: mount_point.into(),
             filesystem,
+            need_format,
+            need_resize,
         }
     }
 
@@ -155,12 +163,16 @@ impl VolumeConfig {
                 device,
                 mount_point,
                 filesystem,
+                need_format,
+                need_resize,
             } => Volume {
                 mount_point,
                 source: Some(boxlite_shared::volume::Source::BlockDevice(
                     BlockDeviceSource {
                         device,
                         filesystem: filesystem.into(),
+                        need_format,
+                        need_resize,
                     },
                 )),
                 container_id: String::new(),

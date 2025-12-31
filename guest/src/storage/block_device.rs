@@ -14,18 +14,30 @@ use nix::mount::{mount, MsFlags};
 pub struct BlockDeviceMount;
 
 impl BlockDeviceMount {
-    /// Mount block device with optional formatting.
+    /// Mount block device with optional formatting and resizing.
     ///
-    /// - FILESYSTEM_EXT4: Format with ext4 (fresh base disk)
-    /// - FILESYSTEM_UNSPECIFIED: Skip formatting, use existing filesystem (COW child)
-    pub fn mount(device: &Path, mount_point: &Path, filesystem: Filesystem) -> BoxliteResult<()> {
+    /// # Arguments
+    /// * `device` - Block device path (e.g., "/dev/vda")
+    /// * `mount_point` - Where to mount in guest
+    /// * `filesystem` - Target filesystem type
+    /// * `need_format` - If true, format device before mounting
+    /// * `need_resize` - If true, resize filesystem after mounting to fill disk
+    pub fn mount(
+        device: &Path,
+        mount_point: &Path,
+        filesystem: Filesystem,
+        need_format: bool,
+        need_resize: bool,
+    ) -> BoxliteResult<()> {
         let fs_name = filesystem_to_str(filesystem);
 
         tracing::info!(
-            "Mounting block device: {} → {} (filesystem={:?})",
+            "Mounting block device: {} → {} (filesystem={:?}, format={}, resize={})",
             device.display(),
             mount_point.display(),
-            filesystem
+            filesystem,
+            need_format,
+            need_resize
         );
 
         // Check device exists
@@ -36,11 +48,11 @@ impl BlockDeviceMount {
             )));
         }
 
-        // Format only if filesystem is specified (base disks need formatting, COW children don't)
-        if filesystem != Filesystem::Unspecified {
+        // Format if requested
+        if need_format {
             Self::format(device, fs_name)?;
         } else {
-            tracing::info!("Skipping format - using existing filesystem from backing file");
+            tracing::info!("Skipping format - using existing filesystem");
         }
 
         // Create mount point
@@ -75,6 +87,11 @@ impl BlockDeviceMount {
                 e
             ))
         })?;
+
+        // Resize filesystem if requested (expands ext4 to fill available disk space)
+        if need_resize {
+            Self::resize_filesystem(device, filesystem)?;
+        }
 
         // Fix ownership if needed (fallback in case debugfs didn't run on host)
         super::perms::OwnershipFixer::fix_if_needed(mount_point)?;
@@ -153,6 +170,47 @@ impl BlockDeviceMount {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Resize ext4 filesystem to fill available disk space.
+    ///
+    /// This is used for COW disks where the qcow2 virtual size is larger
+    /// than the base ext4 filesystem. resize2fs expands the filesystem online
+    /// after mounting.
+    ///
+    /// # Errors
+    /// Returns error if filesystem is not ext4 or if resize operation fails.
+    fn resize_filesystem(device: &Path, filesystem: Filesystem) -> BoxliteResult<()> {
+        // Only ext4 is supported for online resize
+        if filesystem != Filesystem::Ext4 {
+            return Err(BoxliteError::Storage(format!(
+                "Filesystem resize only supported for ext4, got {:?}",
+                filesystem
+            )));
+        }
+
+        tracing::info!(
+            "Resizing ext4 filesystem on {} to fill disk",
+            device.display()
+        );
+
+        let output = Command::new("resize2fs")
+            .arg(device)
+            .output()
+            .map_err(|e| BoxliteError::Storage(format!("Failed to execute resize2fs: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(BoxliteError::Storage(format!(
+                "resize2fs failed on {}: {}",
+                device.display(),
+                stderr.trim()
+            )));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        tracing::info!("Filesystem resize completed: {}", stdout.trim());
         Ok(())
     }
 

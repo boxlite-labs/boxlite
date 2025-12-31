@@ -94,6 +94,17 @@ pub trait LockManager: Send + Sync {
     /// Returns an error if the lock is already allocated or the ID is invalid.
     fn allocate_and_retrieve(&self, id: LockId) -> BoxliteResult<Arc<dyn Locker>>;
 
+    /// Clear all allocated locks.
+    ///
+    /// This removes all lock files and clears the internal allocation state.
+    /// Used during recovery to start with a clean slate before reclaiming locks.
+    ///
+    /// # Safety
+    ///
+    /// This method is only safe to call when holding the runtime lock, which
+    /// ensures no other process can be using these locks.
+    fn clear_all_locks(&self) -> BoxliteResult<()>;
+
     /// Free a lock, allowing it to be reallocated.
     ///
     /// After calling this, the lock ID may be returned by a future call

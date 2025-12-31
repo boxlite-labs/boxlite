@@ -142,6 +142,13 @@ impl LockManager for InMemoryLockManager {
             .count() as u32;
         Ok(count)
     }
+
+    fn clear_all_locks(&self) -> BoxliteResult<()> {
+        for lock in &self.locks {
+            lock.allocated.store(false, Ordering::SeqCst);
+        }
+        Ok(())
+    }
 }
 
 /// Handle to an in-memory lock.

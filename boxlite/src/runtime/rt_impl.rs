@@ -611,6 +611,10 @@ impl RuntimeImpl {
         // Check for system reboot and reset active boxes
         self.box_manager.check_and_handle_reboot()?;
 
+        // Clear all locks before recovery - safe because we hold the runtime lock.
+        // This ensures a clean slate for lock allocation during recovery.
+        self.lock_manager.clear_all_locks()?;
+
         let persisted = self.box_manager.all_boxes(true)?;
 
         tracing::info!("Recovering {} boxes from database", persisted.len());

@@ -262,6 +262,30 @@ impl LockManager for FileLockManager {
     fn allocated_count(&self) -> BoxliteResult<u32> {
         Ok(self.allocated.read().unwrap().len() as u32)
     }
+
+    fn clear_all_locks(&self) -> BoxliteResult<()> {
+        let _guard = self.alloc_lock.lock().unwrap();
+
+        // Clear the allocated set
+        {
+            let mut allocated = self.allocated.write().unwrap();
+            allocated.clear();
+        }
+
+        // Remove all lock files (only numeric IDs)
+        if let Ok(entries) = fs::read_dir(&self.lock_dir) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str()
+                    && name.parse::<u32>().is_ok()
+                {
+                    let path = entry.path();
+                    let _ = fs::remove_file(&path); // Ignore errors for missing files
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// A file-based lock using flock(2).

@@ -575,3 +575,98 @@ async fn boxes_persist_across_runtime_restart() {
         runtime.remove(box_id.as_str(), false).await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn multiple_boxes_persist_and_recover_without_lock_errors() {
+    // Test that multiple boxes can be created, persisted, and recovered
+    // without lock allocation errors during recovery
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().to_path_buf();
+
+    let box_ids: Vec<BoxID>;
+
+    // Create multiple boxes (allocates locks)
+    {
+        let options = BoxliteOptions {
+            home_dir: home_dir.clone(),
+        };
+        let runtime = BoxliteRuntime::new(options).expect("Failed to create runtime");
+
+        // Create 3 boxes
+        let litebox1 = runtime
+            .create(
+                BoxOptions {
+                    rootfs: RootfsSpec::Image("alpine:latest".into()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        let litebox2 = runtime
+            .create(
+                BoxOptions {
+                    rootfs: RootfsSpec::Image("alpine:latest".into()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        let litebox3 = runtime
+            .create(
+                BoxOptions {
+                    rootfs: RootfsSpec::Image("alpine:latest".into()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+
+        box_ids = vec![
+            litebox1.id().clone(),
+            litebox2.id().clone(),
+            litebox3.id().clone(),
+        ];
+
+        // Stop all boxes before runtime drops
+        litebox1.stop().await.unwrap();
+        litebox2.stop().await.unwrap();
+        litebox3.stop().await.unwrap();
+
+        // Runtime drops here, simulating process exit
+    }
+
+    // Create new runtime with same home directory (simulates restart)
+    // This should successfully recover all boxes without lock allocation errors
+    {
+        let options = BoxliteOptions { home_dir };
+        let runtime = BoxliteRuntime::new(options).expect("Failed to create runtime after restart");
+
+        // All boxes should be recovered from database
+        let boxes = runtime.list_info().unwrap();
+        assert_eq!(boxes.len(), 3, "All boxes should be recovered");
+
+        // Verify all box IDs are present
+        let recovered_ids: Vec<&BoxID> = boxes.iter().map(|b| &b.id).collect();
+        for box_id in &box_ids {
+            assert!(
+                recovered_ids.contains(&box_id),
+                "Box {} should be recovered",
+                box_id
+            );
+        }
+
+        // All boxes should be in Stopped status
+        for info in &boxes {
+            assert_eq!(
+                info.status,
+                BoxStatus::Stopped,
+                "Recovered box should be stopped"
+            );
+        }
+
+        // Cleanup
+        for box_id in &box_ids {
+            runtime.remove(box_id.as_str(), false).await.unwrap();
+        }
+    }
+}

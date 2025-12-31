@@ -16,7 +16,7 @@ from contextlib import AsyncExitStack
 import boxlite
 from openai import AsyncOpenAI
 
-OPENAI_API_KEY = "<YOUR_OPENAI_API_KEY_HERE>"
+OPENAI_API_KEY = None # YOUR_OPENAI_API_KEY_HERE
 
 TOOLS = [
     {
@@ -135,22 +135,22 @@ async def main():
 
     stack = AsyncExitStack()
     box = await stack.enter_async_context(boxlite.SimpleBox(image='python:slim'))
-
-    await whip_agent(
-        box,
-        client,
-        'Explore this sandbox. Show python version, installed packages, $PATH and list files. '
-        'Then run a short python snippet that prints system info. '
-        'Finally give a human readable report.',
-    )
-
-    await whip_agent(
-        box,
-        client,
-        'What commands (executables) are available in this sandbox? Show them all, split by commas.',
+    try:
+        await whip_agent(
+            box,
+            client,
+            'Explore this sandbox. Show python version, installed packages, $PATH and list files. '
+            'Then run a short python snippet that prints system info. '
+            'Finally give a human readable report.',
         )
-    
-    await stack.aclose()
+
+        await whip_agent(
+            box,
+            client,
+            'What commands (executables) are available in this sandbox? Show them all, split by commas.',
+        )
+    finally:
+        await stack.aclose()
 
 
 if __name__ == '__main__':

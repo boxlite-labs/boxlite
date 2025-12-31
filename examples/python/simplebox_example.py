@@ -88,7 +88,7 @@ async def example_working_directory():
 
     async with boxlite.SimpleBox(
             image="python:alpine",
-            working_dir="/workspace",
+            working_dir="/tmp",
             env=[("USER", "alice"), ("PROJECT", "data-pipeline")]
     ) as box:
         print(f"✓ Container with custom config: {box.id}")

@@ -248,9 +248,9 @@ dist\:node: runtime
 	@echo "📦 Creating tarballs..."
 	@cd sdks/node && npm pack
 	@for pkg in sdks/node/npm/*; do \
-		if [ -d "$$pkg" ]; then \
+		if [ -d "$$pkg" ] && [ -f "$$pkg"/boxlite.*.node ]; then \
 			echo "   Packing $$(basename $$pkg)..."; \
-			cd "$$pkg" && npm pack && mv *.tgz ../.. && cd ../..; \
+			(cd "$(CURDIR)/$$pkg" && npm pack && mv *.tgz $(CURDIR)/sdks/node/) || true; \
 		fi; \
 	done
 

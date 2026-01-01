@@ -1,4 +1,4 @@
-.PHONY: help clean setup package dev\:python dist dist\:python test fmt fmt-check guest runtime runtime-debug
+.PHONY: help clean setup package dev\:python dev\:node dist dist\:python dist\:node test fmt fmt-check guest runtime runtime-debug
 
 # Ensure cargo is in PATH (source ~/.cargo/env if it exists and cargo is not found)
 SHELL := /bin/bash
@@ -31,9 +31,13 @@ help:
 	@echo ""
 	@echo "  Local Development:"
 	@echo "    make dev:python     - Build and install Python SDK locally (debug mode)"
+	@echo "    make dev:node       - Build and link Node.js SDK locally (debug mode)"
 	@echo ""
 	@echo "  Python Distribution:"
 	@echo "    make dist:python    - Build portable wheel with cibuildwheel (auto-detects platform)"
+	@echo ""
+	@echo "  Node.js Distribution:"
+	@echo "    make dist:node      - Build npm package with napi-rs (auto-detects platform)"
 	@echo ""
 	@echo "  Library Distribution:"
 	@echo "    make package        - Package libboxlite for current platform"
@@ -130,6 +134,135 @@ dev\:python: runtime-debug
 
 	@echo "🔨 Building wheel with maturin..."
 	@. .venv/bin/activate && cd sdks/python && maturin develop
+
+# Build Node.js SDK locally with napi-rs
+dev\:node: runtime-debug
+	@echo "📦 Building Node.js SDK locally..."
+	@cd sdks/node && npm install
+
+	@echo "🔨 Building native addon with napi-rs (debug)..."
+	@cd sdks/node && npx napi build --platform
+
+	@echo "📦 Building TypeScript..."
+	@cd sdks/node && npm run build
+
+	@echo "🔗 Adding rpath to native module..."
+	@if [ "$$(uname)" = "Darwin" ]; then \
+		NATIVE_MODULE=$$(find sdks/node -maxdepth 1 -name "boxlite.darwin-*.node" -type f | head -1); \
+		if [ -n "$$NATIVE_MODULE" ]; then \
+			install_name_tool -add_rpath @loader_path/runtime "$$NATIVE_MODULE" 2>/dev/null || true; \
+			echo "✅ rpath added to $$NATIVE_MODULE"; \
+		fi; \
+	fi
+
+	@echo "📦 Creating platform package for current platform..."
+	@if [ "$$(uname)" = "Darwin" ]; then \
+		NATIVE_MODULE=$$(find sdks/node -maxdepth 1 -name "boxlite.darwin-*.node" -type f | head -1); \
+		if [ -n "$$NATIVE_MODULE" ]; then \
+			PLATFORM_DIR=$$(echo $$(basename $$NATIVE_MODULE) | sed 's/boxlite\.\(.*\)\.node/\1/'); \
+			PKG_DIR="sdks/node/npm/$$PLATFORM_DIR"; \
+			mkdir -p "$$PKG_DIR"; \
+			cp "$$NATIVE_MODULE" "$$PKG_DIR/"; \
+			echo "✅ Copied $$NATIVE_MODULE to $$PKG_DIR/"; \
+		fi; \
+	elif [ "$$(uname)" = "Linux" ]; then \
+		NATIVE_MODULE=$$(find sdks/node -maxdepth 1 -name "boxlite.linux-*.node" -type f | head -1); \
+		if [ -n "$$NATIVE_MODULE" ]; then \
+			PLATFORM_DIR=$$(echo $$(basename $$NATIVE_MODULE) | sed 's/boxlite\.\(.*\)\.node/\1/'); \
+			PKG_DIR="sdks/node/npm/$$PLATFORM_DIR"; \
+			mkdir -p "$$PKG_DIR"; \
+			cp "$$NATIVE_MODULE" "$$PKG_DIR/"; \
+			echo "✅ Copied $$NATIVE_MODULE to $$PKG_DIR/"; \
+		fi; \
+	fi
+
+	@echo "📦 Copying runtime to platform package..."
+	@for pkg in sdks/node/npm/*; do \
+		if [ -d "$$pkg" ] && [ -f "$$pkg"/boxlite.*.node ]; then \
+			echo "   Copying runtime to $$pkg"; \
+			rm -rf "$$pkg/runtime"; \
+			cp -a $(CURDIR)/target/boxlite-runtime "$$pkg/runtime"; \
+		fi; \
+	done
+
+	@echo "✅ Node.js SDK built successfully"
+	@echo "   Main package: @boxlite/core"
+	@echo "   Platform package: $$(find sdks/node/npm -type d -maxdepth 1 -mindepth 1 | head -1 | xargs basename)"
+	@echo "   Run: cd sdks/node && npm link"
+
+dist\:node: runtime
+	@echo "📦 Building Node.js distribution packages..."
+	@cd sdks/node && npm install
+
+	@echo "🔨 Building native addon with napi-rs (release)..."
+	@cd sdks/node && npx napi build --platform --release
+
+	@echo "📦 Building TypeScript..."
+	@cd sdks/node && npm run build
+
+	@echo "🔗 Adding rpath to native module..."
+	@if [ "$$(uname)" = "Darwin" ]; then \
+		NATIVE_MODULE=$$(find sdks/node -maxdepth 1 -name "boxlite.darwin-*.node" -type f | head -1); \
+		if [ -n "$$NATIVE_MODULE" ]; then \
+			install_name_tool -add_rpath @loader_path/runtime "$$NATIVE_MODULE" 2>/dev/null || true; \
+			echo "✅ rpath added to $$NATIVE_MODULE"; \
+		fi; \
+	elif [ "$$(uname)" = "Linux" ]; then \
+		NATIVE_MODULE=$$(find sdks/node -maxdepth 1 -name "boxlite.linux-*.node" -type f | head -1); \
+		if [ -n "$$NATIVE_MODULE" ]; then \
+			patchelf --set-rpath '$$ORIGIN/runtime' "$$NATIVE_MODULE" 2>/dev/null || true; \
+			echo "✅ rpath added to $$NATIVE_MODULE"; \
+		fi; \
+	fi
+
+	@echo "📦 Creating platform package for current platform..."
+	@if [ "$$(uname)" = "Darwin" ]; then \
+		NATIVE_MODULE=$$(find sdks/node -maxdepth 1 -name "boxlite.darwin-*.node" -type f | head -1); \
+		if [ -n "$$NATIVE_MODULE" ]; then \
+			PLATFORM_DIR=$$(echo $$(basename $$NATIVE_MODULE) | sed 's/boxlite\.\(.*\)\.node/\1/'); \
+			PKG_DIR="sdks/node/npm/$$PLATFORM_DIR"; \
+			mkdir -p "$$PKG_DIR"; \
+			cp "$$NATIVE_MODULE" "$$PKG_DIR/"; \
+			echo "✅ Copied $$NATIVE_MODULE to $$PKG_DIR/"; \
+		fi; \
+	elif [ "$$(uname)" = "Linux" ]; then \
+		NATIVE_MODULE=$$(find sdks/node -maxdepth 1 -name "boxlite.linux-*.node" -type f | head -1); \
+		if [ -n "$$NATIVE_MODULE" ]; then \
+			PLATFORM_DIR=$$(echo $$(basename $$NATIVE_MODULE) | sed 's/boxlite\.\(.*\)\.node/\1/'); \
+			PKG_DIR="sdks/node/npm/$$PLATFORM_DIR"; \
+			mkdir -p "$$PKG_DIR"; \
+			cp "$$NATIVE_MODULE" "$$PKG_DIR/"; \
+			echo "✅ Copied $$NATIVE_MODULE to $$PKG_DIR/"; \
+		fi; \
+	fi
+
+	@echo "📦 Copying runtime to platform packages..."
+	@for pkg in sdks/node/npm/*; do \
+		if [ -d "$$pkg" ] && [ -f "$$pkg"/boxlite.*.node ]; then \
+			echo "   Copying runtime to $$(basename $$pkg)"; \
+			rm -rf "$$pkg/runtime"; \
+			cp -a $(CURDIR)/target/boxlite-runtime "$$pkg/runtime"; \
+		fi; \
+	done
+
+	@echo "📦 Creating tarballs..."
+	@cd sdks/node && npm pack
+	@for pkg in sdks/node/npm/*; do \
+		if [ -d "$$pkg" ]; then \
+			echo "   Packing $$(basename $$pkg)..."; \
+			cd "$$pkg" && npm pack && mv *.tgz ../.. && cd ../..; \
+		fi; \
+	done
+
+	@echo "✅ Node.js packages built successfully"
+	@echo "   Main package: @boxlite/core"
+	@echo "   Platform packages:"
+	@ls -1 sdks/node/npm/
+	@echo ""
+	@echo "   Tarballs:"
+	@ls -1h sdks/node/@boxlite-*.tgz 2>/dev/null || echo "   (Run from sdks/node to see tarballs)"
+	@echo ""
+	@echo "   Test with: cd examples/node && npm link @boxlite/core && node simplebox.js"
 
 # Run Rust tests (excludes guest and doctests)
 test:

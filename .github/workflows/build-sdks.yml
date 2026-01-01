@@ -1,0 +1,263 @@
+name: Build SDKs
+
+on:
+  push:
+    branches: [main, develop]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Build runtime once per platform
+  build-runtime:
+    name: Build Runtime (${{ matrix.platform.name }})
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: macos-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            artifact_name: runtime-macos-arm64
+          - name: linux-x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact_name: runtime-linux-x64
+          - name: linux-arm64
+            os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            artifact_name: runtime-linux-arm64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.platform.target }}
+
+      - name: Install platform dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install automake autoconf libtool
+
+      - name: Install platform dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            automake \
+            autoconf \
+            libtool \
+            musl-tools
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.platform.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Build BoxLite runtime
+        run: make runtime
+        env:
+          RUST_TARGET: ${{ matrix.platform.target }}
+
+      - name: Upload runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform.artifact_name }}
+          path: target/boxlite-runtime/
+          retention-days: 7
+          if-no-files-found: error
+
+  # Build Python SDK using runtime artifacts
+  build-python:
+    name: Build Python SDK (${{ matrix.platform.name }})
+    needs: build-runtime
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: macos-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            runtime_artifact: runtime-macos-arm64
+            cibw_build: cp310-macosx_arm64 cp311-macosx_arm64 cp312-macosx_arm64
+          - name: linux-x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            runtime_artifact: runtime-linux-x64
+            cibw_build: cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64
+          - name: linux-arm64
+            os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            runtime_artifact: runtime-linux-arm64
+            cibw_build: cp310-manylinux_aarch64 cp311-manylinux_aarch64 cp312-manylinux_aarch64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.platform.target }}
+
+      - name: Download runtime artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.platform.runtime_artifact }}
+          path: target/boxlite-runtime/
+
+      - name: Install cibuildwheel
+        run: pip install cibuildwheel
+
+      - name: Build Python wheels
+        run: |
+          cibuildwheel --only "${{ matrix.platform.cibw_build }}" sdks/python
+        env:
+          CIBW_ARCHS: auto64
+          CIBW_SKIP: "*-musllinux_*"
+
+      - name: Upload Python wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-wheels-${{ matrix.platform.name }}
+          path: wheelhouse/*.whl
+          retention-days: 7
+
+  # Build Node.js SDK using runtime artifacts
+  build-node:
+    name: Build Node.js SDK (${{ matrix.platform.name }})
+    needs: build-runtime
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: macos-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            runtime_artifact: runtime-macos-arm64
+          - name: linux-x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            runtime_artifact: runtime-linux-x64
+          - name: linux-arm64
+            os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            runtime_artifact: runtime-linux-arm64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.platform.target }}
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.platform.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Download runtime artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.platform.runtime_artifact }}
+          path: target/boxlite-runtime/
+
+      - name: Build Node.js package
+        run: make dist:node
+        env:
+          RUST_TARGET: ${{ matrix.platform.target }}
+
+      - name: Upload Node.js package
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-package-${{ matrix.platform.name }}
+          path: |
+            sdks/node/dist/
+            sdks/node/*.node
+            sdks/node/runtime/
+            sdks/node/package.json
+          retention-days: 7
+
+  # Publish to npm (on tags)
+  publish-npm:
+    name: Publish to npm
+    needs: build-node
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download all Node.js artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: node-package-*
+          path: artifacts/
+
+      - name: Prepare npm package
+        run: |
+          # TODO: Combine platform-specific artifacts into npm package
+          # This requires creating platform-specific packages or using postinstall scripts
+          echo "Package preparation logic here"
+
+      - name: Publish to npm
+        run: cd sdks/node && npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        if: false  # Disabled until package preparation is implemented
+
+  # Publish to PyPI (on tags)
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build-python
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download all Python wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: python-wheels-*
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true

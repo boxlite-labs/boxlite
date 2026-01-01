@@ -4,7 +4,7 @@ Embeddable VM runtime for secure, isolated code execution environments.
 
 **Think "SQLite for sandboxing"** - a lightweight library embedded directly in your application without requiring a daemon or root privileges.
 
-[![npm version](https://badge.fury.io/js/%40boxlite%2Fcore.svg)](https://badge.fury.io/js/@boxlite/core)
+[![npm version](https://badge.fury.io/js/%40boxlite%2Fcore.svg)](https://badge.fury.io/js/boxlite)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 ## Features
@@ -24,7 +24,7 @@ Embeddable VM runtime for secure, isolated code execution environments.
 ## Installation
 
 ```bash
-npm install @boxlite/core
+npm install boxlite
 ```
 
 **Requirements:**
@@ -40,7 +40,7 @@ npm install @boxlite/core
 ### JavaScript
 
 ```javascript
-const { SimpleBox } = require('@boxlite/core');
+const { SimpleBox } = require('boxlite');
 
 async function main() {
   const box = new SimpleBox({ image: 'alpine:latest' });
@@ -59,7 +59,7 @@ main();
 ### TypeScript
 
 ```typescript
-import { SimpleBox } from '@boxlite/core';
+import { SimpleBox } from 'boxlite';
 
 async function main() {
   const box = new SimpleBox({ image: 'alpine:latest' });
@@ -78,7 +78,7 @@ main();
 ### TypeScript 5.2+ (Async Disposal)
 
 ```typescript
-import { SimpleBox } from '@boxlite/core';
+import { SimpleBox } from 'boxlite';
 
 async function main() {
   await using box = new SimpleBox({ image: 'alpine:latest' });
@@ -97,7 +97,7 @@ main();
 Basic container for command execution.
 
 ```typescript
-import { SimpleBox } from '@boxlite/core';
+import { SimpleBox } from 'boxlite';
 
 const box = new SimpleBox({
   image: 'python:slim',
@@ -133,7 +133,7 @@ await box.stop();
 Python code execution sandbox.
 
 ```typescript
-import { CodeBox } from '@boxlite/core';
+import { CodeBox } from 'boxlite';
 
 const codebox = new CodeBox({
   image: 'python:slim',  // default
@@ -170,7 +170,7 @@ print(response.text)
 Browser automation with remote debugging.
 
 ```typescript
-import { BrowserBox } from '@boxlite/core';
+import { BrowserBox } from 'boxlite';
 
 const browser = new BrowserBox({
   browser: 'chromium',  // 'chromium', 'firefox', or 'webkit'
@@ -205,7 +205,7 @@ try {
 Desktop automation with web access.
 
 ```typescript
-import { ComputerBox } from '@boxlite/core';
+import { ComputerBox } from 'boxlite';
 
 const desktop = new ComputerBox({
   cpus: 2,
@@ -258,7 +258,7 @@ try {
 Interactive terminal sessions with PTY.
 
 ```typescript
-import { InteractiveBox } from '@boxlite/core';
+import { InteractiveBox } from 'boxlite';
 
 const box = new InteractiveBox({
   image: 'alpine:latest',
@@ -282,7 +282,7 @@ See [../../examples/node/](../../examples/node/) directory for complete examples
 
 ```bash
 # If installed via npm
-npm install @boxlite/core
+npm install boxlite
 node simplebox.js
 
 # If working from source
@@ -290,14 +290,14 @@ cd ../../sdks/node
 npm install && npm run build
 npm link
 cd ../../examples/node
-npm link @boxlite/core
+npm link boxlite
 node simplebox.js
 ```
 
 ## Error Handling
 
 ```typescript
-import { SimpleBox, ExecError, TimeoutError, ParseError } from '@boxlite/core';
+import { SimpleBox, ExecError, TimeoutError, ParseError } from 'boxlite';
 
 try {
   const box = new SimpleBox({ image: 'alpine:latest' });
@@ -330,7 +330,7 @@ npm run build
 # Link to examples
 npm link
 cd ../../examples/node
-npm link @boxlite/core
+npm link boxlite
 
 # Run examples
 node simplebox.js
@@ -351,7 +351,7 @@ import {
   type ExecResult,
   type Screenshot,
   type BrowserType
-} from '@boxlite/core';
+} from 'boxlite';
 ```
 
 ## Platform Requirements

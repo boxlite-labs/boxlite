@@ -8,7 +8,7 @@ If you installed BoxLite via npm:
 
 ```bash
 # Install BoxLite
-npm install @boxlite/core
+npm install boxlite
 
 # Run examples directly
 node simplebox.js
@@ -30,7 +30,7 @@ npm link
 
 # 3. Link to examples directory
 cd ../../examples/node
-npm link @boxlite/core
+npm link boxlite
 
 # 4. Run examples
 node simplebox.js

@@ -1,5 +1,5 @@
 {
-  "name": "@boxlite/core",
+  "name": "boxlite",
   "version": "0.1.0",
   "description": "BoxLite - Embeddable micro-VM runtime for secure, isolated code execution",
   "main": "dist/index.js",
@@ -12,20 +12,7 @@
     "build:debug": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "napi prepublish -t npm && npm run build",
-    "artifacts": "napi artifacts --npm-dir npm"
-  },
-  "napi": {
-    "binaryName": "boxlite",
-    "package": {
-      "name": "@boxlite"
-    },
-    "targets": [
-      "aarch64-apple-darwin",
-      "x86_64-apple-darwin",
-      "x86_64-unknown-linux-gnu",
-      "aarch64-unknown-linux-gnu"
-    ]
+    "prepublishOnly": "npm run build"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.0.0-alpha.62",
@@ -34,10 +21,10 @@
     "vitest": "^2.0.0"
   },
   "optionalDependencies": {
-    "@boxlite/darwin-arm64": "0.1.0",
-    "@boxlite/darwin-x64": "0.1.0",
-    "@boxlite/linux-x64": "0.1.0",
-    "@boxlite/linux-arm64": "0.1.0"
+    "boxlite-darwin-arm64": "0.1.0",
+    "boxlite-darwin-x64": "0.1.0",
+    "boxlite-linux-x64": "0.1.0",
+    "boxlite-linux-arm64": "0.1.0"
   },
   "keywords": [
     "boxlite",

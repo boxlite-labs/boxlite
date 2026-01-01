@@ -7,7 +7,7 @@
  * - Connecting with Puppeteer (optional)
  */
 
-const { BrowserBox } = require('@boxlite/core');
+const { BrowserBox } = require('boxlite');
 
 async function main() {
   console.log('=== BrowserBox Example ===\n');

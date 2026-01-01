@@ -8,7 +8,7 @@
  * - Proper cleanup
  */
 
-const { SimpleBox } = require('@boxlite/core');
+const { SimpleBox } = require('boxlite');
 
 async function main() {
   console.log('=== SimpleBox Example ===\n');

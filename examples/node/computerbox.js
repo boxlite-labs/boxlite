@@ -9,7 +9,7 @@
  * - Web browser access
  */
 
-const { ComputerBox } = require('@boxlite/core');
+const { ComputerBox } = require('boxlite');
 const fs = require('fs');
 
 async function main() {

@@ -24,7 +24,7 @@ import { join } from 'path';
 
 // Load platform-specific native binding
 // @node-rs/helper automatically selects the right platform package
-const native = loadBinding(join(__dirname, '..'), 'boxlite', '@boxlite/core');
+const native = loadBinding(join(__dirname, '..'), 'boxlite', 'boxlite');
 
 // Re-export native bindings
 export const { JsBoxlite } = native;

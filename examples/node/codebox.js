@@ -8,7 +8,7 @@
  * - Error handling
  */
 
-const { CodeBox } = require('@boxlite/core');
+const { CodeBox } = require('boxlite');
 
 async function main() {
   console.log('=== CodeBox Example ===\n');

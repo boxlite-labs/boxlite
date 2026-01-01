@@ -1,0 +1,31 @@
+{
+  "name": "boxlite",
+  "version": "1.0.0",
+  "description": "[![Build](https://github.com/boxlite-labs/boxlite/actions/workflows/build-wheels.yml/badge.svg)](https://github.com/boxlite-labs/boxlite/actions/workflows/build-wheels.yml) [![Lint](https://github.com/boxlite-labs/boxlite/actions/workflows/lint.yml/badge.svg)](https://github.com/boxlite-labs/boxlite/actions/workflows/lint.yml) [![PyPI](https://img.shields.io/pypi/v/boxlite.svg)](https://pypi.org/project/boxlite/) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "example": "examples"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/boxlite-labs/boxlite.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/boxlite-labs/boxlite/issues"
+  },
+  "homepage": "https://github.com/boxlite-labs/boxlite#readme",
+  "dependencies": {
+    "@boxlite/core": "file:sdks/node/boxlite-core-0.1.0.tgz",
+    "@boxlite/darwin-arm64": "file:sdks/node/boxlite-darwin-arm64-0.1.0.tgz",
+    "boxlite": "file:sdks/node/boxlite-0.1.0.tgz",
+    "boxlite-darwin-arm64": "file:sdks/node/boxlite-darwin-arm64-0.1.0.tgz"
+  }
+}

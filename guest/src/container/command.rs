@@ -254,7 +254,13 @@ impl ContainerCommand {
         let pid = self.build_and_spawn(pipes).await?;
 
         tracing::debug!(pid = pid.as_raw(), "Spawned with pipes");
-        Ok(ExecHandle::new(pid, stdin_write, stdout_read, stderr_read))
+        // Non-PTY mode: stdout and stderr are separate pipes
+        Ok(ExecHandle::new(
+            pid,
+            stdin_write,
+            stdout_read,
+            Some(stderr_read),
+        ))
     }
 
     /// Spawn process with PTY (interactive mode).
@@ -387,13 +393,17 @@ impl ContainerCommand {
 
 /// Create ExecHandle with PTY.
 ///
-/// Sets terminal window size, reconciles PTY master FD as stdin/stdout/stderr,
+/// Sets terminal window size, reconciles PTY master FD as stdin/stdout,
 /// and stores PTY controller for later resizing.
+///
+/// In PTY mode, stderr is merged into stdout at the PTY level - there is only
+/// ONE reader from the PTY master to avoid race conditions.
 fn create_pty_child(pid: Pid, pty_master: OwnedFd, config: PtyConfig) -> BoxliteResult<ExecHandle> {
     set_pty_window_size(&pty_master, &config)?;
-    let (stdin, stdout, stderr) = reconcile_pty_fds(&pty_master)?;
+    let (stdin, stdout) = reconcile_pty_fds(&pty_master)?;
 
-    let mut child = ExecHandle::new(pid, stdin, stdout, stderr);
+    // PTY mode: stderr is None (merged into stdout)
+    let mut child = ExecHandle::new(pid, stdin, stdout, None);
     let pty_controller = pty_master_to_file(pty_master);
     child.set_pty(pty_controller, config);
 
@@ -430,12 +440,11 @@ fn set_pty_window_size(pty_master: &OwnedFd, config: &PtyConfig) -> BoxliteResul
     Ok(())
 }
 
-/// Reconcile PTY master FD as stdin/stdout/stderr.
+/// Duplicate PTY master FD for stdin and stdout only.
 ///
-/// Duplicates the PTY master FD three times so it can be used as separate
-/// stdin, stdout, and stderr streams. This allows reusing existing pipe-based
-/// I/O forwarding code.
-fn reconcile_pty_fds(pty_master: &OwnedFd) -> BoxliteResult<(OwnedFd, OwnedFd, OwnedFd)> {
+/// In PTY mode, stderr is merged into stdout - we only create ONE reader
+/// from the PTY master to avoid race conditions. See `create_pty_child`.
+fn reconcile_pty_fds(pty_master: &OwnedFd) -> BoxliteResult<(OwnedFd, OwnedFd)> {
     use nix::unistd::dup;
     use std::os::fd::{AsRawFd, FromRawFd};
 
@@ -443,14 +452,10 @@ fn reconcile_pty_fds(pty_master: &OwnedFd) -> BoxliteResult<(OwnedFd, OwnedFd, O
         .map_err(|e| BoxliteError::Internal(format!("Failed to dup PTY for stdin: {}", e)))?;
     let stdout_fd = dup(pty_master.as_raw_fd())
         .map_err(|e| BoxliteError::Internal(format!("Failed to dup PTY for stdout: {}", e)))?;
-    let stderr_fd = dup(pty_master.as_raw_fd())
-        .map_err(|e| BoxliteError::Internal(format!("Failed to dup PTY for stderr: {}", e)))?;
 
-    Ok((
-        unsafe { OwnedFd::from_raw_fd(stdin_fd) },
-        unsafe { OwnedFd::from_raw_fd(stdout_fd) },
-        unsafe { OwnedFd::from_raw_fd(stderr_fd) },
-    ))
+    Ok((unsafe { OwnedFd::from_raw_fd(stdin_fd) }, unsafe {
+        OwnedFd::from_raw_fd(stdout_fd)
+    }))
 }
 
 /// Convert OwnedFd to File for PTY controller.

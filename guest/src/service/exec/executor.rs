@@ -123,11 +123,12 @@ fn spawn_with_pipes(req: &ExecRequest) -> BoxliteResult<ExecHandle> {
     drop(stdout_write);
     drop(stderr_write);
 
+    // Non-PTY mode: stdout and stderr are separate pipes
     Ok(ExecHandle::new(
         Pid::from_raw(pid as i32),
         stdin_write,
         stdout_read,
-        stderr_read,
+        Some(stderr_read),
     ))
 }
 
@@ -205,19 +206,21 @@ fn spawn_with_pty(req: &ExecRequest, config: PtyConfig) -> BoxliteResult<ExecHan
     // Close original slave in parent (child has its dup'd copies after fork)
     drop(slave);
 
-    // Duplicate master FD for stdin/stdout/stderr streams
+    // Duplicate master FD for stdin and stdout only.
+    // In PTY mode, stderr is merged into stdout at the PTY level - there is only
+    // ONE reader from the PTY master. Creating separate readers would cause a race
+    // condition where data could be captured by the "wrong" reader, resulting in
+    // out-of-order output.
     let stdin_fd = dup(master.as_raw_fd())
         .map_err(|e| BoxliteError::Internal(format!("Failed to dup PTY for stdin: {}", e)))?;
     let stdout_fd = dup(master.as_raw_fd())
         .map_err(|e| BoxliteError::Internal(format!("Failed to dup PTY for stdout: {}", e)))?;
-    let stderr_fd = dup(master.as_raw_fd())
-        .map_err(|e| BoxliteError::Internal(format!("Failed to dup PTY for stderr: {}", e)))?;
 
     let stdin = unsafe { OwnedFd::from_raw_fd(stdin_fd) };
     let stdout = unsafe { OwnedFd::from_raw_fd(stdout_fd) };
-    let stderr = unsafe { OwnedFd::from_raw_fd(stderr_fd) };
 
-    let mut handle = ExecHandle::new(Pid::from_raw(pid as i32), stdin, stdout, stderr);
+    // PTY mode: stderr is None (merged into stdout)
+    let mut handle = ExecHandle::new(Pid::from_raw(pid as i32), stdin, stdout, None);
 
     // Keep master FD for resize operations
     let pty_controller = {

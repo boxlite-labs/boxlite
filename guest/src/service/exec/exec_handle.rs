@@ -241,13 +241,22 @@ pub struct ExecHandle {
 }
 
 impl ExecHandle {
-    /// Create new execution handle
-    pub fn new(pid: Pid, stdin: OwnedFd, stdout: OwnedFd, stderr: OwnedFd) -> Self {
+    /// Create new execution handle.
+    ///
+    /// # Arguments
+    ///
+    /// * `pid` - Process ID
+    /// * `stdin` - Stdin file descriptor
+    /// * `stdout` - Stdout file descriptor
+    /// * `stderr` - Stderr file descriptor, or `None` in PTY mode (merged into stdout)
+    pub fn new(pid: Pid, stdin: OwnedFd, stdout: OwnedFd, stderr: Option<OwnedFd>) -> Self {
         Self {
             pid,
             stdin: Some(ExecStdin::new(stdin)),
             stdout: Some(ExecStdout::new(stdout)),
-            stderr: Some(ExecStderr::new(stderr)),
+            // In PTY mode, stderr is None because stdout/stderr are merged
+            // at the PTY level (single reader from PTY master)
+            stderr: stderr.map(ExecStderr::new),
             pty_controller: None,
             pty_config: None,
         }

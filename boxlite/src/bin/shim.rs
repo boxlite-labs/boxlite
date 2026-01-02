@@ -13,10 +13,12 @@
 //! shim subprocess, not the main boxlite process.
 
 use std::path::Path;
+use std::thread;
+use std::time::Duration;
 
 use boxlite::{
     runtime::layout,
-    util,
+    util::{self, is_process_alive},
     vmm::{self, InstanceSpec, VmmConfig, VmmKind},
 };
 use boxlite_shared::errors::BoxliteResult;
@@ -146,6 +148,10 @@ fn main() -> BoxliteResult<()> {
         tracing::debug!("Leaked gvproxy instance for VM lifetime");
     }
 
+    // Save detach/parent_pid before config is moved into engine.create()
+    let detach = config.detach;
+    let parent_pid = config.parent_pid;
+
     // Initialize engine options with defaults
     let options = VmmConfig::default();
 
@@ -166,6 +172,18 @@ fn main() -> BoxliteResult<()> {
 
     tracing::info!("Box instance created, handing over process control to Box");
 
+    // Start parent watchdog if detach=false
+    // Watchdog monitors parent process and exits gracefully when parent dies
+    if !detach {
+        start_parent_watchdog(parent_pid);
+        tracing::info!(
+            parent_pid = parent_pid,
+            "Parent watchdog started (detach=false)"
+        );
+    } else {
+        tracing::info!("Running in detached mode (detach=true)");
+    }
+
     // Hand over process control to Box instance
     // This may never return (process takeover)
     match instance.enter() {
@@ -178,4 +196,53 @@ fn main() -> BoxliteResult<()> {
             Err(e)
         }
     }
+}
+
+/// Timeout for graceful shutdown before force kill (in seconds).
+const GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 5;
+
+/// Start a watchdog thread that monitors the parent process.
+///
+/// If the parent process exits (clean exit or crash), this triggers shutdown:
+/// 1. First attempts graceful shutdown via SIGTERM
+/// 2. Waits for timeout
+/// 3. Force kills via SIGKILL if still running
+///
+/// This ensures orphan boxes don't accumulate when `detach=false`.
+fn start_parent_watchdog(parent_pid: u32) {
+    thread::spawn(move || {
+        let self_pid = std::process::id();
+
+        loop {
+            thread::sleep(Duration::from_secs(1));
+
+            if !is_process_alive(parent_pid) {
+                tracing::info!(
+                    parent_pid = parent_pid,
+                    "Parent process exited, initiating graceful shutdown"
+                );
+
+                // Step 1: Try graceful shutdown via SIGTERM
+                tracing::info!("Sending SIGTERM for graceful shutdown");
+                unsafe {
+                    libc::kill(self_pid as i32, libc::SIGTERM);
+                }
+
+                // Step 2: Wait for graceful shutdown timeout
+                thread::sleep(Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS));
+
+                // Step 3: If still running, force kill
+                tracing::warn!(
+                    timeout_secs = GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+                    "Graceful shutdown timed out, forcing exit with SIGKILL"
+                );
+                unsafe {
+                    libc::kill(self_pid as i32, libc::SIGKILL);
+                }
+
+                // Fallback: if SIGKILL somehow didn't work, exit forcefully
+                std::process::exit(137); // 128 + 9 (SIGKILL)
+            }
+        }
+    });
 }

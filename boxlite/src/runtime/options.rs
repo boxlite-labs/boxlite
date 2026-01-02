@@ -64,9 +64,25 @@ pub struct BoxOptions {
     /// with `runtime.get(box_id)`.
     #[serde(default = "default_auto_remove")]
     pub auto_remove: bool,
+
+    /// Whether the box should continue running when the parent process exits.
+    ///
+    /// When false (default), the box will automatically stop when the process
+    /// that created it exits. This ensures orphan boxes don't accumulate.
+    /// Similar to running a process in the foreground.
+    ///
+    /// When true, the box runs independently and survives parent process exit.
+    /// The box can be reattached using `runtime.get(box_id)`. Similar to
+    /// Docker's `-d` (detach) flag.
+    #[serde(default = "default_detach")]
+    pub detach: bool,
 }
 
 fn default_auto_remove() -> bool {
+    true
+}
+
+fn default_detach() -> bool {
     false
 }
 
@@ -84,13 +100,31 @@ impl Default for BoxOptions {
             ports: Vec::new(),
             isolate_mounts: false,
             auto_remove: default_auto_remove(),
+            detach: default_detach(),
         }
     }
 }
 
 impl BoxOptions {
     /// Sanitize and validate options.
+    ///
+    /// Validates option combinations:
+    /// - `auto_remove=true` with `detach=true` is invalid (detached boxes need manual lifecycle control)
+    /// - `isolate_mounts=true` is only supported on Linux
     pub fn sanitize(&self) -> BoxliteResult<()> {
+        // Validate auto_remove + detach combination
+        // A detached box that auto-removes doesn't make practical sense:
+        // - detach=true: box survives parent exit
+        // - auto_remove=true: box removed on stop
+        // This combination is confusing - detached boxes should have manual lifecycle control
+        if self.auto_remove && self.detach {
+            return Err(boxlite_shared::errors::BoxliteError::Config(
+                "auto_remove=true is incompatible with detach=true. \
+                 Detached boxes should use auto_remove=false for manual lifecycle control."
+                    .to_string(),
+            ));
+        }
+
         #[cfg(not(target_os = "linux"))]
         if self.isolate_mounts {
             return Err(boxlite_shared::errors::BoxliteError::Unsupported(
@@ -153,4 +187,116 @@ pub struct PortSpec {
     #[serde(default = "default_protocol")]
     pub protocol: PortProtocol,
     pub host_ip: Option<String>, // Optional bind IP, defaults to 0.0.0.0/:: if None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_box_options_defaults() {
+        let opts = BoxOptions::default();
+        assert!(opts.auto_remove, "auto_remove should default to true");
+        assert!(!opts.detach, "detach should default to false");
+    }
+
+    #[test]
+    fn test_box_options_serde_defaults() {
+        // Test that serde uses correct defaults for missing fields
+        // Must include all required fields that don't have serde defaults
+        let json = r#"{
+            "rootfs": {"Image": "alpine:latest"},
+            "env": [],
+            "volumes": [],
+            "network": "Isolated",
+            "ports": []
+        }"#;
+        let opts: BoxOptions = serde_json::from_str(json).unwrap();
+        assert!(
+            opts.auto_remove,
+            "auto_remove should default to true via serde"
+        );
+        assert!(!opts.detach, "detach should default to false via serde");
+    }
+
+    #[test]
+    fn test_box_options_serde_explicit_values() {
+        let json = r#"{
+            "rootfs": {"Image": "alpine"},
+            "env": [],
+            "volumes": [],
+            "network": "Isolated",
+            "ports": [],
+            "auto_remove": false,
+            "detach": true
+        }"#;
+        let opts: BoxOptions = serde_json::from_str(json).unwrap();
+        assert!(
+            !opts.auto_remove,
+            "explicit auto_remove=false should be respected"
+        );
+        assert!(opts.detach, "explicit detach=true should be respected");
+    }
+
+    #[test]
+    fn test_box_options_roundtrip() {
+        let opts = BoxOptions {
+            auto_remove: false,
+            detach: true,
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&opts).unwrap();
+        let opts2: BoxOptions = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(opts.auto_remove, opts2.auto_remove);
+        assert_eq!(opts.detach, opts2.detach);
+    }
+
+    #[test]
+    fn test_sanitize_auto_remove_detach_incompatible() {
+        // auto_remove=true + detach=true is invalid
+        let opts = BoxOptions {
+            auto_remove: true,
+            detach: true,
+            ..Default::default()
+        };
+        let result = opts.sanitize();
+        assert!(
+            result.is_err(),
+            "auto_remove=true + detach=true should fail"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("incompatible"),
+            "Error should mention incompatibility"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_valid_combinations() {
+        // auto_remove=true, detach=false (default) - valid
+        let opts1 = BoxOptions {
+            auto_remove: true,
+            detach: false,
+            ..Default::default()
+        };
+        assert!(opts1.sanitize().is_ok());
+
+        // auto_remove=false, detach=true - valid
+        let opts2 = BoxOptions {
+            auto_remove: false,
+            detach: true,
+            ..Default::default()
+        };
+        assert!(opts2.sanitize().is_ok());
+
+        // auto_remove=false, detach=false - valid
+        let opts3 = BoxOptions {
+            auto_remove: false,
+            detach: false,
+            ..Default::default()
+        };
+        assert!(opts3.sanitize().is_ok());
+    }
 }

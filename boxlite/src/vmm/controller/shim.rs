@@ -197,6 +197,8 @@ impl VmmController for ShimController {
             network_backend_endpoint: None, // Will be populated by shim (not serialized)
             home_dir: config.home_dir.clone(),
             console_output: config.console_output.clone(),
+            detach: config.detach,
+            parent_pid: config.parent_pid,
         };
 
         // Serialize the config for passing to subprocess

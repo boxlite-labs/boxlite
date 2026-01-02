@@ -63,6 +63,8 @@ pub(crate) struct PyBoxOptions {
     pub(crate) ports: Vec<PyPortSpec>,
     #[pyo3(get, set)]
     pub(crate) auto_remove: Option<bool>,
+    #[pyo3(get, set)]
+    pub(crate) detach: Option<bool>,
 }
 
 #[pymethods]
@@ -80,6 +82,7 @@ impl PyBoxOptions {
         network=None,
         ports=vec![],
         auto_remove=None,
+        detach=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -94,6 +97,7 @@ impl PyBoxOptions {
         network: Option<String>,
         ports: Vec<PyPortSpec>,
         auto_remove: Option<bool>,
+        detach: Option<bool>,
     ) -> Self {
         Self {
             image,
@@ -107,6 +111,7 @@ impl PyBoxOptions {
             network,
             ports,
             auto_remove,
+            detach,
         }
     }
 
@@ -158,6 +163,10 @@ impl From<PyBoxOptions> for BoxOptions {
 
         if let Some(auto_remove) = py_opts.auto_remove {
             opts.auto_remove = auto_remove;
+        }
+
+        if let Some(detach) = py_opts.detach {
+            opts.detach = detach;
         }
 
         opts

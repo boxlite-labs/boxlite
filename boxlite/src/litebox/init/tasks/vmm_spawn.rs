@@ -218,6 +218,8 @@ async fn build_config(
         network_backend_endpoint: None,
         home_dir: home_dir.to_path_buf(),
         console_output: None,
+        detach: options.detach,
+        parent_pid: std::process::id(),
     };
 
     Ok((instance_spec, volume_mgr, rootfs_init, container_mounts))

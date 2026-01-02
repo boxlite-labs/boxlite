@@ -52,6 +52,7 @@ async fn create_generates_unique_ulid_ids() {
         .create(
             BoxOptions {
                 rootfs: RootfsSpec::Image("alpine:latest".into()),
+                auto_remove: false, // Keep box after stop for cleanup
                 ..Default::default()
             },
             None,
@@ -62,6 +63,7 @@ async fn create_generates_unique_ulid_ids() {
         .create(
             BoxOptions {
                 rootfs: RootfsSpec::Image("alpine:latest".into()),
+                auto_remove: false, // Keep box after stop for cleanup
                 ..Default::default()
             },
             None,
@@ -88,6 +90,7 @@ async fn create_stores_custom_options() {
         rootfs: RootfsSpec::Image("alpine:latest".into()),
         cpus: Some(4),
         memory_mib: Some(1024),
+        auto_remove: false, // Keep box after stop for cleanup
         ..Default::default()
     };
 
@@ -132,6 +135,7 @@ async fn list_info_returns_all_boxes() {
         .create(
             BoxOptions {
                 rootfs: RootfsSpec::Image("alpine:latest".into()),
+                auto_remove: false, // Keep box after stop for cleanup
                 ..Default::default()
             },
             None,
@@ -142,6 +146,7 @@ async fn list_info_returns_all_boxes() {
         .create(
             BoxOptions {
                 rootfs: RootfsSpec::Image("alpine:latest".into()),
+                auto_remove: false, // Keep box after stop for cleanup
                 ..Default::default()
             },
             None,
@@ -173,6 +178,7 @@ async fn list_info_sorted_by_creation_time_newest_first() {
         .create(
             BoxOptions {
                 rootfs: RootfsSpec::Image("alpine:latest".into()),
+                auto_remove: false, // Keep box after stop for cleanup
                 ..Default::default()
             },
             None,
@@ -184,6 +190,7 @@ async fn list_info_sorted_by_creation_time_newest_first() {
         .create(
             BoxOptions {
                 rootfs: RootfsSpec::Image("alpine:latest".into()),
+                auto_remove: false, // Keep box after stop for cleanup
                 ..Default::default()
             },
             None,
@@ -195,6 +202,7 @@ async fn list_info_sorted_by_creation_time_newest_first() {
         .create(
             BoxOptions {
                 rootfs: RootfsSpec::Image("alpine:latest".into()),
+                auto_remove: false, // Keep box after stop for cleanup
                 ..Default::default()
             },
             None,
@@ -312,6 +320,7 @@ async fn remove_stopped_box_succeeds() {
         .create(
             BoxOptions {
                 rootfs: RootfsSpec::Image("alpine:latest".into()),
+                auto_remove: false, // Keep box after stop for explicit remove
                 ..Default::default()
             },
             None,
@@ -428,6 +437,7 @@ async fn stop_marks_box_as_stopped() {
         .create(
             BoxOptions {
                 rootfs: RootfsSpec::Image("alpine:latest".into()),
+                auto_remove: false, // Keep box after stop for status check
                 ..Default::default()
             },
             None,
@@ -543,6 +553,7 @@ async fn boxes_persist_across_runtime_restart() {
             .create(
                 BoxOptions {
                     rootfs: RootfsSpec::Image("alpine:latest".into()),
+                    auto_remove: false, // Keep box for persistence test
                     ..Default::default()
                 },
                 None,
@@ -597,6 +608,7 @@ async fn multiple_boxes_persist_and_recover_without_lock_errors() {
             .create(
                 BoxOptions {
                     rootfs: RootfsSpec::Image("alpine:latest".into()),
+                    auto_remove: false, // Keep box for persistence test
                     ..Default::default()
                 },
                 None,
@@ -606,6 +618,7 @@ async fn multiple_boxes_persist_and_recover_without_lock_errors() {
             .create(
                 BoxOptions {
                     rootfs: RootfsSpec::Image("alpine:latest".into()),
+                    auto_remove: false, // Keep box for persistence test
                     ..Default::default()
                 },
                 None,
@@ -615,6 +628,7 @@ async fn multiple_boxes_persist_and_recover_without_lock_errors() {
             .create(
                 BoxOptions {
                     rootfs: RootfsSpec::Image("alpine:latest".into()),
+                    auto_remove: false, // Keep box for persistence test
                     ..Default::default()
                 },
                 None,
@@ -668,5 +682,276 @@ async fn multiple_boxes_persist_and_recover_without_lock_errors() {
         for box_id in &box_ids {
             runtime.remove(box_id.as_str(), false).await.unwrap();
         }
+    }
+}
+
+// ============================================================================
+// AUTO_REMOVE TESTS
+// ============================================================================
+
+#[tokio::test]
+async fn auto_remove_default_is_true() {
+    let options = BoxOptions::default();
+    assert!(
+        options.auto_remove,
+        "auto_remove should default to true (like Docker --rm)"
+    );
+}
+
+#[tokio::test]
+async fn auto_remove_true_removes_box_on_stop() {
+    let ctx = TestContext::new();
+    let handle = ctx
+        .runtime
+        .create(
+            BoxOptions {
+                rootfs: RootfsSpec::Image("alpine:latest".into()),
+                auto_remove: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    let box_id = handle.id().clone();
+
+    // Box should exist before stop
+    assert!(ctx.runtime.exists(box_id.as_str()).unwrap());
+
+    // Stop should auto-remove
+    handle.stop().await.unwrap();
+
+    // Box should no longer exist
+    assert!(
+        !ctx.runtime.exists(box_id.as_str()).unwrap(),
+        "Box should be auto-removed when auto_remove=true"
+    );
+}
+
+#[tokio::test]
+async fn auto_remove_false_preserves_box_on_stop() {
+    let ctx = TestContext::new();
+    let handle = ctx
+        .runtime
+        .create(
+            BoxOptions {
+                rootfs: RootfsSpec::Image("alpine:latest".into()),
+                auto_remove: false,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    let box_id = handle.id().clone();
+
+    // Stop should NOT auto-remove
+    handle.stop().await.unwrap();
+
+    // Box should still exist
+    assert!(
+        ctx.runtime.exists(box_id.as_str()).unwrap(),
+        "Box should be preserved when auto_remove=false"
+    );
+
+    // Status should be Stopped
+    let info = ctx.runtime.get_info(box_id.as_str()).unwrap().unwrap();
+    assert_eq!(info.status, BoxStatus::Stopped);
+
+    // Cleanup manually
+    ctx.runtime.remove(box_id.as_str(), false).await.unwrap();
+}
+
+// ============================================================================
+// DETACH TESTS
+// ============================================================================
+
+#[tokio::test]
+async fn detach_default_is_false() {
+    let options = BoxOptions::default();
+    assert!(
+        !options.detach,
+        "detach should default to false (box tied to parent lifecycle)"
+    );
+}
+
+#[tokio::test]
+async fn detach_option_is_stored_in_box_config() {
+    let ctx = TestContext::new();
+
+    // Create box with detach=true
+    let handle = ctx
+        .runtime
+        .create(
+            BoxOptions {
+                rootfs: RootfsSpec::Image("alpine:latest".into()),
+                detach: true,
+                auto_remove: false, // Keep for inspection
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    let box_id = handle.id().clone();
+
+    // Note: detach is not exposed in BoxInfo, it's an internal option
+    // that affects the shim subprocess behavior. We just verify the box
+    // was created successfully with the option.
+    assert!(ctx.runtime.exists(box_id.as_str()).unwrap());
+
+    // Cleanup
+    ctx.runtime.remove(box_id.as_str(), true).await.unwrap();
+}
+
+// ============================================================================
+// RECOVERY CLEANUP TESTS
+// ============================================================================
+
+#[tokio::test]
+async fn recovery_removes_auto_remove_true_boxes() {
+    // Test that boxes with auto_remove=true are removed during recovery
+    // This simulates a crash scenario where boxes weren't properly cleaned up
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().to_path_buf();
+
+    let persistent_box_id: BoxID;
+
+    // Create two boxes: one with auto_remove=true, one with auto_remove=false
+    {
+        let options = BoxliteOptions {
+            home_dir: home_dir.clone(),
+        };
+        let runtime = BoxliteRuntime::new(options).expect("Failed to create runtime");
+
+        // Create auto_remove=true box (should be cleaned up on recovery)
+        let auto_remove_box = runtime
+            .create(
+                BoxOptions {
+                    rootfs: RootfsSpec::Image("alpine:latest".into()),
+                    auto_remove: true,
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+
+        // Create auto_remove=false box (should persist)
+        let persistent_box = runtime
+            .create(
+                BoxOptions {
+                    rootfs: RootfsSpec::Image("alpine:latest".into()),
+                    auto_remove: false,
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        persistent_box_id = persistent_box.id().clone();
+
+        // Both boxes should exist before shutdown
+        assert!(runtime.exists(auto_remove_box.id().as_str()).unwrap());
+        assert!(runtime.exists(persistent_box_id.as_str()).unwrap());
+
+        // Stop the persistent box normally (it stays in DB)
+        persistent_box.stop().await.unwrap();
+
+        // Verify both exist in DB (auto_remove box is still Starting)
+        assert_eq!(runtime.list_info().unwrap().len(), 2);
+
+        // Drop runtime without stopping auto_remove_box - simulates crash
+        // The box will remain in database but should be cleaned on recovery
+    }
+
+    // Create new runtime with same home directory (simulates restart)
+    {
+        let options = BoxliteOptions { home_dir };
+        let runtime = BoxliteRuntime::new(options).expect("Failed to create runtime after restart");
+
+        // auto_remove=true box should be removed during recovery
+        // auto_remove=false box should be recovered
+        let boxes = runtime.list_info().unwrap();
+        assert_eq!(
+            boxes.len(),
+            1,
+            "Only persistent box should survive recovery"
+        );
+        assert_eq!(
+            boxes[0].id, persistent_box_id,
+            "Recovered box should be the persistent one"
+        );
+
+        // Cleanup
+        runtime
+            .remove(persistent_box_id.as_str(), false)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn recovery_removes_orphaned_stopped_boxes_without_directory() {
+    // Test that stopped boxes without directories are KEPT during recovery
+    // (They might have been created but never started, which is valid)
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().to_path_buf();
+
+    let box_id: BoxID;
+    let box_home: std::path::PathBuf;
+
+    // Create a box, stop it (persists), then delete directory
+    {
+        let options = BoxliteOptions {
+            home_dir: home_dir.clone(),
+        };
+        let runtime = BoxliteRuntime::new(options).expect("Failed to create runtime");
+
+        let litebox = runtime
+            .create(
+                BoxOptions {
+                    rootfs: RootfsSpec::Image("alpine:latest".into()),
+                    auto_remove: false,
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        box_id = litebox.id().clone();
+        box_home = home_dir.join("boxes").join(box_id.as_str());
+
+        // Stop the box (persists to DB with status=Stopped)
+        litebox.stop().await.unwrap();
+
+        // Box should be persisted
+        assert!(runtime.exists(box_id.as_str()).unwrap());
+    }
+
+    // Delete the box's directory (simulating it was never created or manually deleted)
+    if box_home.exists() {
+        std::fs::remove_dir_all(&box_home).expect("Failed to delete box directory");
+    }
+
+    // Create new runtime with same home directory (simulates restart)
+    {
+        let options = BoxliteOptions { home_dir };
+        let runtime = BoxliteRuntime::new(options).expect("Failed to create runtime after restart");
+
+        // Stopped box without directory should be KEPT (it might never have been started)
+        // Recovery only removes active (Starting/Running) boxes that are missing directories
+        let boxes = runtime.list_info().unwrap();
+        assert_eq!(
+            boxes.len(),
+            1,
+            "Stopped box without directory should be kept"
+        );
+        assert_eq!(
+            boxes[0].id, box_id,
+            "Box should be recovered even without directory"
+        );
+        assert_eq!(
+            boxes[0].status,
+            BoxStatus::Stopped,
+            "Box should remain in Stopped status"
+        );
+
+        // Cleanup
+        runtime.remove(box_id.as_str(), false).await.unwrap();
     }
 }

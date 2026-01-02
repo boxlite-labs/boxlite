@@ -617,6 +617,77 @@ impl RuntimeImpl {
 
         let persisted = self.box_manager.all_boxes(true)?;
 
+        // Phase 1: Clean up boxes that shouldn't persist
+        // - auto_remove=true boxes: these are ephemeral and shouldn't survive restarts
+        // - Orphaned active boxes: was Running/Starting but directory is missing (crashed mid-operation)
+        //
+        // Note: We don't remove Stopped boxes without directories because:
+        // - Boxes created but never started have no directory (this is valid)
+        // - Only active boxes (Running/Starting) should have a directory
+        let mut boxes_to_remove = Vec::new();
+        for (config, state) in &persisted {
+            let should_remove = if config.options.auto_remove {
+                tracing::info!(
+                    box_id = %config.id,
+                    "Removing auto_remove=true box during recovery"
+                );
+                true
+            } else if state.status.is_active() && !config.box_home.exists() {
+                // Only remove orphaned boxes that were in an active state
+                // Stopped boxes might not have a directory if never started
+                tracing::warn!(
+                    box_id = %config.id,
+                    status = ?state.status,
+                    box_home = %config.box_home.display(),
+                    "Removing orphaned active box (directory missing) during recovery"
+                );
+                true
+            } else {
+                false
+            };
+
+            if should_remove {
+                boxes_to_remove.push(config.id.clone());
+            }
+        }
+
+        // Remove invalid boxes from database and cleanup their directories
+        for box_id in &boxes_to_remove {
+            // Find the config to get box_home path
+            if let Some((config, _)) = persisted.iter().find(|(c, _)| &c.id == box_id) {
+                // Clean up box directory if it exists
+                if config.box_home.exists()
+                    && let Err(e) = std::fs::remove_dir_all(&config.box_home)
+                {
+                    tracing::warn!(
+                        box_id = %box_id,
+                        path = %config.box_home.display(),
+                        error = %e,
+                        "Failed to cleanup box directory during recovery"
+                    );
+                }
+            }
+
+            // Remove from database
+            if let Err(e) = self.box_manager.remove_box(box_id) {
+                tracing::warn!(
+                    box_id = %box_id,
+                    error = %e,
+                    "Failed to remove box from database during recovery cleanup"
+                );
+            }
+        }
+
+        if !boxes_to_remove.is_empty() {
+            tracing::info!(
+                "Cleaned up {} boxes during recovery (auto_remove or orphaned)",
+                boxes_to_remove.len()
+            );
+        }
+
+        // Phase 2: Recover remaining valid boxes
+        let persisted = self.box_manager.all_boxes(true)?;
+
         tracing::info!("Recovering {} boxes from database", persisted.len());
 
         for (config, mut state) in persisted {

@@ -1,0 +1,36 @@
+[package]
+name = "boxlite-node"
+version = "0.1.0"
+edition = "2021"
+authors = ["Dorian Zheng <dorian@boxlite.dev>"]
+license = "Apache-2.0"
+description = "Node.js bindings for BoxLite - embeddable VM runtime for secure code execution"
+repository = "https://github.com/boxlite-labs/boxlite"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Core BoxLite dependencies
+boxlite = { path = "../../boxlite" }
+boxlite-shared = { path = "../../boxlite-shared" }
+
+# napi-rs for Node.js bindings
+napi = { version = "3", features = ["async", "napi8", "tokio_rt"] }
+napi-derive = "3"
+
+# Async runtime
+tokio = { version = "1.37", features = ["sync", "rt-multi-thread"] }
+futures = "0.3"
+
+# Logging
+tracing = "0.1"
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+lto = true
+strip = true  # Strip symbols for smaller binaries
+codegen-units = 1
+opt-level = 3

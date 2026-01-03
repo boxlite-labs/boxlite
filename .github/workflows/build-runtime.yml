@@ -1,0 +1,97 @@
+# Build BoxLite core runtime to verify the build works.
+#
+# This workflow:
+# - Builds on 2 platforms (ubuntu-latest, macos-15)
+# - Triggers SDK workflows via workflow_run when core code changes
+# - Uses simple matrix (no cross-compilation)
+#
+# Note: SDK workflows build their own runtime (cibuildwheel for Python, make for Node.js)
+# This workflow exists to verify core builds and trigger downstream SDK builds.
+name: Build Runtime
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'boxlite/**'
+      - 'boxlite-shared/**'
+      - 'guest/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/build-runtime.yml'
+      - '.github/workflows/config.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'boxlite/**'
+      - 'boxlite-shared/**'
+      - 'guest/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/build-runtime.yml'
+      - '.github/workflows/config.yml'
+  release:
+    types: [ published ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  config:
+    uses: ./.github/workflows/config.yml
+
+  build:
+    name: Build Runtime (${{ matrix.os }})
+    needs: config
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Use simple 2-platform matrix (same as SDK workflows)
+        os: ${{ fromJson(needs.config.outputs.build-targets) }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ needs.config.outputs.rust-toolchain }}
+
+      # Cache Rust dependencies
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "runtime-${{ runner.os }}"
+          cache-on-failure: true
+
+      # Install platform dependencies
+      - name: Install platform dependencies
+        run: make setup
+
+      # Build guest on host BEFORE main build because:
+      # - manylinux (AlmaLinux/RHEL) doesn't have musl packages in repos
+      # - Building musl-cross-make from source takes ~15 minutes
+      # - Ubuntu host has musl-tools via apt (~30 seconds)
+      - name: Build guest binary (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          make guest
+
+          # Free disk space for subsequent builds
+          GUEST_TARGET=$(scripts/util.sh --target)
+          GUEST_BIN="target/$GUEST_TARGET/release/boxlite-guest"
+
+          # Preserve guest binary, remove build artifacts to save space
+          cp "$GUEST_BIN" ./boxlite-guest.tmp
+          rm -rf target ~/.rustup ~/.cargo
+          mkdir -p "$(dirname "$GUEST_BIN")"
+          mv ./boxlite-guest.tmp "$GUEST_BIN"
+
+      # Build runtime
+      - name: Build BoxLite runtime
+        run: |
+          make runtime

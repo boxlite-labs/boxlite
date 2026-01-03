@@ -49,13 +49,7 @@ before-all = ["""
     # Source cargo env (Rust may have just been installed)
     [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
 
-    # Build runtime: on manylinux, reuse guest binary built on Ubuntu host
-    keep_guest_bin=0
-    if [[ -n "${AUDITWHEEL_PLAT:-}" && "$AUDITWHEEL_PLAT" == manylinux* ]]; then
-        echo "Building for $AUDITWHEEL_PLAT, reusing existing guest binary"
-        keep_guest_bin=1
-    fi
-    KEEP_GUEST_BIN=$keep_guest_bin make runtime
+    make runtime
 
     # Copy runtime to Python module for wheel packaging (preserve symlinks)
     rm -rf $BOXLITE_ROOT/sdks/python/boxlite/runtime

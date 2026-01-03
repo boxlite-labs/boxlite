@@ -1,0 +1,199 @@
+# Build Node.js SDK for all supported platforms.
+#
+# This workflow follows the same pattern as build-python-sdk.yml:
+# - Uses simple 2-platform matrix (ubuntu-latest, macos-15)
+# - Builds guest on host BEFORE main build (Linux only)
+# - Uses make setup for platform dependencies
+#
+# Triggers:
+# - workflow_run: After runtime build succeeds ON RELEASE (not on push/PR)
+# - workflow_dispatch: Manual trigger for testing
+name: Build Node.js SDK
+
+on:
+  # Trigger after runtime build completes (only proceeds if runtime was triggered by release)
+  workflow_run:
+    workflows: ["Build Runtime"]
+    types: [completed]
+    branches: [main, develop]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  config:
+    uses: ./.github/workflows/config.yml
+
+  # Skip if triggered by failed runtime build
+  check-trigger:
+    uses: ./.github/workflows/_check-trigger.yml
+
+  build:
+    name: Build Node.js SDK (${{ matrix.os }})
+    needs: [config, check-trigger]
+    if: needs.check-trigger.outputs.should-run == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Use simple 2-platform matrix
+        os: ${{ fromJson(needs.config.outputs.build-targets) }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ needs.config.outputs.node-build-version }}
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ needs.config.outputs.rust-toolchain }}
+
+      # Cache Rust dependencies
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "node-sdk-${{ runner.os }}"
+          cache-on-failure: true
+
+      # Build guest on host BEFORE main build (same reason as Python SDK)
+      # manylinux doesn't have musl packages, Ubuntu host does
+      - name: Build guest binary (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          make setup guest
+
+          # Free disk space for subsequent builds
+          GUEST_TARGET=$(scripts/util.sh --target)
+          GUEST_BIN="target/$GUEST_TARGET/release/boxlite-guest"
+
+          # Preserve guest binary, remove build artifacts to save space
+          cp "$GUEST_BIN" ./boxlite-guest.tmp
+          rm -rf target ~/.rustup ~/.cargo
+          mkdir -p "$(dirname "$GUEST_BIN")"
+          mv ./boxlite-guest.tmp "$GUEST_BIN"
+
+      # Install dependencies and build
+      # Linux: KEEP_GUEST_BIN=1 tells runtime build to preserve guest (already built above)
+      # macOS: Normal build (guest not pre-built)
+      - name: Build Node.js package
+        run: |
+          make setup
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            KEEP_GUEST_BIN=1 make dist:node
+          else
+            make dist:node
+          fi
+
+      - name: Upload Node.js package
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-package-${{ matrix.os }}
+          path: |
+            sdks/node/dist/
+            sdks/node/*.node
+            sdks/node/runtime/
+            sdks/node/package.json
+          retention-days: ${{ needs.config.outputs.artifact-retention-days }}
+
+  test:
+    name: Test Node.js SDK (${{ matrix.os }} / Node ${{ matrix.node-version }})
+    needs: [config, build]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJson(needs.config.outputs.build-targets) }}
+        node-version: ${{ fromJson(needs.config.outputs.node-versions) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Download Node.js packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: node-package-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Install and test package
+        run: |
+          cp -r artifacts/* sdks/node/ 2>/dev/null || true
+          cd sdks/node
+          npm install --ignore-scripts
+          node -e "const boxlite = require('./dist'); console.log('BoxLite Node.js SDK loaded successfully')"
+
+      # Note: Cannot run VM tests on GitHub-hosted runners due to nested virtualization limitations
+
+  publish:
+    name: Publish to npm
+    needs: [config, build, test]
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # Required for npm provenance
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ needs.config.outputs.node-build-version }}
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download all Node.js artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: node-package-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Prepare npm package
+        run: |
+          # TODO: Combine platform-specific artifacts into npm package
+          echo "Package preparation logic here"
+
+      - name: Publish to npm
+        run: cd sdks/node && npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        if: false  # Disabled until package preparation is implemented
+
+  upload-to-release:
+    name: Upload to GitHub Release
+    needs: [build, test]
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all Node.js packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: node-package-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create archive
+        run: |
+          cd dist
+          tar -czvf boxlite-node-sdk.tar.gz .
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/boxlite-node-sdk.tar.gz
+          fail_on_unmatched_files: true

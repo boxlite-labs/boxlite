@@ -23,18 +23,22 @@ parse_args() {
                 ;;
             *)
                 echo "Unknown option: $1"
-                echo "Usage: $0 [--keep-guest-bin] [--mode all|runtime]"
+                echo "Usage: $0 [--keep-guest-bin] [--mode all|dist]"
                 exit 1
                 ;;
         esac
     done
 
-    # Validate PROFILE value
-    if [ "$MODE" != "all" ] && [ "$MODE" != "runtime" ]; then
-        echo "Invalid mode: $MODE"
-        echo "Run with --mode all or --mode runtime"
-        exit 1
-    fi
+    # Validate mode value
+    case "$MODE" in
+        all|dist)
+            ;;
+        *)
+            echo "Invalid mode: $MODE"
+            echo "Valid modes: all, dist"
+            exit 1
+            ;;
+    esac
 }
 
 parse_args "$@"
@@ -56,6 +60,15 @@ clean_c() {
     print_section "Cleaning C SDK artifacts..."
     rm -rf sdks/c/{target,dist,Cargo.lock}
     rm -rf examples/c/build examples/c/execute
+}
+
+clean_node() {
+    print_section "Cleaning Node.js SDK artifacts..."
+    rm -rf sdks/node/dist
+    rm -rf sdks/node/npm
+    rm -rf sdks/node/packages
+    rm -rf sdks/node/*.node
+    rm -rf sdks/node/node_modules
 }
 
 clean_python_cache() {
@@ -116,17 +129,18 @@ clean_runtime() {
 main() {
     print_header "🧹 Cleaning mode=$MODE"
 
-    if [ "$MODE" = "runtime" ]; then
-        clean_runtime
-    elif [ "$MODE" = "all" ]; then
+    if [ "$MODE" = "all" ]; then
         clean_runtime
         clean_venv
         clean_cargo
         clean_python
         clean_c
+        clean_node
         clean_python_cache
         clean_wheels
         clean_temp
+        clean_dist
+    elif [ "$MODE" = "dist" ]; then
         clean_dist
     fi
 

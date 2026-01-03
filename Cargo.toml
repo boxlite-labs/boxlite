@@ -8,6 +8,7 @@ members = [
     "guest",
     "sdks/c",
     "sdks/python",
+    "sdks/node",
 ]
 exclude = ["build/tmp", "target", ".venv", "examples/*/.venv"]
 

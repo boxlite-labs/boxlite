@@ -1,24 +1,55 @@
-# Shared configuration for all workflows
-# This reusable workflow provides common matrix values to avoid duplication
+# Shared configuration for all workflows.
+#
+# This reusable workflow provides common values to avoid duplication:
+# - Build targets (2-platform matrix: ubuntu-latest, macos-15)
+# - Version configuration (Python, Node.js, Rust)
+# - Artifact retention settings
 name: Config
 
 on:
   workflow_call:
     outputs:
+      # === Platform/Matrix Configuration ===
       build-targets:
-        description: 'JSON array of OS targets for building'
+        description: 'JSON array of OS targets for builds and testing'
         value: ${{ jobs.config.outputs.build-targets }}
+
+      # === Version Configuration ===
       python-versions:
         description: 'JSON array of Python versions to test'
         value: ${{ jobs.config.outputs.python-versions }}
+      node-versions:
+        description: 'JSON array of Node.js versions to test'
+        value: ${{ jobs.config.outputs.node-versions }}
+      node-build-version:
+        description: 'Node.js version for building'
+        value: ${{ jobs.config.outputs.node-build-version }}
+      rust-toolchain:
+        description: 'Rust toolchain version'
+        value: ${{ jobs.config.outputs.rust-toolchain }}
+
+      # === Artifact Configuration ===
+      artifact-retention-days:
+        description: 'Number of days to retain artifacts'
+        value: ${{ jobs.config.outputs.artifact-retention-days }}
 
 jobs:
   config:
     name: Load configuration
     runs-on: ubuntu-latest
     outputs:
+      # === Platform/Matrix Configuration ===
       # Note: Using macos-15 for libkrun bottle compatibility (arm64_tahoe)
       build-targets: '["ubuntu-latest", "macos-15"]'
+
+      # === Version Configuration ===
       python-versions: '["3.10", "3.11", "3.12", "3.13"]'
+      node-versions: '["18", "20", "22"]'
+      node-build-version: '20'
+      rust-toolchain: 'stable'
+
+      # === Artifact Configuration ===
+      artifact-retention-days: '7'
+
     steps:
       - run: echo "Configuration loaded"

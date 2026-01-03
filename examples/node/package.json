@@ -1,0 +1,14 @@
+{
+  "name": "boxlite-node-examples",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Example scripts for BoxLite Node.js SDK",
+  "type": "commonjs",
+  "scripts": {
+    "simplebox": "node simplebox.js",
+    "codebox": "node codebox.js",
+    "browserbox": "node browserbox.js",
+    "computerbox": "node computerbox.js",
+    "interactivebox": "node interactivebox.js"
+  }
+}

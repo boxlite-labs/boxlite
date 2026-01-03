@@ -57,7 +57,7 @@ scripts/
 ├── build/              # Build scripts
 │   ├── guest.sh        # Guest binary (cross-compile)
 │   ├── shim.sh         # Shim binary
-│   └── prepare-runtime.sh
+│   └── build-runtime.sh
 ├── package/            # Packaging scripts
 └── common.sh           # Shared utilities
 ```

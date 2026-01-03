@@ -1,11 +1,11 @@
 #!/bin/bash
-# Prepare boxlite-runtime directory with all binaries and libraries
+# Build boxlite-runtime directory with all binaries and libraries
 #
 # This script creates a complete runtime directory that contains everything
 # needed to run BoxLite: shim binary, guest binary, and all FFI libraries.
 #
 # Usage:
-#   ./prepare-runtime.sh [--dest-dir DIR] [--profile PROFILE]
+#   ./build-runtime.sh [--dest-dir DIR] [--profile PROFILE]
 #
 # Options:
 #   --dest-dir DIR      Destination directory (default: target/release/boxlite-runtime)
@@ -32,9 +32,9 @@ ORIG_DIR="$(pwd)"
 # Print help message
 print_help() {
     cat <<EOF
-Usage: prepare-runtime.sh [OPTIONS]
+Usage: build-runtime.sh [OPTIONS]
 
-Prepare boxlite-runtime directory with all binaries and libraries.
+Build boxlite-runtime directory with all binaries and libraries.
 
 Options:
   --dest-dir DIR      Destination directory (default: target/boxlite-runtime)
@@ -50,22 +50,22 @@ The runtime directory will contain:
   - libgvproxy.*      gvproxy library (if available)
 
 Examples:
-  # Prepare release runtime in default location
-  ./prepare-runtime.sh
+  # Build release runtime in default location
+  ./build-runtime.sh
 
-  # Prepare debug runtime
-  ./prepare-runtime.sh --profile debug
+  # Build debug runtime
+  ./build-runtime.sh --profile debug
 
-  # Prepare runtime in custom directory
-  ./prepare-runtime.sh --dest-dir /tmp/my-runtime
+  # Build runtime in custom directory
+  ./build-runtime.sh --dest-dir /tmp/my-runtime
 
-  # Prepare runtime with pre-collected libraries
-  ./prepare-runtime.sh --libs-dir /path/to/libs
+  # Build runtime with pre-collected libraries
+  ./build-runtime.sh --libs-dir /path/to/libs
 
   # Full workflow
   bash scripts/build/build-guest.sh
   bash scripts/build/build-shim.sh
-  ./prepare-runtime.sh
+  ./build-runtime.sh
 
 EOF
 }
@@ -139,76 +139,37 @@ detect_platform() {
     echo "🖥️  Platform: $OS"
 }
 
-# Build or verify boxlite-shim binary exists
+# Build boxlite-shim binary
 build_shim() {
     echo ""
-    print_section "Preparing boxlite-shim binary..."
+    print_section "Building boxlite-shim binary..."
 
-    # Check if shim already exists at destination
-    if [ -f "$DEST_DIR/boxlite-shim" ]; then
-        print_success "Found at destination: $DEST_DIR/boxlite-shim"
-        SHIM_BINARY="$DEST_DIR/boxlite-shim"
-        SHIM_AT_DEST=true
-        return 0
-    fi
+    # Always build to ensure freshness (Cargo handles incremental compilation)
+    bash "$SCRIPT_BUILD_DIR/build-shim.sh" --profile "$PROFILE"
 
-    # Look for shim in target directory
     local shim_path="$PROJECT_ROOT/target/$PROFILE/boxlite-shim"
     if [ -f "$shim_path" ]; then
         SHIM_BINARY="$shim_path"
-        print_success "Found: $shim_path"
-        SHIM_AT_DEST=false
-        return 0
-    fi
-
-    # Not found, build it
-    bash "$SCRIPT_BUILD_DIR/build-shim.sh" --profile "$PROFILE"
-
-    # Verify it was built
-    if [ -f "$shim_path" ]; then
-        SHIM_BINARY="$shim_path"
-        print_success "Built successfully"
-        SHIM_AT_DEST=false
-        return 0
+        print_success "Built: $shim_path"
     else
         print_error "Failed to build boxlite-shim"
         exit 1
     fi
 }
 
-# Build or verify boxlite-guest binary exists
+# Build boxlite-guest binary
 build_guest() {
     echo ""
-    print_section "Preparing boxlite-guest binary..."
+    print_section "Building boxlite-guest binary..."
 
-    # Check if guest already exists at destination
-    if [ -f "$DEST_DIR/boxlite-guest" ]; then
-        print_success "Found at destination: $DEST_DIR/boxlite-guest"
-        GUEST_BINARY="$DEST_DIR/boxlite-guest"
-        GUEST_AT_DEST=true
-        return 0
-    fi
-
-    # Detect guest target
-    source "$SCRIPT_DIR/util.sh"
-    local guest_path="$PROJECT_ROOT/target/$GUEST_TARGET/$PROFILE/boxlite-guest"
-
-    if [ -f "$guest_path" ]; then
-        GUEST_BINARY="$guest_path"
-        print_success "Found: $guest_path"
-        GUEST_AT_DEST=false
-        return 0
-    fi
-
-    # Not found, build it
+    # Always build to ensure freshness (Cargo handles incremental compilation)
     bash "$SCRIPT_BUILD_DIR/build-guest.sh" --profile "$PROFILE"
 
-    # Verify it was built
+    source "$SCRIPT_DIR/util.sh"
+    local guest_path="$PROJECT_ROOT/target/$GUEST_TARGET/$PROFILE/boxlite-guest"
     if [ -f "$guest_path" ]; then
         GUEST_BINARY="$guest_path"
-        print_success "Built successfully"
-        GUEST_AT_DEST=false
-        return 0
+        print_success "Built: $guest_path"
     else
         print_error "Failed to build boxlite-guest"
         exit 1
@@ -279,19 +240,14 @@ assemble_runtime() {
     # Create destination directory
     mkdir -p "$DEST_DIR"
 
-    # Copy shim binary (only if not already at destination)
-    if [ "${SHIM_AT_DEST:-false}" = false ]; then
-        print_step "Copying boxlite-shim... "
-        cp "$SHIM_BINARY" "$DEST_DIR/"
-        echo "✓"
-    fi
+    # Copy binaries
+    print_step "Copying boxlite-shim... "
+    cp "$SHIM_BINARY" "$DEST_DIR/"
+    echo "✓"
 
-    # Copy guest binary (only if not already at destination)
-    if [ "${GUEST_AT_DEST:-false}" = false ]; then
-        print_step "Copying boxlite-guest... "
-        cp "$GUEST_BINARY" "$DEST_DIR/"
-        echo "✓"
-    fi
+    print_step "Copying boxlite-guest... "
+    cp "$GUEST_BINARY" "$DEST_DIR/"
+    echo "✓"
 
     # Copy all libraries (preserve symlinks)
     print_step "Copying libraries... "

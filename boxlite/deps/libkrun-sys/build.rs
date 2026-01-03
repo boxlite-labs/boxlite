@@ -532,10 +532,21 @@ fn fix_macos_libs(lib_dir: &Path, lib_prefix: &str) -> Result<(), String> {
 /// macOS: Build libkrun and libkrunfw from source
 #[cfg(target_os = "macos")]
 fn build() {
-    println!("cargo:warning=Building libkrun-sys for macOS (from source)");
-
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+
+    let libkrunfw_install = out_dir.join("libkrunfw");
+    let libkrun_install = out_dir.join("libkrun");
+    let libkrunfw_lib = libkrunfw_install.join(LIB_DIR);
+    let libkrun_lib = libkrun_install.join(LIB_DIR);
+
+    // Skip build if outputs already exist (incremental build optimization)
+    if has_library(&libkrunfw_lib, "libkrunfw") && has_library(&libkrun_lib, "libkrun") {
+        configure_linking(&libkrun_lib, &libkrunfw_lib);
+        return;
+    }
+
+    println!("cargo:warning=Building libkrun-sys for macOS (from source)");
 
     // Verify vendored libkrun source exists (libkrunfw is downloaded as prebuilt)
     verify_vendored_sources(&manifest_dir, false);
@@ -546,11 +557,9 @@ fn build() {
     let libkrunfw_src = download_libkrunfw_prebuilt(&out_dir);
 
     // 2. Build libkrunfw
-    let libkrunfw_install = out_dir.join("libkrunfw");
     build_libkrunfw_macos(&libkrunfw_src, &libkrunfw_install);
 
     // 3. Build libkrun from vendored source (with cross-compile patch)
-    let libkrun_install = out_dir.join("libkrun");
     build_libkrun_macos(
         &libkrun_src,
         &libkrun_install,
@@ -559,9 +568,6 @@ fn build() {
     );
 
     // 4. Fix install names for @rpath
-    let libkrunfw_lib = libkrunfw_install.join(LIB_DIR);
-    let libkrun_lib = libkrun_install.join(LIB_DIR);
-
     fix_macos_libs(&libkrunfw_lib, "libkrunfw")
         .unwrap_or_else(|e| panic!("Failed to fix libkrunfw: {}", e));
 
@@ -575,10 +581,21 @@ fn build() {
 /// Linux: Build libkrun and libkrunfw from source
 #[cfg(target_os = "linux")]
 fn build() {
-    println!("cargo:warning=Building libkrun-sys for Linux (from source)");
-
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+
+    let libkrunfw_install = out_dir.join("libkrunfw");
+    let libkrun_install = out_dir.join("libkrun");
+    let libkrunfw_lib_dir = libkrunfw_install.join(LIB_DIR);
+    let libkrun_lib_dir = libkrun_install.join(LIB_DIR);
+
+    // Skip build if outputs already exist (incremental build optimization)
+    if has_library(&libkrunfw_lib_dir, "libkrunfw") && has_library(&libkrun_lib_dir, "libkrun") {
+        configure_linking(&libkrun_lib_dir, &libkrunfw_lib_dir);
+        return;
+    }
+
+    println!("cargo:warning=Building libkrun-sys for Linux (from source)");
 
     // Verify vendored sources exist (Linux builds both from source)
     verify_vendored_sources(&manifest_dir, true);
@@ -587,7 +604,6 @@ fn build() {
     let libkrun_src = manifest_dir.join("vendor/libkrun");
 
     // Build libkrunfw first (libkrun depends on it)
-    let libkrunfw_install = out_dir.join("libkrunfw");
     build_with_make(
         &libkrunfw_src,
         &libkrunfw_install,
@@ -596,8 +612,6 @@ fn build() {
     );
 
     // Build libkrun with shared build environment
-    let libkrun_install = out_dir.join("libkrun");
-
     build_with_make(
         &libkrun_src,
         &libkrun_install,
@@ -606,11 +620,9 @@ fn build() {
     );
 
     // Fix library names
-    let libkrun_lib_dir = libkrun_install.join(LIB_DIR);
     fix_linux_libs(&libkrun_lib_dir, "libkrun")
         .unwrap_or_else(|e| panic!("Failed to fix libkrun: {}", e));
 
-    let libkrunfw_lib_dir = libkrunfw_install.join(LIB_DIR);
     fix_linux_libs(&libkrunfw_lib_dir, "libkrunfw")
         .unwrap_or_else(|e| panic!("Failed to fix libkrunfw: {}", e));
 

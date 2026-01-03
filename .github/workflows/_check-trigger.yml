@@ -1,0 +1,65 @@
+# Reusable workflow to validate workflow_run triggers.
+#
+# When a workflow is triggered by workflow_run (e.g., SDK builds after runtime build),
+# this workflow checks:
+# 1. The triggering workflow succeeded
+# 2. The triggering workflow was triggered by a release (not push/PR)
+#
+# This ensures SDK builds only happen on release, not on every runtime build.
+#
+# Usage:
+#   jobs:
+#     check-trigger:
+#       uses: ./.github/workflows/_check-trigger.yml
+#
+#     build:
+#       needs: check-trigger
+#       if: needs.check-trigger.outputs.should-run == 'true'
+#       ...
+
+name: Check Workflow Trigger
+
+on:
+  workflow_call:
+    outputs:
+      should-run:
+        description: 'Whether the calling workflow should proceed (true/false)'
+        value: ${{ jobs.check.outputs.should-run }}
+
+jobs:
+  check:
+    name: Validate Trigger
+    runs-on: ubuntu-latest
+    outputs:
+      should-run: ${{ steps.check.outputs.should-run }}
+
+    steps:
+      - name: Check workflow_run trigger
+        id: check
+        run: |
+          # For workflow_run triggers, check BOTH conditions:
+          # 1. Source workflow succeeded
+          # 2. Source workflow was triggered by a release
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            conclusion="${{ github.event.workflow_run.conclusion }}"
+            trigger_event="${{ github.event.workflow_run.event }}"
+
+            # Check if source workflow succeeded
+            if [[ "$conclusion" != "success" ]]; then
+              echo "should-run=false" >> $GITHUB_OUTPUT
+              echo "::notice::Skipping: triggering workflow concluded with '$conclusion'"
+              exit 0
+            fi
+
+            # Check if source workflow was triggered by release
+            if [[ "$trigger_event" != "release" ]]; then
+              echo "should-run=false" >> $GITHUB_OUTPUT
+              echo "::notice::Skipping: triggering workflow was triggered by '$trigger_event', not 'release'"
+              exit 0
+            fi
+
+            echo "::notice::Proceeding: runtime build succeeded and was triggered by release"
+          fi
+
+          # For workflow_dispatch (manual trigger), always proceed
+          echo "should-run=true" >> $GITHUB_OUTPUT

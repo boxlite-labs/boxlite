@@ -1,11 +1,57 @@
 {
-  "name": "boxlite",
+  "name": "@boxlite/boxlite",
   "version": "0.1.0",
-  "description": "JavaScript/TypeScript bindings for Boxlite",
-  "main": "index.js",
-  "files": ["dist"],
+  "description": "BoxLite - Embeddable micro-VM runtime for secure, isolated code execution",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "build": "echo 'TODO: build napi addon'",
-    "test": "echo 'TODO'"
+    "build": "tsc",
+    "build:debug": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.0.0-alpha.62",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.2.0",
+    "vitest": "^2.0.0"
+  },
+  "optionalDependencies": {
+    "@boxlite/boxlite-darwin-arm64": "0.1.0",
+    "@boxlite/boxlite-darwin-x64": "0.1.0",
+    "@boxlite/boxlite-linux-x64": "0.1.0",
+    "@boxlite/boxlite-linux-arm64": "0.1.0"
+  },
+  "keywords": [
+    "boxlite",
+    "sandbox",
+    "container",
+    "virtualization",
+    "vm",
+    "kvm",
+    "hypervisor",
+    "isolation",
+    "security",
+    "code-execution"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/boxlite-labs/boxlite.git",
+    "directory": "sdks/node"
+  },
+  "bugs": {
+    "url": "https://github.com/boxlite-labs/boxlite/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "Dorian Zheng <xingzhengde72@gmail.com>",
+  "dependencies": {
+    "@node-rs/helper": "^1.6.0"
   }
 }

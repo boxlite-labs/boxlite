@@ -1,0 +1,162 @@
+# Build Python SDK wheels for all supported platforms.
+#
+# This workflow follows the proven build-wheels.yml pattern:
+# - Uses simple 2-platform matrix (ubuntu-latest, macos-15)
+# - Builds guest on host BEFORE cibuildwheel (Linux only)
+# - Lets cibuildwheel auto-detect compatible builds
+#
+# Triggers:
+# - workflow_run: After runtime build succeeds ON RELEASE (not on push/PR)
+# - workflow_dispatch: Manual trigger for testing
+name: Build Python SDK
+
+on:
+  # Trigger after runtime build completes (only proceeds if runtime was triggered by release)
+  workflow_run:
+    workflows: ["Build Runtime"]
+    types: [completed]
+    branches: [main, develop]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  config:
+    uses: ./.github/workflows/config.yml
+
+  # Skip if triggered by failed runtime build
+  check-trigger:
+    uses: ./.github/workflows/_check-trigger.yml
+
+  build:
+    name: Build Python SDK (${{ matrix.os }})
+    needs: [config, check-trigger]
+    if: needs.check-trigger.outputs.should-run == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Use simple 2-platform matrix, let cibuildwheel handle builds
+        os: ${{ fromJson(needs.config.outputs.build-targets) }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Build guest on host BEFORE cibuildwheel container because:
+      # - manylinux (AlmaLinux/RHEL) doesn't have musl packages in repos
+      # - Building musl-cross-make from source takes ~15 minutes
+      # - Ubuntu host has musl-tools via apt (~30 seconds)
+      # - Guest is static musl binary, doesn't need manylinux glibc compatibility
+      - name: Build guest binary (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          make setup guest
+
+          # Free disk space for container build
+          GUEST_TARGET=$(scripts/util.sh --target)
+          GUEST_BIN="target/$GUEST_TARGET/release/boxlite-guest"
+
+          # Preserve guest binary, remove build artifacts to save space
+          cp "$GUEST_BIN" ./boxlite-guest.tmp
+          rm -rf target ~/.rustup ~/.cargo
+          mkdir -p "$(dirname "$GUEST_BIN")"
+          mv ./boxlite-guest.tmp "$GUEST_BIN"
+
+      - name: Build Python wheels
+        uses: pypa/cibuildwheel@v3.2.0
+        env:
+          CIBW_BUILD_VERBOSITY: 0
+        with:
+          package-dir: sdks/python
+
+      - name: Upload Python wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+          retention-days: ${{ needs.config.outputs.artifact-retention-days }}
+
+  test:
+    name: Test Python SDK (${{ matrix.os }} / Python ${{ matrix.python-version }})
+    needs: [config, build]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJson(needs.config.outputs.build-targets) }}
+        python-version: ${{ fromJson(needs.config.outputs.python-versions) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: python-wheels-*
+          path: wheelhouse
+          merge-multiple: true
+
+      - name: Install wheel
+        run: |
+          pip install --find-links=wheelhouse --no-index boxlite
+
+      - name: Test import
+        run: |
+          python -c "import boxlite; print(f'BoxLite version: {boxlite.__version__}')"
+
+      # Note: Cannot run VM tests on GitHub-hosted runners due to nested virtualization limitations
+
+  publish:
+    name: Publish to PyPI
+    needs: [build, test]
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # Required for trusted publishing
+
+    steps:
+      - name: Download all Python wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: python-wheels-*
+          path: dist
+          merge-multiple: true
+
+      - name: List wheels
+        run: ls -lh dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true
+
+  upload-to-release:
+    name: Upload to GitHub Release
+    needs: [build, test]
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all Python wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: python-wheels-*
+          path: dist
+          merge-multiple: true
+
+      - name: Upload wheels to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.whl
+          fail_on_unmatched_files: true

@@ -47,10 +47,10 @@ impl JsBoxlite {
     ///
     /// # Example
     /// ```javascript
-    /// const runtime = Boxlite.default();
+    /// const runtime = Boxlite.withDefaultConfig();
     /// ```
     #[napi(factory)]
-    pub fn default() -> Result<Self> {
+    pub fn with_default_config() -> Result<Self> {
         let runtime = BoxliteRuntime::default_runtime();
         Ok(Self {
             runtime: Arc::new(runtime.clone()),
@@ -59,7 +59,7 @@ impl JsBoxlite {
 
     /// Initialize the default runtime with custom options.
     ///
-    /// This must be called before any calls to `Boxlite.default()` if you
+    /// This must be called before any calls to `Boxlite.withDefaultConfig()` if you
     /// want to customize the default runtime's configuration.
     ///
     /// # Arguments
@@ -68,7 +68,7 @@ impl JsBoxlite {
     /// # Example
     /// ```javascript
     /// Boxlite.initDefault({ homeDir: '/custom/path' });
-    /// const runtime = Boxlite.default(); // Uses /custom/path
+    /// const runtime = Boxlite.withDefaultConfig(); // Uses /custom/path
     /// ```
     #[napi]
     pub fn init_default(options: JsOptions) -> Result<()> {

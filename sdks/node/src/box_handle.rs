@@ -120,7 +120,7 @@ impl JsBox {
         let execution = handle.exec(cmd).await.map_err(map_err)?;
 
         Ok(JsExecution {
-            execution: Arc::new(execution),
+            execution: Arc::new(tokio::sync::Mutex::new(execution)),
         })
     }
 

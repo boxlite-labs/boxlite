@@ -12,22 +12,6 @@ const ERR_STDIN_UNAVAILABLE: &str = "stdin stream not available";
 const ERR_STDOUT_UNAVAILABLE: &str = "stdout stream not available";
 const ERR_STDERR_UNAVAILABLE: &str = "stderr stream not available";
 
-/// Get mutable access to Execution from Arc.
-///
-/// # Safety
-/// This is safe because:
-/// 1. Execution is wrapped in Arc, so it won't be dropped while we hold a reference
-/// 2. The methods that use this (stdin, stdout, stderr, wait, kill) each move out their
-///    stream/result and can only be safely called once per Execution instance
-/// 3. Subsequent calls return None (for streams) or succeed safely (for wait/kill)
-/// 4. This pattern mirrors the Python SDK's approach
-///
-/// This is needed because napi-rs passes &self (immutable reference) to methods,
-/// but Execution requires &mut self for stream access.
-fn get_execution_mut(execution: &Arc<Execution>) -> &mut Execution {
-    unsafe { &mut *(Arc::as_ptr(execution) as *mut Execution) }
-}
-
 /// Execution result containing the exit code.
 #[napi(object)]
 #[derive(Clone, Debug)]
@@ -145,7 +129,7 @@ impl JsExecStdin {
 /// for the command to complete.
 #[napi]
 pub struct JsExecution {
-    pub(crate) execution: Arc<Execution>,
+    pub(crate) execution: Arc<Mutex<Execution>>,
 }
 
 #[napi]
@@ -157,8 +141,9 @@ impl JsExecution {
     /// console.log(`Execution ID: ${execution.id()}`);
     /// ```
     #[napi]
-    pub fn id(&self) -> String {
-        self.execution.id().clone()
+    pub async fn id(&self) -> String {
+        let guard = self.execution.lock().await;
+        guard.id().clone()
     }
 
     /// Get stdin writer.
@@ -172,9 +157,9 @@ impl JsExecution {
     /// await stdin.writeString('input data\n');
     /// ```
     #[napi]
-    pub fn stdin(&self) -> Result<JsExecStdin> {
-        let execution = get_execution_mut(&self.execution);
-        match execution.stdin() {
+    pub async fn stdin(&self) -> Result<JsExecStdin> {
+        let mut guard = self.execution.lock().await;
+        match guard.stdin() {
             Some(stream) => Ok(JsExecStdin {
                 stream: Arc::new(Mutex::new(stream)),
             }),
@@ -196,9 +181,9 @@ impl JsExecution {
     /// }
     /// ```
     #[napi]
-    pub fn stdout(&self) -> Result<JsExecStdout> {
-        let execution = get_execution_mut(&self.execution);
-        match execution.stdout() {
+    pub async fn stdout(&self) -> Result<JsExecStdout> {
+        let mut guard = self.execution.lock().await;
+        match guard.stdout() {
             Some(stream) => Ok(JsExecStdout {
                 stream: Arc::new(Mutex::new(stream)),
             }),
@@ -220,9 +205,9 @@ impl JsExecution {
     /// }
     /// ```
     #[napi]
-    pub fn stderr(&self) -> Result<JsExecStderr> {
-        let execution = get_execution_mut(&self.execution);
-        match execution.stderr() {
+    pub async fn stderr(&self) -> Result<JsExecStderr> {
+        let mut guard = self.execution.lock().await;
+        match guard.stderr() {
             Some(stream) => Ok(JsExecStderr {
                 stream: Arc::new(Mutex::new(stream)),
             }),
@@ -246,8 +231,8 @@ impl JsExecution {
     /// ```
     #[napi]
     pub async fn wait(&self) -> Result<JsExecResult> {
-        let execution = get_execution_mut(&self.execution);
-        let exec_result = execution.wait().await.map_err(map_err)?;
+        let mut guard = self.execution.lock().await;
+        let exec_result = guard.wait().await.map_err(map_err)?;
         Ok(JsExecResult {
             exit_code: exec_result.exit_code,
         })
@@ -265,7 +250,7 @@ impl JsExecution {
     /// ```
     #[napi]
     pub async fn kill(&self) -> Result<()> {
-        let execution = get_execution_mut(&self.execution);
-        execution.kill().await.map_err(map_err)
+        let mut guard = self.execution.lock().await;
+        guard.kill().await.map_err(map_err)
     }
 }

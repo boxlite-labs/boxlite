@@ -10,29 +10,30 @@
 name: Build Runtime
 
 on:
-  push:
-    branches: [ main, develop ]
-    paths:
-      - 'boxlite/**'
-      - 'boxlite-shared/**'
-      - 'guest/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/build-runtime.yml'
-      - '.github/workflows/config.yml'
-  pull_request:
-    branches: [ main ]
-    paths:
-      - 'boxlite/**'
-      - 'boxlite-shared/**'
-      - 'guest/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/build-runtime.yml'
-      - '.github/workflows/config.yml'
-  release:
-    types: [ published ]
-  workflow_dispatch:
+  # DISABLED: Uncomment to re-enable automatic triggers
+  # push:
+  #   branches: [ main, develop ]
+  #   paths:
+  #     - 'boxlite/**'
+  #     - 'boxlite-shared/**'
+  #     - 'guest/**'
+  #     - 'Cargo.toml'
+  #     - 'Cargo.lock'
+  #     - '.github/workflows/build-runtime.yml'
+  #     - '.github/workflows/config.yml'
+  # pull_request:
+  #   branches: [ main ]
+  #   paths:
+  #     - 'boxlite/**'
+  #     - 'boxlite-shared/**'
+  #     - 'guest/**'
+  #     - 'Cargo.toml'
+  #     - 'Cargo.lock'
+  #     - '.github/workflows/build-runtime.yml'
+  #     - '.github/workflows/config.yml'
+  # release:
+  #   types: [ published ]
+  workflow_dispatch:  # Keep manual trigger for testing
 
 env:
   CARGO_TERM_COLOR: always

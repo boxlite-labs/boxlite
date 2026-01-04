@@ -34,19 +34,15 @@ jobs:
         run: |
           make setup guest
 
-          # Free disk space for container build while preserving guest cargo cache
-          # Container will run `make runtime` which finds cached guest build
+          # Save entire guest target directory for cibuildwheel container
+          # (cibuildwheel uses tar which respects .gitignore, excluding target/)
+          # We need the full cache (not just binary) for cargo incremental compilation
           GUEST_TARGET=$(scripts/util.sh --target)
+          mkdir -p .cache
+          cp -a "target/$GUEST_TARGET" ".cache/$GUEST_TARGET"
 
-          # Preserve guest target cache (for incremental compilation in container)
-          # Remove other targets and host artifacts to save space
-          if [ -d "target" ]; then
-              # Keep guest target, delete everything else in target/
-              find target -mindepth 1 -maxdepth 1 ! -name "$GUEST_TARGET" -exec rm -rf {} +
-          fi
-
-          # Remove rustup/cargo (container will reinstall)
-          rm -rf ~/.rustup ~/.cargo
+          # Clean up to save disk space
+          rm -rf target ~/.rustup ~/.cargo
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.2.0

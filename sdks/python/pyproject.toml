@@ -43,6 +43,16 @@ before-all = ["""
     # cibuildwheel runs from repository root
     BOXLITE_ROOT=$(pwd)
 
+    # Restore pre-built guest target directory if available (from Ubuntu host)
+    # This is needed because cibuildwheel's tar excludes target/ (.gitignore)
+    # We restore the full cache (not just binary) for cargo incremental compilation
+    GUEST_TARGET=$(scripts/util.sh --target)
+    if [ -d ".cache/$GUEST_TARGET" ]; then
+        echo "Restoring guest cargo cache from .cache/$GUEST_TARGET"
+        mkdir -p target
+        cp -a ".cache/$GUEST_TARGET" "target/$GUEST_TARGET"
+    fi
+
     # Run setup script (installs dependencies, such as Rust, Make, etc.)
     make setup
 

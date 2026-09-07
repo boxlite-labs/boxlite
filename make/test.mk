@@ -308,6 +308,15 @@ test\:guest-perms:
 		exit 1; \
 	fi
 
+# Run a guest build contract case without the full artifact qualification suite.
+PHONY_TARGETS += test\:guest-build-contracts
+test\:guest-build-contracts: export _BOXLITE_GUEST_TARGET_ARG := $(value GUEST_TARGET)
+test\:guest-build-contracts: export _BOXLITE_PROFILE_ARG := $(value PROFILE)
+test\:guest-build-contracts:
+	@target="$${_BOXLITE_GUEST_TARGET_ARG:-$$(bash "$$PWD/scripts/util.sh" --target)}"; \
+	profile="$${_BOXLITE_PROFILE_ARG:-release}"; \
+	bash "$$PWD/scripts/test/test-guest-build-contracts.sh" --target "$$target" --profile "$$profile" --case "$${FILTER:-all}"
+
 # Build and qualify the standalone guest artifacts. Native x86_64 release also
 # exercises verifier rejection paths; matching native Linux runs tool smoke tests.
 test\:guest-artifacts: export _BOXLITE_GUEST_TARGET_ARG := $(value GUEST_TARGET)

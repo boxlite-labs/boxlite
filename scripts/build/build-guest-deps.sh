@@ -66,6 +66,10 @@ cleanup() {
     local status=$? cleanup_failed=0
     trap - EXIT HUP INT TERM
     set +e
+    if [ "$status" -ne 0 ] && [ -n "$work" ] && [ -s "$work/build.log" ]; then
+        echo "ERROR: guest e2fsprogs build failed; build output follows:" >&2
+        cat "$work/build.log" >&2
+    fi
     remove_tree "$work" "temporary guest tools work directory" || cleanup_failed=1
     remove_tree "$stage" "guest tools staging directory" || cleanup_failed=1
     if [ "$status" -eq 0 ] && [ "$cleanup_failed" -ne 0 ]; then
@@ -233,7 +237,7 @@ build_tools() {
         make -j"$jobs" libs
         make -C misc -j"$jobs" mke2fs.static
         make -C resize -j"$jobs" resize2fs.static
-    )
+    ) >"$work/build.log" 2>&1
 
     stage=$(mktemp -d "$output_parent/.guest-tools-stage.XXXXXX")
     install -m 0755 "$work/build/misc/mke2fs.static" "$stage/mke2fs"

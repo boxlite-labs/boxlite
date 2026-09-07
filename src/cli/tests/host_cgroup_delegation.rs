@@ -44,6 +44,21 @@ impl Drop for BoxCleanup {
     }
 }
 
+/// Re-delegates the controllers the repair test switched off, for the paths
+/// where `setup_cgroup` never gets the chance to. A no-op once the box has
+/// started, since re-enabling an already-enabled controller is a kernel no-op.
+struct SubtreeRestore {
+    subtree: PathBuf,
+    controllers: Vec<String>,
+}
+impl Drop for SubtreeRestore {
+    fn drop(&mut self) {
+        for controller in &self.controllers {
+            let _ = std::fs::write(&self.subtree, format!("+{controller}"));
+        }
+    }
+}
+
 fn uid() -> u32 {
     // Avoids a libc dependency in the test crate; `id -u` is in every image the
     // CI hosts run.
@@ -76,13 +91,39 @@ fn boxlite_cgroup_parent() -> Option<PathBuf> {
         .then(|| user_scope.join("boxlite"))
 }
 
+/// Controllers the grandparent delegates into the `boxlite` parent — i.e. what
+/// `boxlite/cgroup.controllers` will contain, readable before `boxlite` exists.
+fn delegated_to(parent: &Path) -> Vec<String> {
+    let grandparent = parent.parent().unwrap_or(Path::new("/sys/fs/cgroup"));
+    std::fs::read_to_string(grandparent.join("cgroup.subtree_control"))
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect()
+}
+
 /// `Some(parent)` when this host can actually exercise the host-cgroup path, or
 /// `None` after printing why not.
+///
+/// Requires `pids` specifically: these tests assert on `pids.max`, which is the
+/// only limit with a default today (`ResourceLimits::max_memory` is `None`, so
+/// `memory.max` is never written). On a host that delegates `memory` but not
+/// `pids`, `enable_controllers` correctly omits `pids` and the assertion would
+/// fail for the host's configuration rather than for a defect.
 fn cgroup_parent_or_skip(what: &str) -> Option<PathBuf> {
     let Some(parent) = boxlite_cgroup_parent() else {
         eprintln!("SKIP {what}: no cgroup v2 (or no systemd user manager for this uid)");
         return None;
     };
+    let delegated = delegated_to(&parent);
+    if !delegated.iter().any(|c| c == "pids") {
+        eprintln!(
+            "SKIP {what}: `pids` is not delegated to {} (delegated: {delegated:?}), so there is \
+             no pids.max to assert on",
+            parent.display()
+        );
+        return None;
+    }
     // Writability is what decides whether boxlite can create the parent at all.
     let probe = parent.with_file_name(format!("boxlite-writeprobe-{}", std::process::id()));
     match std::fs::create_dir(&probe) {
@@ -209,17 +250,39 @@ fn a_parent_left_undelegated_is_repaired_by_the_next_box() {
         std::fs::create_dir(&parent).expect("create boxlite parent cgroup");
     }
     let subtree = parent.join("cgroup.subtree_control");
-    let before = std::fs::read_to_string(&subtree).unwrap_or_default();
-    for controller in before.split_whitespace() {
-        // Disabling is per-controller and may legitimately fail if a child
-        // appeared; the precondition assert below is what actually gates the test.
+    let before: Vec<String> = std::fs::read_to_string(&subtree)
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+
+    // Only the three this change is about. Disabling `io` or `cpuset` here would
+    // leave them off for good: `setup_cgroup` re-delegates cpu/memory/pids and
+    // nothing else, so the repair would not put them back.
+    let under_test: Vec<String> = before
+        .iter()
+        .filter(|c| matches!(c.as_str(), "cpu" | "memory" | "pids"))
+        .cloned()
+        .collect();
+    for controller in &under_test {
+        // May legitimately fail if a child cgroup appeared; the check below is
+        // what actually gates the test.
         let _ = std::fs::write(&subtree, format!("-{controller}"));
     }
-    let cleared = std::fs::read_to_string(&subtree).unwrap_or_default();
-    if !cleared.trim().is_empty() {
+    // Put them back if this test bails out before `start_box` repairs the parent.
+    let _restore = SubtreeRestore {
+        subtree: subtree.clone(),
+        controllers: under_test.clone(),
+    };
+
+    let still_on = std::fs::read_to_string(&subtree).unwrap_or_default();
+    if still_on
+        .split_whitespace()
+        .any(|c| matches!(c, "cpu" | "memory" | "pids"))
+    {
         eprintln!(
-            "SKIP a_parent_left_undelegated_is_repaired_by_the_next_box: could not clear \
-             subtree_control (still {cleared:?})"
+            "SKIP a_parent_left_undelegated_is_repaired_by_the_next_box: could not undelegate \
+             cpu/memory/pids (still {still_on:?})"
         );
         return;
     }

@@ -5,10 +5,6 @@
 # "Require code scanning results" ruleset rule can be satisfied without an admin
 # bypass.
 #
-# GitHub rejects advanced CodeQL uploads while default setup is enabled, so keep
-# this workflow dormant until repository variable CODEQL_ADVANCED_SETUP_ENABLED
-# is set to "true" after default setup is disabled.
-#
 # Languages use `build-mode: none` (source-only analysis, no compile step) where
 # CodeQL supports it. Go does not support `none` — its extractor must observe a
 # build — so Go uses `autobuild` (the same mode default setup used successfully
@@ -32,7 +28,6 @@ concurrency:
 
 jobs:
   analyze:
-    if: vars.CODEQL_ADVANCED_SETUP_ENABLED == 'true'
     name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
     permissions:

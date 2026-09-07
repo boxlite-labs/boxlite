@@ -612,6 +612,7 @@ impl BoxOptions {
             ));
         }
 
+        self.net_bandwidth.validate()?;
         if matches!(self.network, NetworkSpec::Disabled) && !self.net_bandwidth.is_unlimited() {
             return Err(boxlite_shared::errors::BoxliteError::InvalidArgument(
                 "net_bandwidth requires network.outbound.mode=\"enabled\" — there is \
@@ -946,7 +947,9 @@ impl NetworkConfig {
 /// covers TCP, UDP, ICMP and ARP together; there is no per-protocol split.
 ///
 /// `None` or `0` in a direction leaves that direction unlimited, the same
-/// convention Firecracker, Kata and Cloud Hypervisor use. Local runtime only:
+/// convention Firecracker, Kata and Cloud Hypervisor use. Each direction must
+/// fit within the bridge's token bucket limit; larger values are rejected.
+/// Local runtime only:
 /// a remote server owns its own network policy, so the REST wire types carry no
 /// field for this and `sanitize_remote` rejects it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -961,6 +964,26 @@ pub struct NetBandwidth {
 }
 
 impl NetBandwidth {
+    // The bridge caps bucket size at (1<<62)/1000 bytes. With a 100ms refill,
+    // size = floor(kbps * 125 / 10); this is the largest kbps that fits.
+    pub(crate) const MAX_KBPS: u64 = 368_934_881_474_191;
+
+    fn validate(&self) -> BoxliteResult<()> {
+        for (field, kbps) in [("tx_kbps", self.tx_kbps), ("rx_kbps", self.rx_kbps)] {
+            if let Some(kbps) = kbps
+                && kbps > Self::MAX_KBPS
+            {
+                return Err(boxlite_shared::errors::BoxliteError::InvalidArgument(
+                    format!(
+                        "net_bandwidth.{field} must be at most {} kbps (got {kbps})",
+                        Self::MAX_KBPS
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// True when neither direction is capped. A `Some(0)` counts as uncapped,
     /// so callers that pass a flag through unconditionally do not have to
     /// special-case zero.
@@ -1362,6 +1385,54 @@ mod tests {
 
         opts.sanitize()
             .expect("a cap with the default enabled network must be accepted");
+    }
+
+    #[test]
+    fn box_options_sanitize_accepts_bandwidth_up_to_bridge_maximum() {
+        for kbps in [None, Some(0), Some(NetBandwidth::MAX_KBPS)] {
+            let mut opts = BoxOptions {
+                net_bandwidth: NetBandwidth {
+                    tx_kbps: kbps,
+                    rx_kbps: kbps,
+                },
+                ..Default::default()
+            };
+
+            opts.sanitize_common().unwrap();
+            opts.sanitize_persisted().unwrap();
+            opts.sanitize().unwrap();
+        }
+    }
+
+    #[test]
+    fn box_options_sanitize_rejects_bandwidth_above_bridge_maximum() {
+        for field in ["tx_kbps", "rx_kbps"] {
+            for kbps in [NetBandwidth::MAX_KBPS + 1, u64::MAX] {
+                let mut opts = BoxOptions {
+                    net_bandwidth: NetBandwidth {
+                        tx_kbps: (field == "tx_kbps").then_some(kbps),
+                        rx_kbps: (field == "rx_kbps").then_some(kbps),
+                    },
+                    ..Default::default()
+                };
+
+                for result in [
+                    opts.sanitize_common(),
+                    opts.sanitize_persisted(),
+                    opts.sanitize(),
+                ] {
+                    let error = result.expect_err("oversized bandwidth must fail before startup");
+                    assert!(matches!(
+                        error,
+                        boxlite_shared::errors::BoxliteError::InvalidArgument(_)
+                    ));
+                    let message = error.to_string();
+                    assert!(message.contains(&format!("net_bandwidth.{field}")));
+                    assert!(message.contains(&kbps.to_string()));
+                    assert!(message.contains(&NetBandwidth::MAX_KBPS.to_string()));
+                }
+            }
+        }
     }
 
     #[test]

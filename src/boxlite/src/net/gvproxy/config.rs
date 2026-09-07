@@ -661,6 +661,29 @@ mod tests {
         assert!(limit.rx.is_none(), "an unset direction stays unlimited");
     }
 
+    #[test]
+    fn maximum_bandwidth_maps_to_bridge_bucket_limit() {
+        use crate::runtime::options::{BoxOptions, NetBandwidth};
+
+        // Independent wire bound enforced by TokenBucketConfig.validate in shaper.go.
+        const BRIDGE_MAX_BUCKET_BYTES: u64 = (1_u64 << 62) / 1000;
+
+        let opts = BoxOptions {
+            net_bandwidth: NetBandwidth {
+                tx_kbps: Some(NetBandwidth::MAX_KBPS),
+                rx_kbps: Some(NetBandwidth::MAX_KBPS),
+            },
+            ..Default::default()
+        };
+        opts.sanitize_common().unwrap();
+        let limit: GvproxyRateLimit = opts.net_bandwidth.into();
+
+        for bucket in [limit.tx.unwrap(), limit.rx.unwrap()] {
+            assert_eq!(bucket.size, BRIDGE_MAX_BUCKET_BYTES);
+            assert_eq!(bucket.refill_time_ms, RATE_LIMIT_REFILL_MS);
+        }
+    }
+
     /// The bridge reads the sustained rate back out of (size, refill_time_ms), so
     /// a slow cap must serialize its true 100ms window even when that is far
     /// below one maximum frame. Flooring it here would raise the rate instead of

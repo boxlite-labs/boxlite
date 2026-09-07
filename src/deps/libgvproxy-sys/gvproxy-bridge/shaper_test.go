@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/bits"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -486,6 +488,224 @@ func TestFramesSurviveShapingIntactAndInOrder(t *testing.T) {
 		if !bytes.Equal(got[i], want[i]) {
 			t.Fatalf("frame %d differs; the shaper must not reframe or reorder", i)
 		}
+	}
+}
+
+// Debt lasts longer than the test timeout, so a missed deadline wakeup fails
+// before tokens could become available on their own.
+const (
+	deadlineTestQEMUHeaderBytes       = 4
+	deadlineTestBucketBytes     int64 = 1000
+	deadlineTestRefillPeriod          = time.Second
+	deadlineTestTXDebtWait            = 30 * time.Second
+	deadlineTestTXDebtBytes           = deadlineTestBucketBytes * int64(deadlineTestTXDebtWait/deadlineTestRefillPeriod)
+	deadlineTestWaitTimeout           = 2 * time.Second
+	deadlineTestExpiredOffset         = -time.Second
+)
+
+// Keep the bucket clock frozen so deadline updates cannot repay or hide debt.
+// The clock notification synchronizes with Read entering the TX throttle.
+func newTXDebtConn(t *testing.T) (*shapedConn, <-chan struct{}) {
+	t.Helper()
+	inner, peer := net.Pipe()
+	clock := newFakeClock()
+	cfg := &RateLimitConfig{TX: bucketCfg(deadlineTestBucketBytes, deadlineTestRefillPeriod.Milliseconds())}
+	c := newShapedConn(inner, deadlineTestQEMUHeaderBytes, cfg, clock.now)
+	c.tx.reserve(c.tx.capacity + deadlineTestTXDebtBytes)
+	started := make(chan struct{}, 1)
+	c.tx.now = func() time.Time {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		return clock.now()
+	}
+	t.Cleanup(func() { _ = c.Close(); _ = peer.Close() })
+	return c, started
+}
+
+func startTXRead(t *testing.T, c *shapedConn, started <-chan struct{}) <-chan error {
+	t.Helper()
+	result := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var buf [1]byte
+		n, err := c.Read(buf[:])
+		if n != 0 {
+			err = fmt.Errorf("Read returned %d bytes while TX was in debt", n)
+		}
+		result <- err
+	}()
+	t.Cleanup(func() {
+		_ = c.Close()
+		select {
+		case <-done:
+		case <-time.After(deadlineTestWaitTimeout):
+			t.Error("TX Read did not exit after Close")
+		}
+	})
+	select {
+	case <-started:
+	case <-time.After(deadlineTestWaitTimeout):
+		t.Fatal("Read did not enter the TX throttle")
+	}
+	return result
+}
+
+func TestTxReadDeadlineInterruptsThrottle(t *testing.T) {
+	const deadlineDelay = 50 * time.Millisecond
+
+	for _, method := range []string{"SetReadDeadline", "SetDeadline"} {
+		for _, preset := range []bool{false, true} {
+			for _, offset := range []time.Duration{deadlineTestExpiredOffset, deadlineDelay} {
+				t.Run(fmt.Sprintf("%s/preset=%t/offset=%s", method, preset, offset), func(t *testing.T) {
+					t.Parallel()
+					c, started := newTXDebtConn(t)
+					setDeadline := c.SetReadDeadline
+					if method == "SetDeadline" {
+						setDeadline = c.SetDeadline
+					}
+					set := func() {
+						if err := setDeadline(time.Now().Add(offset)); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if preset {
+						set()
+					}
+					result := startTXRead(t, c, started)
+					if !preset {
+						set()
+					}
+					select {
+					case err := <-result:
+						var timeout net.Error
+						if !errors.Is(err, os.ErrDeadlineExceeded) || !errors.As(err, &timeout) || !timeout.Timeout() {
+							t.Fatalf("Read error = %v, want a deadline timeout", err)
+						}
+					case <-time.After(deadlineTestWaitTimeout):
+						t.Fatalf("read deadline did not interrupt TX throttle (%s debt)", deadlineTestTXDebtWait)
+					}
+					c.tx.mu.Lock()
+					tokens := c.tx.tokens
+					c.tx.mu.Unlock()
+					if tokens != -deadlineTestTXDebtBytes {
+						t.Fatalf("deadline changed TX debt: tokens = %d, want %d", tokens, -deadlineTestTXDebtBytes)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestTxReadDeadlineCanBeExtendedOrCleared(t *testing.T) {
+	const (
+		initialDeadlineDelay      = 500 * time.Millisecond
+		extendedDeadlineDelay     = time.Minute
+		deadlineObservationMargin = 50 * time.Millisecond
+	)
+
+	for _, method := range []string{"SetReadDeadline", "SetDeadline"} {
+		for _, clear := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/clear=%t", method, clear), func(t *testing.T) {
+				t.Parallel()
+				c, started := newTXDebtConn(t)
+				setDeadline := c.SetReadDeadline
+				if method == "SetDeadline" {
+					setDeadline = c.SetDeadline
+				}
+				deadline := time.Now().Add(initialDeadlineDelay)
+				if err := setDeadline(deadline); err != nil {
+					t.Fatal(err)
+				}
+				result := startTXRead(t, c, started)
+				updated := time.Now().Add(extendedDeadlineDelay)
+				if clear {
+					updated = time.Time{}
+				}
+				if err := setDeadline(updated); err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case err := <-result:
+					t.Fatalf("Read returned after deadline update: %v", err)
+				case <-time.After(time.Until(deadline) + deadlineObservationMargin):
+				}
+				_ = c.Close()
+				select {
+				case err := <-result:
+					if !errors.Is(err, net.ErrClosed) {
+						t.Fatalf("Read error = %v, want net.ErrClosed", err)
+					}
+				case <-time.After(deadlineTestWaitTimeout):
+					t.Fatal("Close did not interrupt TX throttle")
+				}
+			})
+		}
+	}
+}
+
+func TestShapedConnDeadlineSettersPreserveUnderlyingErrors(t *testing.T) {
+	const observationWindow = 100 * time.Millisecond
+
+	for _, method := range []string{"SetReadDeadline", "SetDeadline"} {
+		t.Run(method, func(t *testing.T) {
+			t.Parallel()
+			c, started := newTXDebtConn(t)
+			_ = c.Conn.Close()
+			setDeadline := c.SetReadDeadline
+			if method == "SetDeadline" {
+				setDeadline = c.SetDeadline
+			}
+			if err := setDeadline(time.Now().Add(deadlineTestExpiredOffset)); !errors.Is(err, io.ErrClosedPipe) {
+				t.Fatalf("deadline setter error = %v, want io.ErrClosedPipe", err)
+			}
+			result := startTXRead(t, c, started)
+			select {
+			case err := <-result:
+				t.Fatalf("failed setter changed the TX deadline: %v", err)
+			case <-time.After(observationWindow):
+			}
+		})
+	}
+}
+
+func TestShapedConnSetDeadlineAlsoSetsWriteDeadline(t *testing.T) {
+	c, _ := newTXDebtConn(t)
+	if err := c.SetDeadline(time.Now().Add(deadlineTestExpiredOffset)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Write([]byte{1}); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("Write error = %v, want a deadline timeout", err)
+	}
+}
+
+func TestShapedConnReadDeadlineDoesNotStopRXPacer(t *testing.T) {
+	const payloadBytes = 100
+
+	inner, peer := net.Pipe()
+	cfg := &RateLimitConfig{RX: bucketCfg(deadlineTestBucketBytes, deadlineTestRefillPeriod.Milliseconds())}
+	c := newShapedConn(inner, deadlineTestQEMUHeaderBytes, cfg, newFakeClock().now)
+	defer c.Close()
+	defer peer.Close()
+	c.rx.reserve(c.rx.capacity)
+	if err := c.SetReadDeadline(time.Now().Add(deadlineTestExpiredOffset)); err != nil {
+		t.Fatal(err)
+	}
+	if err := peer.SetReadDeadline(time.Now().Add(deadlineTestWaitTimeout)); err != nil {
+		t.Fatal(err)
+	}
+	frame := qemuFrame(bytes.Repeat([]byte{1}, payloadBytes))
+	if _, err := c.Write(frame); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len(frame))
+	if _, err := io.ReadFull(peer, got); err != nil {
+		t.Fatalf("RX pacer stopped at read deadline: %v", err)
+	}
+	if !bytes.Equal(got, frame) {
+		t.Fatal("RX frame changed")
 	}
 }
 

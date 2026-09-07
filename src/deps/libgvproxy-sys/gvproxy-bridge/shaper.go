@@ -7,6 +7,7 @@ import (
 	"math"
 	"math/bits"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -400,6 +401,10 @@ type shapedConn struct {
 	queueBytes atomic.Int64
 	maxQueueB  int64
 
+	readDeadlineMu      sync.Mutex
+	readDeadline        time.Time
+	readDeadlineChanged chan struct{}
+
 	stop      chan struct{}
 	closeOnce sync.Once
 	stats     shaperStats
@@ -419,10 +424,11 @@ func wrapConn(conn net.Conn, hdrLen int, cfg *RateLimitConfig) net.Conn {
 
 func newShapedConn(conn net.Conn, hdrLen int, cfg *RateLimitConfig, now func() time.Time) *shapedConn {
 	c := &shapedConn{
-		Conn:   conn,
-		hdrLen: hdrLen,
-		framer: framer{hdrLen: hdrLen},
-		stop:   make(chan struct{}),
+		Conn:                conn,
+		hdrLen:              hdrLen,
+		framer:              framer{hdrLen: hdrLen},
+		stop:                make(chan struct{}),
+		readDeadlineChanged: make(chan struct{}),
 	}
 	if !cfg.TX.unlimited() {
 		c.tx = newTokenBucket(cfg.TX, now)
@@ -486,6 +492,81 @@ func (c *shapedConn) sleep(d time.Duration) bool {
 	}
 }
 
+// SetReadDeadline covers both the underlying read and the TX token wait.
+// Serialize forwarding and notification so concurrent setters cannot leave
+// the wrapper and the underlying connection with different read deadlines.
+func (c *shapedConn) SetReadDeadline(t time.Time) error {
+	c.readDeadlineMu.Lock()
+	defer c.readDeadlineMu.Unlock()
+	if err := c.Conn.SetReadDeadline(t); err != nil {
+		return err
+	}
+	c.setReadDeadlineLocked(t)
+	return nil
+}
+
+func (c *shapedConn) SetDeadline(t time.Time) error {
+	c.readDeadlineMu.Lock()
+	defer c.readDeadlineMu.Unlock()
+	if err := c.Conn.SetDeadline(t); err != nil {
+		return err
+	}
+	c.setReadDeadlineLocked(t)
+	return nil
+}
+
+func (c *shapedConn) setReadDeadlineLocked(t time.Time) {
+	c.readDeadline = t
+	close(c.readDeadlineChanged)
+	c.readDeadlineChanged = make(chan struct{})
+}
+
+func (c *shapedConn) waitForTX() error {
+	d := c.tx.waitNonNegative()
+	if d <= 0 {
+		return nil
+	}
+	c.stats.txThrottledEvents.Add(1)
+	c.stats.txThrottledNs.Add(int64(d))
+
+	// Deadline updates wake the waiter without restarting the token wait.
+	readyAt := time.Now().Add(d)
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	for {
+		select {
+		case <-c.stop:
+			return net.ErrClosed
+		default:
+		}
+		c.readDeadlineMu.Lock()
+		deadline, changed := c.readDeadline, c.readDeadlineChanged
+		c.readDeadlineMu.Unlock()
+
+		now := time.Now()
+		wait := readyAt.Sub(now)
+		if !deadline.IsZero() {
+			remaining := deadline.Sub(now)
+			if remaining <= 0 {
+				return &net.OpError{Op: "read", Err: os.ErrDeadlineExceeded}
+			}
+			if remaining < wait {
+				wait = remaining
+			}
+		}
+		if wait <= 0 {
+			return nil
+		}
+		timer.Reset(wait)
+		select {
+		case <-c.stop:
+			return net.ErrClosed
+		case <-changed:
+		case <-timer.C:
+		}
+	}
+}
+
 // Read shapes TX, what the box sends.
 //
 // The charge happens after the read, not before, so there is no need to guess
@@ -503,12 +584,8 @@ func (c *shapedConn) sleep(d time.Duration) bool {
 // full receive buffer is unverified — do not assume it backpressures.
 func (c *shapedConn) Read(p []byte) (int, error) {
 	if c.tx != nil {
-		if d := c.tx.waitNonNegative(); d > 0 {
-			c.stats.txThrottledEvents.Add(1)
-			c.stats.txThrottledNs.Add(int64(d))
-			if !c.sleep(d) {
-				return 0, net.ErrClosed
-			}
+		if err := c.waitForTX(); err != nil {
+			return 0, err
 		}
 	}
 	n, err := c.Conn.Read(p)

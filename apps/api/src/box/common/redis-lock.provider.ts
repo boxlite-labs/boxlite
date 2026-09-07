@@ -253,11 +253,13 @@ export class RedisLockProvider {
     return exists === 1
   }
 
-  async waitForLock(key: string, ttl: number): Promise<void> {
-    while (true) {
+  async waitForLock(key: string, ttl: number, timeoutMs: number = 30000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
       const acquired = await this.lock(key, ttl)
-      if (acquired) break
+      if (acquired) return
       await new Promise((resolve) => setTimeout(resolve, 50))
     }
+    throw new Error(`waitForLock timed out after ${timeoutMs}ms for key: ${key}`)
   }
 }

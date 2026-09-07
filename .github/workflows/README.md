@@ -131,19 +131,6 @@ not analyze pull requests from forks — which makes the `code_scanning` ruleset
 scanning results") permanently block fork PRs. Advanced setup runs on `pull_request`, so fork PRs
 in this public repo are scanned and the gate is satisfiable without an admin bypass.
 
-GitHub rejects advanced CodeQL uploads while default setup is enabled, so the workflow is dormant
-until the repository variable `CODEQL_ADVANCED_SETUP_ENABLED` is `true` (`codeql.yml:35`).
-
-**Activation, in this order:**
-
-1. Merge the workflow while `CODEQL_ADVANCED_SETUP_ENABLED` is unset or `false`, so default setup
-   remains the active scanner.
-2. Disable CodeQL default setup.
-3. Set the repository variable `CODEQL_ADVANCED_SETUP_ENABLED=true`.
-4. Trigger a push, pull request update, or manual dispatch, and verify the analysis uploads.
-
-**Rollback:** set `CODEQL_ADVANCED_SETUP_ENABLED=false` and re-enable default setup.
-
 The `analyze` job is a matrix over `actions`, `c-cpp`, `go`, `javascript-typescript`, `python` and
 `rust`. All use `build-mode: none` (source only, no compile) except `go`, whose extractor has to
 observe a real build and therefore uses `autobuild`.

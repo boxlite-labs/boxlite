@@ -1,0 +1,94 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RuntimeAccountWideControlChannels",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetAuthorizationToken",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer",
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams",
+        "logs:FilterLogEvents",
+        "logs:PutLogEvents",
+        "ssm:DescribeAssociation",
+        "ssm:GetDeployablePatchSnapshotForInstance",
+        "ssm:GetDocument",
+        "ssm:GetManifest",
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "ssm:ListAssociations",
+        "ssm:ListInstanceAssociations",
+        "ssm:PutComplianceItems",
+        "ssm:PutConfigurePackageResult",
+        "ssm:PutInventory",
+        "ssm:UpdateAssociationStatus",
+        "ssm:UpdateInstanceAssociationStatus",
+        "ssm:UpdateInstanceInformation",
+        "ssmmessages:CreateControlChannel",
+        "ssmmessages:CreateDataChannel",
+        "ssmmessages:OpenControlChannel",
+        "ssmmessages:OpenDataChannel",
+        "ec2messages:AcknowledgeMessage",
+        "ec2messages:DeleteMessage",
+        "ec2messages:FailMessage",
+        "ec2messages:GetEndpoint",
+        "ec2messages:GetMessages",
+        "ec2messages:SendReply"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "BoxLiteStageSecrets",
+      "Effect": "Allow",
+      "Action": ["secretsmanager:DescribeSecret", "secretsmanager:GetSecretValue"],
+      "Resource": "arn:aws:secretsmanager:<REGION>:<ACCOUNT>:secret:boxlite-<STAGE>-*"
+    },
+    {
+      "Sid": "BoxLiteStageKmsKeys",
+      "Effect": "Allow",
+      "Action": "kms:Decrypt",
+      "Resource": "arn:aws:kms:<REGION>:<ACCOUNT>:key/*",
+      "Condition": {
+        "ForAnyValue:StringLike": { "kms:ResourceAliases": "alias/boxlite-<STAGE>-*" }
+      }
+    },
+    {
+      "Sid": "BoxLiteBuckets",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:DeleteBucket",
+        "s3:GetBucketLocation",
+        "s3:ListBucket",
+        "s3:ListBucketVersions",
+        "s3:PutBucketTagging"
+      ],
+      "Resource": [
+        "arn:aws:s3:::boxlite-<STAGE>-*",
+        "arn:aws:s3:::boxlite-app-<STAGE>-*",
+        "arn:aws:s3:::boxlite-volume-*"
+      ]
+    },
+    {
+      "Sid": "BoxLiteBucketObjects",
+      "Effect": "Allow",
+      "Action": ["s3:AbortMultipartUpload", "s3:DeleteObject", "s3:DeleteObjectVersion", "s3:GetObject", "s3:PutObject"],
+      "Resource": [
+        "arn:aws:s3:::boxlite-<STAGE>-*/*",
+        "arn:aws:s3:::boxlite-app-<STAGE>-*/*",
+        "arn:aws:s3:::boxlite-volume-*/*"
+      ]
+    },
+    {
+      "Sid": "AssumeBoxLiteRuntimeRoles",
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": "arn:aws:iam::<ACCOUNT>:role/boxlite-<STAGE>-*"
+    }
+  ]
+}

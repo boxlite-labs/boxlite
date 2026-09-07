@@ -6,8 +6,8 @@
  * whichever cloud `mstage.config.json` says the requested stage lives in
  * (`homeFor`, the same field `mdeploy` reads to pick its engine).
  *
- * On AWS: the GitHub OIDC deploy role + runtime IAM boundary
- * (bootstrap/aws/github-deploy-role.yaml), the GitHub `<stage>` Environment the
+ * On AWS: the GitHub OIDC deploy role + runtime IAM boundary (`aws.ts`, whose
+ * JSON documents live in `bootstrap/aws/`), the GitHub `<stage>` Environment the
  * deploy workflow binds to, the Cloudflare provider credentials in SSM, and the
  * stage's own configuration — OIDC_CLIENT_ID, and every key from .env that is not
  * local-only (deployableStageConfig) — in its SST secret store. Everything below
@@ -39,11 +39,11 @@
  *
  * Safe to re-run any number of times: every step reconciles to the desired
  * state instead of failing on "already exists". Requires AWS credentials
- * with IAM/SSM/CloudFormation access — deliberately NOT the scoped deploy
- * role this script provisions, which cannot touch CloudFormation or its own
- * IAM policy by design (see the CreateBoundedBoxLiteRoles /
- * SetBoxLiteRoleBoundary statements in bootstrap/aws/github-deploy-role.yaml) — and a
- * `gh` CLI authenticated against the target repo.
+ * with IAM/SSM access — deliberately NOT the scoped deploy role this script
+ * provisions, which cannot touch its own IAM policy by design (see the
+ * CreateBoundedBoxLiteRoles / SetBoxLiteRoleBoundary statements in
+ * bootstrap/aws/deploy-role-policy.json) — and a `gh` CLI authenticated
+ * against the target repo.
  *
  * Usage: npm run bootstrap -- [--stage dev] [--repo owner/name]
  *                                               [--reviewers 123,456] [--force]
@@ -92,9 +92,6 @@ import {
 import {
   GITHUB_OIDC_PROVIDER_URL,
   MINIMUM_AWS_CLI_VERSION,
-  cloudFormationDeployChanged,
-  cloudFormationParameterOverrides,
-  githubDeployRoleStackName,
   hasGitHubOidcProvider,
   isAwsCliVersionAtLeast,
   parseBootstrapOptions,
@@ -119,13 +116,13 @@ import { sesProductionAccess, sesSmtpPasswordV4 } from './ses-smtp.js'
 import { homeFor, loadConfig, type MstageConfig } from 'mstage/config'
 import { loadBuildConfig, registryFor } from 'mbuild/config'
 import { bootstrapGcp, type GitHubRepository } from './gcp.js'
+import { bootstrapAws } from './aws.js'
 
 const SCRIPT_NAME = 'bootstrap-environment'
 // The one stage that must never end up with an unreviewed deploy path. Matches
 // PRODUCTION_STAGE in stack/settings.ts, which gates retain-on-removal.
 const PROTECTED_STAGE = 'prod'
 const INFRA_ROOT = fileURLToPath(new URL('..', import.meta.url))
-const TEMPLATE_PATH = join(INFRA_ROOT, 'bootstrap', 'aws', 'github-deploy-role.yaml')
 const ENV_PATH = join(INFRA_ROOT, '.env')
 const SST_WRAPPER_PATH = join(INFRA_ROOT, 'deployment', 'sst.ts')
 // Generous but bounded: a healthy platform install completed in ~85s here.
@@ -696,11 +693,11 @@ function iamJson(awsCliPath: any, args: readonly string[]) {
  * by SES's SigV4 chain, is the SMTP password the Api authenticates with.
  *
  * Here rather than in the stack because the deploy role cannot mint it. Every IAM
- * grant in aws/github-deploy-role.yaml is scoped to roles — deliberately, so a CI job
+ * grant in aws/deploy-role-policy.json is scoped to roles — deliberately, so a CI job
  * can never create a principal that outlives it — and an SES SMTP credential is an
  * IAM user's access key. This step runs with the operator's own credentials, the same
- * ones that deploy that template, and leaves both halves in the stage's secret store
- * where stack/mail.ts reads them.
+ * ones bootstrap/aws.ts's ensureDeployRole runs with, and leaves both halves in the
+ * stage's secret store where stack/mail.ts reads them.
  *
  * Rerunning rotates rather than reuses: IAM returns a secret access key once, at
  * creation, so an existing key cannot be recovered — and a user is capped at two.
@@ -922,52 +919,21 @@ function requestSesProductionAccess({ awsCliPath, region, senderDomain }: any) {
   )
 }
 
-function deployGithubDeployRoleStack({ awsCliPath, region, stage, repo }: any) {
-  const stackName = githubDeployRoleStackName(stage)
-  const overrides = cloudFormationParameterOverrides({ repo, stage })
-
-  const deployStdout = execFileSync(
-    awsCliPath,
-    [
-      'cloudformation',
-      'deploy',
-      '--region',
-      region,
-      '--stack-name',
-      stackName,
-      '--template-file',
-      TEMPLATE_PATH,
-      '--capabilities',
-      'CAPABILITY_NAMED_IAM',
-      '--no-fail-on-empty-changeset',
-      '--parameter-overrides',
-      ...overrides,
-    ],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'], timeout: 300_000, killSignal: 'SIGTERM' },
-  )
-  console.log(deployStdout.trim())
-  console.log(
-    `[${SCRIPT_NAME}] ${stackName} ... ${cloudFormationDeployChanged(deployStdout) ? 'created/updated' : 'already up to date'}`,
-  )
-
-  const roleArn = execFileSync(
-    awsCliPath,
-    [
-      'cloudformation',
-      'describe-stacks',
-      '--region',
-      region,
-      '--stack-name',
-      stackName,
-      '--query',
-      "Stacks[0].Outputs[?OutputKey=='RoleArn'].OutputValue",
-      '--output',
-      'text',
-    ],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, killSignal: 'SIGTERM' },
-  ).trim()
-  if (!roleArn) throw new Error(`${stackName} produced no RoleArn output`)
-  return roleArn
+/**
+ * The AWS half of bootstrap: the deploy role, its runtime IAM boundary, the Api
+ * image repository and the Runner artifacts bucket. Everything AWS-specific
+ * lives in aws.ts (mirrors how everything GCP-specific lives in gcp.ts); this
+ * is only the wiring that hands it a `run` and prints its log lines.
+ */
+async function bootstrapAwsRole({ region, stage, repo, accountId }: any): Promise<void> {
+  await bootstrapAws({
+    run: execRun,
+    repo,
+    stage,
+    accountId,
+    region,
+    log: (line) => console.log(`[${SCRIPT_NAME}] ${line}`),
+  })
 }
 
 /*
@@ -1036,12 +1002,13 @@ function resolveGitHubRepositoryIds(repo: any) {
 }
 
 /**
- * `gcp.ts`'s injected `Run`: a result to reconcile against, never a thrown
- * error — the same contract `awsFor`'s `Aws.present` gives the AWS functions
- * above, and for the same reason: absence of a resource is an answer gcloud
- * gives with a non-zero exit, not a fault in this process.
+ * The injected `Run` both gcp.ts's `bootstrapGcp` and aws.ts's `bootstrapAws`
+ * take: a result to reconcile against, never a thrown error, because absence
+ * of a resource is an answer `gcloud`/`aws` give with a non-zero exit, not a
+ * fault in this process. Generic over `command` so one implementation serves
+ * both clouds instead of two copies drifting apart.
  */
-async function gcloudRun(command: string, args: string[], options: { stdin?: string } = {}) {
+async function execRun(command: string, args: string[], options: { stdin?: string } = {}) {
   try {
     const stdout = execFileSync(command, args, {
       input: options.stdin,
@@ -1119,7 +1086,7 @@ async function bootstrapGcpStage({
   }
 
   const result = await bootstrapGcp({
-    run: gcloudRun,
+    run: execRun,
     project: declared.project,
     region: declared.region,
     app: config.app,
@@ -1252,7 +1219,7 @@ async function main() {
   ensureStageConfig(stage, stageConfigLoad)
   // The role is deployed after the store is seeded so a failure here leaves a stage that is
   // configured but not yet deployable, rather than one the workflow can reach with no configuration.
-  deployGithubDeployRoleStack({ awsCliPath, region, stage, repo })
+  await bootstrapAwsRole({ region, stage, repo, accountId: identity.Account })
   wireGithubEnvironment({ repo, stage, accountId: identity.Account, region })
 
   console.log(

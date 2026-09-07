@@ -3,12 +3,12 @@
 
 /*
  * Pure IAM-policy-document checks for deployment/verify-role.ts — a
- * CI preflight that catches "the bootstrap CloudFormation stack was never
- * (re)deployed" in seconds, using only the read-only IAM permissions already
- * granted to the deploy role (the ReadIamAndAccountMetadata statement in
- * bootstrap/aws/github-deploy-role.yaml), instead of the ~2-minute wall of duplicate
- * iam:PutRolePermissionsBoundary AccessDenied errors a real `sst deploy`
- * produces when this is missing.
+ * CI preflight that catches "bootstrap was never (re)run for this stage" in
+ * seconds, using only the read-only IAM permissions already granted to the
+ * deploy role (the ReadIamAndAccountMetadata statement in
+ * bootstrap/aws/deploy-role-policy.json), instead of the ~2-minute wall of
+ * duplicate iam:PutRolePermissionsBoundary AccessDenied errors a real
+ * `sst deploy` produces when this is missing.
  *
  * This does not reimplement AWS's full policy evaluation (explicit Deny,
  * SCPs, permission boundaries on the deploy role itself, and so on) — it
@@ -56,8 +56,8 @@ function stringEqualsValues(condition: any, conditionKey: any) {
 }
 
 /*
- * Recognizes the `Condition.StringEquals` operator the actual template uses
- * (SetBoxLiteRoleBoundary in bootstrap/aws/github-deploy-role.yaml). A statement with no
+ * Recognizes the `Condition.StringEquals` operator the actual document uses
+ * (SetBoxLiteRoleBoundary in bootstrap/aws/deploy-role-policy.json). A statement with no
  * condition on `conditionKey` is an unconditional — and therefore sufficient
  * — grant of the action; a policy redesigned around a different condition
  * operator would need this updated too.

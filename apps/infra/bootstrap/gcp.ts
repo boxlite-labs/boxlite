@@ -124,8 +124,8 @@ const SERVICES = [
 /**
  * What the deploy identity may do, one role per group of resources that needs it.
  *
- * Wide on purpose, for now. The AWS side reaches the same place with
- * PowerUserAccess plus a fenced inline policy (`bootstrap/aws/github-deploy-role.yaml`);
+ * Wide on purpose, for now. The AWS side reaches the same place with a single
+ * bespoke inline policy fenced by a permissions boundary (`bootstrap/aws/deploy-role-policy.json`);
  * GCP has no such umbrella, so this is the list of admin roles the bundle's
  * resource types actually require. Narrowing this is the step to take once a
  * first apply has succeeded and the audit log says which permissions were

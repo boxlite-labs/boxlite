@@ -98,8 +98,9 @@ reasoned. A gap surfaces as AccessDenied on a preview, and clearing it means red
 stack with a wider policy, so preview with `apply=false` before any apply.
 
 Every SST-created IAM role receives the stage runtime permissions boundary through the global role
-transform. The checked-in bootstrap CloudFormation template creates the deployment boundary and
-the GitHub OIDC trust used before SST can deploy anything.
+transform. `npm run bootstrap` (bootstrap/aws.ts, reconciling the checked-in documents in
+bootstrap/aws/) creates the deployment boundary and the GitHub OIDC trust used before SST can
+deploy anything.
 
 Runner instances are protected resources. The mandatory policy pack validates their identities,
 lifecycle options, and normalized state baseline during real previews and deploys. Runner AMI and

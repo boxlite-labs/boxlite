@@ -141,9 +141,9 @@ jobs:
         with:
           # Composed from the stage's AWS_ACCOUNT_ID, not a stored role ARN: the
           # role name is fixed per stage (bootstrap/environment.ts's
-          # githubDeployRoleName, pinned against the CloudFormation template by a
-          # test), so only the account id has to be configured. Every other deploy
-          # workflow in this repository composes it the same way.
+          # githubDeployRoleName, the same name bootstrap/aws.ts creates the role
+          # under), so only the account id has to be configured. Every other
+          # deploy workflow in this repository composes it the same way.
           role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/boxlite-${{ inputs.stage || inputs.to }}-github-deploy
           aws-region: ${{ steps.config.outputs.region }}
           role-session-name: mbuild-${{ github.run_id }}

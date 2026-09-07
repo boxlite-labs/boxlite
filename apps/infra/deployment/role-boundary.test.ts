@@ -8,12 +8,12 @@ import { parseAssumedRoleName, policyDocumentsAllow, verifyDeployRoleGrantsBound
 
 const ACCOUNT_ID = '123456789012'
 // The stage the fixtures below are scoped to, matching the verifyDeployRoleGrantsBoundaryPermission
-// calls at the bottom of this file. The real template writes ${GitHubEnvironment} here.
+// calls at the bottom of this file. The real document writes <STAGE> here.
 const STAGE = 'dev'
 const CALLER_ARN = `arn:aws:sts::${ACCOUNT_ID}:assumed-role/boxlite-app-dev-deploy/deploy-dev-stack-30606029374`
 
-// Mirrors bootstrap/aws/github-deploy-role.yaml's GitHubDeployRole inline policy verbatim
-// (Sid: SetBoxLiteRoleBoundary), so a change to the real template that this
+// Mirrors bootstrap/aws/deploy-role-policy.json's inline policy verbatim
+// (Sid: SetBoxLiteRoleBoundary), so a change to the real document that this
 // check can no longer see is caught by editing this fixture, not by a live
 // AWS surprise.
 function boundedRoleStatements(boundaryArn: any) {

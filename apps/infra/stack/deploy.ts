@@ -111,7 +111,7 @@ export async function deployStack() {
   // stage without them deploys and simply sends nothing.
   //
   // Secrets rather than stack resources because the deploy role cannot mint
-  // them: bootstrap/aws/github-deploy-role.yaml grants IAM on roles only, and
+  // them: bootstrap/aws/deploy-role-policy.json grants IAM on roles only, and
   // an SES SMTP credential is an IAM user's access key. `npm run bootstrap --
   // --provision-ses` creates that user with the operator's own credentials and
   // stores both halves here, the same shape as OIDC_CLIENT_ID above.
@@ -242,9 +242,9 @@ export async function deployStack() {
   // SST hands an image string straight to the task definition (normalizeImage, sst/platform
   // fargate component), so the modes differ only in this expression.
   //
-  // The stage bootstrap template (bootstrap/aws/github-deploy-role.yaml) owns the immutable repository:
-  // an image has to be published before a fresh stack can consume one, so the consumer cannot
-  // also be responsible for creating its input.
+  // The stage bootstrap (bootstrap/aws.ts's ensureApiImageRepository) owns the immutable
+  // repository: an image has to be published before a fresh stack can consume one, so the
+  // consumer cannot also be responsible for creating its input.
   const { api } = buildApi({
     foundation,
     region: REGION,

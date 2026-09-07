@@ -1,0 +1,283 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BoxLiteAwsControlPlane",
+      "Effect": "Allow",
+      "Action": [
+        "acm:*",
+        "application-autoscaling:*",
+        "autoscaling:*",
+        "cloudfront:*",
+        "cloudfront-keyvaluestore:*",
+        "cloudwatch:*",
+        "ec2:*",
+        "ecr:*",
+        "ecs:*",
+        "elasticache:*",
+        "elasticloadbalancing:*",
+        "kms:DescribeKey",
+        "lambda:*",
+        "logs:*",
+        "rds:*",
+        "secretsmanager:ListSecrets",
+        "secretsmanager:GetRandomPassword",
+        "servicediscovery:*",
+        "tag:GetResources",
+        "tag:GetTagKeys",
+        "tag:GetTagValues"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SecretsForThisStage",
+      "Effect": "Allow",
+      "Action": "secretsmanager:*",
+      "Resource": ["arn:aws:secretsmanager:<REGION>:<ACCOUNT>:secret:boxlite-<STAGE>-*"]
+    },
+    {
+      "Sid": "SstStateForThisStage",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket", "s3:ListBucketVersions", "s3:GetBucketLocation"],
+      "Resource": ["arn:aws:s3:::sst-state-*", "arn:aws:s3:::sst-asset-*"]
+    },
+    {
+      "Sid": "SstStateObjectsForThisStage",
+      "Effect": "Allow",
+      "Action": [
+        "s3:AbortMultipartUpload",
+        "s3:DeleteObject",
+        "s3:DeleteObjectVersion",
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:PutObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::sst-state-*/app/boxlite/<STAGE>.json",
+        "arn:aws:s3:::sst-state-*/secret/boxlite/<STAGE>.json",
+        "arn:aws:s3:::sst-state-*/eventlog/boxlite/<STAGE>/*",
+        "arn:aws:s3:::sst-state-*/snapshot/boxlite/<STAGE>/*",
+        "arn:aws:s3:::sst-state-*/update/boxlite/<STAGE>/*",
+        "arn:aws:s3:::sst-state-*/lock/boxlite/<STAGE>",
+        "arn:aws:s3:::sst-state-*/lock/boxlite/<STAGE>.json",
+        "arn:aws:s3:::sst-state-*/summary/boxlite/<STAGE>/*",
+        "arn:aws:s3:::sst-asset-*/*"
+      ]
+    },
+    {
+      "Sid": "SstFallbackSecretsRead",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:GetObjectVersion"],
+      "Resource": ["arn:aws:s3:::sst-state-*/secret/boxlite/_fallback.json"]
+    },
+    {
+      "Sid": "BoxLiteStageBuckets",
+      "Effect": "Allow",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::boxlite-<STAGE>-*",
+        "arn:aws:s3:::boxlite-<STAGE>-*/*",
+        "arn:aws:s3:::boxlite-app-<STAGE>-*",
+        "arn:aws:s3:::boxlite-app-<STAGE>-*/*",
+        "arn:aws:s3:::boxlite-volume-*",
+        "arn:aws:s3:::boxlite-volume-*/*"
+      ]
+    },
+    {
+      "Sid": "SstSharedBootstrapRead",
+      "Effect": "Allow",
+      "Action": ["ssm:GetParameter", "ssm:GetParameters"],
+      "Resource": ["arn:aws:ssm:<REGION>:<ACCOUNT>:parameter/sst/bootstrap"]
+    },
+    {
+      "Sid": "SstParametersForThisStage",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "ssm:PutParameter",
+        "ssm:DeleteParameter",
+        "ssm:AddTagsToResource",
+        "ssm:ListTagsForResource"
+      ],
+      "Resource": [
+        "arn:aws:ssm:<REGION>:<ACCOUNT>:parameter/sst/passphrase/boxlite/<STAGE>",
+        "arn:aws:ssm:<REGION>:<ACCOUNT>:parameter/boxlite/<STAGE>/*"
+      ]
+    },
+    {
+      "Sid": "SstFallbackPassphraseRead",
+      "Effect": "Allow",
+      "Action": ["ssm:GetParameter", "ssm:GetParameters"],
+      "Resource": ["arn:aws:ssm:<REGION>:<ACCOUNT>:parameter/sst/passphrase/boxlite/_fallback"]
+    },
+    {
+      "Sid": "BoxLiteMailIdentity",
+      "Effect": "Allow",
+      "Action": [
+        "ses:CreateEmailIdentity",
+        "ses:DeleteEmailIdentity",
+        "ses:GetEmailIdentity",
+        "ses:PutEmailIdentityConfigurationSetAttributes",
+        "ses:PutEmailIdentityDkimSigningAttributes",
+        "ses:CreateConfigurationSet",
+        "ses:DeleteConfigurationSet",
+        "ses:GetConfigurationSet",
+        "ses:PutConfigurationSetDeliveryOptions",
+        "ses:PutConfigurationSetReputationOptions",
+        "ses:PutConfigurationSetSendingOptions",
+        "ses:PutConfigurationSetSuppressionOptions",
+        "ses:PutConfigurationSetTrackingOptions",
+        "ses:PutConfigurationSetVdmOptions",
+        "ses:ListTagsForResource",
+        "ses:TagResource",
+        "ses:UntagResource"
+      ],
+      "Resource": [
+        "arn:aws:ses:<REGION>:<ACCOUNT>:identity/*",
+        "arn:aws:ses:<REGION>:<ACCOUNT>:configuration-set/boxlite-<STAGE>-*"
+      ]
+    },
+    {
+      "Sid": "ReadMailIdentityVerification",
+      "Effect": "Allow",
+      "Action": ["ses:GetIdentityVerificationAttributes"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "RunnerCommandChannel",
+      "Effect": "Allow",
+      "Action": ["ssm:SendCommand"],
+      "Resource": ["arn:aws:ec2:<REGION>:<ACCOUNT>:instance/*", "arn:aws:ssm:<REGION>::document/AWS-RunShellScript"]
+    },
+    {
+      "Sid": "RunnerCommandStatus",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:DescribeInstanceInformation",
+        "ssm:GetCommandInvocation",
+        "ssm:ListCommandInvocations",
+        "ssm:ListCommands",
+        "ssm:DescribeParameters"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadIamAndAccountMetadata",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetInstanceProfile",
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion",
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListInstanceProfilesForRole",
+        "iam:ListPolicyVersions",
+        "iam:ListRolePolicies",
+        "iam:ListRoleTags",
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CreateBoundedBoxLiteRoles",
+      "Effect": "Allow",
+      "Action": "iam:CreateRole",
+      "Resource": "arn:aws:iam::<ACCOUNT>:role/boxlite-<STAGE>-*",
+      "Condition": {
+        "StringEquals": { "iam:PermissionsBoundary": "arn:aws:iam::<ACCOUNT>:policy/boxlite-<STAGE>-runtime-boundary" }
+      }
+    },
+    {
+      "Sid": "DenySelfPrivilegeEscalation",
+      "Effect": "Deny",
+      "Action": [
+        "iam:AttachRolePolicy",
+        "iam:DeleteRole",
+        "iam:DeleteRolePermissionsBoundary",
+        "iam:DeleteRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:PutRolePermissionsBoundary",
+        "iam:PutRolePolicy",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:UpdateRole",
+        "iam:UpdateRoleDescription",
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicy",
+        "iam:DeletePolicyVersion",
+        "iam:SetDefaultPolicyVersion"
+      ],
+      "Resource": [
+        "arn:aws:iam::<ACCOUNT>:role/boxlite-*-github-deploy",
+        "arn:aws:iam::<ACCOUNT>:policy/boxlite-*-runtime-boundary"
+      ]
+    },
+    {
+      "Sid": "ManageBoxLiteRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:AttachRolePolicy",
+        "iam:CreateInstanceProfile",
+        "iam:DeleteInstanceProfile",
+        "iam:DeleteRole",
+        "iam:DeleteRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:PassRole",
+        "iam:PutRolePolicy",
+        "iam:RemoveRoleFromInstanceProfile",
+        "iam:AddRoleToInstanceProfile",
+        "iam:TagInstanceProfile",
+        "iam:TagRole",
+        "iam:UntagInstanceProfile",
+        "iam:UntagRole",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:UpdateRole",
+        "iam:UpdateRoleDescription"
+      ],
+      "Resource": [
+        "arn:aws:iam::<ACCOUNT>:role/boxlite-<STAGE>-*",
+        "arn:aws:iam::<ACCOUNT>:instance-profile/boxlite-<STAGE>-*"
+      ]
+    },
+    {
+      "Sid": "SetBoxLiteRoleBoundary",
+      "Effect": "Allow",
+      "Action": "iam:PutRolePermissionsBoundary",
+      "Resource": "arn:aws:iam::<ACCOUNT>:role/boxlite-<STAGE>-*",
+      "Condition": {
+        "StringEquals": { "iam:PermissionsBoundary": "arn:aws:iam::<ACCOUNT>:policy/boxlite-<STAGE>-runtime-boundary" }
+      }
+    },
+    {
+      "Sid": "ManageBoxLitePolicies",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreatePolicy",
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicy",
+        "iam:DeletePolicyVersion",
+        "iam:SetDefaultPolicyVersion",
+        "iam:TagPolicy",
+        "iam:UntagPolicy"
+      ],
+      "Resource": "arn:aws:iam::<ACCOUNT>:policy/boxlite-<STAGE>-*"
+    },
+    {
+      "Sid": "CreateRequiredServiceLinkedRoles",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::*:role/aws-service-role/*",
+      "Condition": {
+        "StringEquals": {
+          "iam:AWSServiceName": [
+            "autoscaling.amazonaws.com",
+            "ecs.amazonaws.com",
+            "elasticloadbalancing.amazonaws.com",
+            "rds.amazonaws.com"
+          ]
+        }
+      }
+    }
+  ]
+}

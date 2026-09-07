@@ -30,12 +30,14 @@ const DEFAULT_MODULE_DIRECTORY = dirname(fileURLToPath(import.meta.url))
  * e2e fleet — and without it nothing distinguishes a workload token from a stage: `boxlite-e2e-runner`
  * reads equally as stage=e2e or workload=e2e.
  *
- * Three places cannot call this and re-spell the name instead, which is why a contract test pins each
- * against these parts: bootstrap/aws/github-deploy-role.yaml declares both resources, deploy-infra.yml
- * writes the bucket into a shell variable, and build-apps-api-image.yml writes the image name. A fourth
- * is easy to miss and is not a spelling at all — that CloudFormation template's runtime permissions
- * boundary allows S3 by ARN prefix, and a boundary intersects with every identity policy, so renaming
- * the bucket without widening the prefix denies the Runner its own binary while every test stays green.
+ * bootstrap/aws.ts creates both resources by calling apiImageRepository/runnerArtifactsBucketName
+ * directly, so it shares this one spelling rather than restating it. Two places still cannot call
+ * this and have to re-spell the name instead, which is why a contract test pins each against these
+ * parts: deploy-infra.yml writes the bucket into a shell variable, and build-apps-api-image.yml
+ * writes the image name — neither is JS. A third is easy to miss and is not a spelling at all — the
+ * runtime permissions boundary (bootstrap/aws/runtime-boundary-policy.json) allows S3 by ARN prefix,
+ * and a boundary intersects with every identity policy, so renaming the bucket without widening the
+ * prefix denies the Runner its own binary while every test stays green.
  *
  * Deliberately not applied to boxlite-<stage>-github-deploy or boxlite-<stage>-runtime-boundary: both
  * are live, referenced by ARN from the deploy workflows and attached to existing roles, so renaming

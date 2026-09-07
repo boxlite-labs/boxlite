@@ -17,9 +17,9 @@
  * there would make the local path depend on the remote one.
  *
  * The repository is named rather than looked up: the stage bootstrap
- * (bootstrap/aws/github-deploy-role.yaml) creates it because CI has to push into it before any deploy can
- * read it, so the consumer cannot be the thing that creates it. Both sides spell the name through
- * the same grammar — see awsResourceName in deployment/environment.ts.
+ * (bootstrap/aws.ts's ensureApiImageRepository) creates it because CI has to push into it before
+ * any deploy can read it, so the consumer cannot be the thing that creates it. Both sides spell
+ * the name through this same function.
  */
 
 import { execFileSync } from 'node:child_process'

@@ -327,8 +327,8 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           # Composed from the stage's AWS_ACCOUNT_ID, not a stored AWS_DEPLOY_ROLE_ARN: the role
-          # name is fixed per stage (apps/infra/bootstrap/environment.ts's githubDeployRoleName, pinned
-          # against the CloudFormation template by a test), so only the account id has to be configured.
+          # name is fixed per stage (apps/infra/bootstrap/environment.ts's githubDeployRoleName, the
+          # same name bootstrap/aws.ts creates the role under), so only the account id has to be configured.
           role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/boxlite-${{ inputs.stage }}-github-deploy
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: deploy-${{ inputs.stage }}-stack-${{ github.run_id }}
@@ -353,7 +353,7 @@ jobs:
           test -f "dist/runner/$archive"
           test -f "dist/runner/$archive.sha256"
           if ! aws s3api head-bucket --bucket "$bucket" >/dev/null 2>&1; then
-            echo "artifact bucket $bucket is missing; bootstrap $STAGE from apps/infra/bootstrap/aws/github-deploy-role.yaml first" >&2
+            echo "artifact bucket $bucket is missing; run npm run bootstrap -- --stage $STAGE first" >&2
             exit 1
           fi
           # Write-once: the Pulumi trigger and the host's health-route comparison treat

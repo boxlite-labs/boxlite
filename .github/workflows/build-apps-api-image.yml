@@ -16,8 +16,8 @@ name: Build apps/api image
 # exact manifest registry-side, addressed by digest, and verifies the digest survived — it never
 # rebuilds and never round-trips the image through a local daemon. A commit build has nothing to
 # promote; it writes straight into the stage being deployed. The per-stage repositories are
-# provisioned by apps/infra/bootstrap/aws/github-deploy-role.yaml so a fresh stack can consume an image
-# without first having to create its own input.
+# provisioned by apps/infra/bootstrap/aws.ts's ensureApiImageRepository so a fresh stack can consume
+# an image without first having to create its own input.
 #
 # `build` is dispatched from main rather than triggered by the release event. A release event
 # runs on a tag ref, and the deployment Environments that hold the AWS role are branch-scoped, so
@@ -211,7 +211,7 @@ jobs:
           source_registry="${account}.dkr.ecr.${SOURCE_REGION}.amazonaws.com"
           aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$target_registry"
           # A second login when the source stage is in another region. The role already reaches it
-          # — github-deploy-role.yaml grants ecr:* on Resource '*', which no region scopes — but a
+          # — deploy-role-policy.json grants ecr:* on Resource '*', which no region scopes — but a
           # docker credential is per registry host, and the copy below reads the source through
           # docker rather than through the AWS CLI.
           if [ "$source_registry" != "$target_registry" ]; then
@@ -230,7 +230,7 @@ jobs:
           set -euo pipefail
           target_name="boxlite-app-${TARGET_STAGE}-api"
           aws ecr describe-repositories --region "$AWS_REGION" --repository-names "$target_name" >/dev/null || {
-            echo "ECR repository $target_name is missing; update apps/infra/bootstrap/aws/github-deploy-role.yaml for $TARGET_STAGE first" >&2
+            echo "ECR repository $target_name is missing; run npm run bootstrap -- --stage $TARGET_STAGE first" >&2
             exit 1
           }
           source_digest=""

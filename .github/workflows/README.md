@@ -186,9 +186,9 @@ Per stage, on the GitHub side:
   token kept there would be needed in order to read itself.
 
 Everything else for a stage lives in its SST secret store, seeded by `npm run bootstrap` and read
-by `apps/infra/deployment/sst.ts`. Bootstrap the scoped role, permissions boundary, immutable API
-ECR repository and private runner artifact bucket with
-`apps/infra/bootstrap/aws/github-deploy-role.yaml`.
+by `apps/infra/deployment/sst.ts`. `npm run bootstrap` also reconciles the scoped role, permissions
+boundary, immutable API ECR repository and private runner artifact bucket, from the documents in
+`apps/infra/bootstrap/aws/`.
 
 ## Publishing secrets
 

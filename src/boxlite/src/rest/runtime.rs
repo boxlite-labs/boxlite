@@ -845,4 +845,98 @@ mod tests {
         assert!(matches!(error, BoxliteError::Unsupported(_)));
         assert!(error.to_string().contains("local runtime"));
     }
+
+    /// Serves a fixed sequence of `(status, body)` responses, one per
+    /// accepted connection, and records each request's start line —
+    /// generalizes `json_server` (which is 200-only) so a test can drive
+    /// `get_or_create`'s two-request shape: a `GET` that misses, then the
+    /// `POST` it should fall through to.
+    async fn status_server(
+        responses: Vec<(u16, &'static str)>,
+    ) -> (u16, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (status, body) in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") {
+                    headers.push(socket.read_u8().await.unwrap());
+                }
+                let request = String::from_utf8(headers).unwrap();
+                requests.push(request.lines().next().unwrap().to_string());
+                let reason = reqwest::StatusCode::from_u16(status)
+                    .unwrap()
+                    .canonical_reason()
+                    .unwrap_or("");
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            requests
+        });
+        (port, server)
+    }
+
+    /// Regression for POL-139 / POL-306: `get_or_create` against a name the
+    /// server has never seen must actually create the box, not raise. The
+    /// bug lived one layer below `get_or_create` itself (a codeless 404 body
+    /// misclassified as `Internal` instead of `NotFound`, fixed by #1430) —
+    /// this test pins the business-level contract `get_or_create` promises
+    /// its callers, independent of which error-classification bug would
+    /// break it. Nothing in the suite exercised this end-to-end before.
+    #[tokio::test]
+    async fn get_or_create_creates_when_the_name_is_unseen() {
+        let not_found_body = r#"{"path":"/api/v1/x/boxes/fresh-name","timestamp":"2026-01-01T00:00:00.000Z","statusCode":404,"error":"Not Found","message":"Box with ID or name fresh-name not found"}"#;
+        let (port, server) = status_server(vec![(404, not_found_body), (200, BOX_RESPONSE)]).await;
+        let options = BoxliteRestOptions::new(format!("http://127.0.0.1:{port}"));
+        let runtime = RestRuntime::new(&options).expect("failed to create REST runtime");
+
+        let (handle, created) = RuntimeBackend::get_or_create(
+            &runtime,
+            BoxOptions::default(),
+            Some("fresh-name".into()),
+        )
+        .await
+        .expect("get_or_create must succeed when the GET probe misses");
+
+        assert!(created, "a name the server has never seen must be created");
+        assert_eq!(handle.id().to_string(), "01HJK4TNRPQSXYZ8WM6NCVT9R5");
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2, "must GET to check, then POST to create");
+        assert!(requests[0].starts_with("GET"));
+        assert!(requests[1].starts_with("POST"));
+    }
+
+    /// The reuse half of the same contract: a name the server already has
+    /// must come back as the existing box, and must NOT trigger a second
+    /// create — only one request should ever reach the server.
+    #[tokio::test]
+    async fn get_or_create_reuses_when_the_name_already_exists() {
+        let (port, server) = status_server(vec![(200, BOX_RESPONSE)]).await;
+        let options = BoxliteRestOptions::new(format!("http://127.0.0.1:{port}"));
+        let runtime = RestRuntime::new(&options).expect("failed to create REST runtime");
+
+        let (handle, created) =
+            RuntimeBackend::get_or_create(&runtime, BoxOptions::default(), Some("named".into()))
+                .await
+                .expect("get_or_create must succeed when the name already exists");
+
+        assert!(!created, "an existing name must be reused, not recreated");
+        assert_eq!(handle.id().to_string(), "01HJK4TNRPQSXYZ8WM6NCVT9R5");
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 1, "reuse must not also POST a create");
+        assert!(requests[0].starts_with("GET"));
+    }
 }

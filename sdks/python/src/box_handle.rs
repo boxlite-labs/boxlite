@@ -242,6 +242,58 @@ impl PyBox {
         })
     }
 
+    /// Stream an archive into the box, without a file on the host.
+    ///
+    /// `source_is_dir` is the shape of the archive being written: `True` for a
+    /// directory tree, `False` for a single file, and `None` when the caller
+    /// cannot tell — the box then peeks the archive itself, which costs it a
+    /// staged copy, so pass the shape whenever it is known.
+    ///
+    /// Returns a `CopyInStream`: write chunks, then `close()` (or use it as an
+    /// async context manager, which closes on the way out and aborts if the
+    /// body raised).
+    #[pyo3(signature = (container_dest, source_is_dir=None, copy_options=None))]
+    fn copy_in_stream(
+        &self,
+        container_dest: String,
+        source_is_dir: Option<bool>,
+        copy_options: Option<crate::options::PyCopyOptions>,
+    ) -> PyResult<crate::copy_stream::PyCopyInStream> {
+        let opts: boxlite::CopyOptions =
+            copy_options.map_or_else(boxlite::CopyOptions::default, Into::into);
+        Ok(crate::copy_stream::start_copy_in(
+            Arc::clone(&self.handle),
+            container_dest,
+            boxlite::CopySourceKind::from_wire(source_is_dir),
+            opts,
+        ))
+    }
+
+    /// Read an archive out of the box as a stream of chunks, without a file on
+    /// the host.
+    ///
+    /// Returns a `CopyOutStream` — async-iterable, and carrying the archive's
+    /// shape on `source_is_dir`.
+    #[pyo3(signature = (container_src, copy_options=None))]
+    fn copy_out_stream<'a>(
+        &self,
+        py: Python<'a>,
+        container_src: String,
+        copy_options: Option<crate::options::PyCopyOptions>,
+    ) -> PyResult<Bound<'a, PyAny>> {
+        let handle = Arc::clone(&self.handle);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let opts: boxlite::CopyOptions =
+                copy_options.map_or_else(boxlite::CopyOptions::default, Into::into);
+
+            let (stream, source) = handle
+                .copy_out_stream(&container_src, opts)
+                .await
+                .map_err(map_err)?;
+            Ok(crate::copy_stream::PyCopyOutStream::new(stream, source))
+        })
+    }
+
     /// Enter async context manager - auto-starts the box (Testcontainers pattern).
     fn __aenter__<'a>(slf: PyRefMut<'_, Self>, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
         let handle = Arc::clone(&slf.handle);

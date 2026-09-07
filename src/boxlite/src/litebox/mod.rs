@@ -42,7 +42,7 @@ use crate::metrics::BoxMetrics;
 use crate::runtime::backend::{BoxBackend, BoxNetworkBackend, SnapshotBackend};
 use crate::runtime::options::{BoxArchive, CloneOptions, ExportOptions};
 use crate::{BoxID, BoxInfo};
-use boxlite_shared::errors::{BoxliteError, BoxliteResult};
+use boxlite_shared::errors::BoxliteResult;
 pub use config::BoxConfig;
 
 /// LiteBox - Handle to a box.
@@ -168,12 +168,12 @@ impl LiteBox {
     /// Stream opaque transfer bytes into the container at `container_dst`.
     ///
     /// `source` is the archive shape (directory tree vs single file);
-    /// [`CopySourceKind::Unknown`] when the caller cannot tell — the guest then
-    /// peeks the archive to decide. Only the local backend supports this.
+    /// [`CopySourceKind::Unknown`] when the caller cannot tell — the receiver
+    /// then peeks the archive to decide. Every backend supports this.
     ///
     /// Returns a `BoxFuture` (rather than being an `async fn`) so the future
-    /// owns the downcast backend and never borrows `&self` across an await —
-    /// which avoids an HRTB `Send` bound on `&LiteBox`.
+    /// owns everything it needs and borrows no part of `self` — the FFI
+    /// backends spawn it onto the runtime.
     pub fn copy_in_stream<S>(
         &self,
         stream: S,
@@ -184,22 +184,15 @@ impl LiteBox {
     where
         S: futures::Stream<Item = std::io::Result<Vec<u8>>> + Send + 'static,
     {
-        let backend = self
-            .box_backend
-            .clone()
-            .as_any_arc()
-            .downcast::<box_impl::BoxImpl>();
-        let dst = container_dst.to_string();
-        Box::pin(async move {
-            let backend = backend.map_err(|_| {
-                BoxliteError::Unsupported("streaming copy-in requires the local backend".into())
-            })?;
-            backend.copy_in_stream(stream, dst, source, opts).await
-        })
+        Arc::clone(&self.box_backend).copy_in_stream(
+            Box::pin(stream),
+            container_dst.to_string(),
+            source,
+            opts,
+        )
     }
 
-    /// Download `container_src` as a byte stream plus its source shape. Only
-    /// the local backend supports this.
+    /// Download `container_src` as a byte stream plus its source shape.
     pub fn copy_out_stream(
         &self,
         container_src: &str,
@@ -208,18 +201,7 @@ impl LiteBox {
         'static,
         BoxliteResult<(boxlite_shared::BoxByteStream, copy::CopySourceKind)>,
     > {
-        let backend = self
-            .box_backend
-            .clone()
-            .as_any_arc()
-            .downcast::<box_impl::BoxImpl>();
-        let src = container_src.to_string();
-        Box::pin(async move {
-            let backend = backend.map_err(|_| {
-                BoxliteError::Unsupported("streaming copy-out requires the local backend".into())
-            })?;
-            backend.copy_out_stream(src, opts).await
-        })
+        Arc::clone(&self.box_backend).copy_out_stream(container_src.to_string(), opts)
     }
 
     /// Get a network handle for raw tunnel operations.

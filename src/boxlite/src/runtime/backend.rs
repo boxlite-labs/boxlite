@@ -1,13 +1,14 @@
 //! Runtime backend trait — internal abstraction for local vs REST execution.
 
-use std::any::Any;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use boxlite_shared::BoxByteStream;
+use futures::future::BoxFuture;
 
-use crate::litebox::copy::CopyOptions;
+use crate::litebox::copy::{CopyOptions, CopySourceKind};
 use crate::litebox::snapshot_mgr::SnapshotInfo;
 use crate::litebox::{AttachOptions, BoxCommand, BoxTunnel, Execution, LiteBox};
 use crate::metrics::{BoxMetrics, RuntimeMetrics};
@@ -70,12 +71,7 @@ pub(crate) trait RuntimeBackend: Send + Sync {
 /// Local backend is implemented directly by `BoxImpl`.
 /// REST backend delegates to HTTP API calls.
 #[async_trait]
-pub(crate) trait BoxBackend: Send + Sync + Any {
-    /// Owned downcast helper (`Arc` upcast), so callers can move the local
-    /// backend out of the trait object without borrowing `&self` across an
-    /// `await`.
-    fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync>;
-
+pub(crate) trait BoxBackend: Send + Sync {
     fn id(&self) -> &BoxID;
 
     fn name(&self) -> Option<&str>;
@@ -132,6 +128,29 @@ pub(crate) trait BoxBackend: Send + Sync + Any {
         host_dst: &Path,
         opts: CopyOptions,
     ) -> BoxliteResult<()>;
+
+    /// Stream opaque transfer bytes into the box at `container_dst`.
+    ///
+    /// Plain `fn` returning a `'static` future rather than an `async fn`: the
+    /// FFI backends spawn a copy onto the runtime, which needs a future that
+    /// borrows nothing. `Arc<Self>` is a dyn-dispatchable receiver, and the
+    /// erased [`BoxByteStream`] (not a generic `S: Stream`) is what keeps the
+    /// method object-safe — [`crate::LiteBox`] boxes once on the way in.
+    fn copy_in_stream(
+        self: Arc<Self>,
+        stream: BoxByteStream,
+        container_dst: String,
+        source: CopySourceKind,
+        opts: CopyOptions,
+    ) -> BoxFuture<'static, BoxliteResult<()>>;
+
+    /// Read `container_src` out as a byte stream, plus the shape the peer
+    /// reported for it ([`CopySourceKind::Unknown`] when it could not tell).
+    fn copy_out_stream(
+        self: Arc<Self>,
+        container_src: String,
+        opts: CopyOptions,
+    ) -> BoxFuture<'static, BoxliteResult<(BoxByteStream, CopySourceKind)>>;
 
     async fn clone_box(
         &self,

@@ -25,7 +25,7 @@ use crate::event_listener::EventListener;
 #[cfg(target_os = "linux")]
 use crate::fs::BindMountHandle;
 use crate::litebox::BoxTunnel;
-use crate::litebox::copy::{CopyOptions, CopySourceKind};
+use crate::litebox::copy::{self, CopyOptions, CopySourceKind};
 use crate::lock::LockGuard;
 use crate::metrics::{BoxMetrics, BoxMetricsStorage};
 use crate::net::NetworkBackend;
@@ -868,20 +868,11 @@ impl BoxImpl {
             ));
         }
 
-        // `TempPath` owns the deletion. Refusing an unreachable destination is
-        // a routine outcome now, and every refusal returns through the `?` on
-        // `upload_tar` — which used to leave the staged tar in the temp dir for
-        // good.
-        let temp_tar = tempfile::Builder::new()
-            .prefix(&format!("cp-in-{}-", self.config.id.as_str()))
-            .suffix(".tar")
-            .tempfile_in(self.runtime.layout.temp_dir())
-            .map_err(|e| BoxliteError::Storage(format!("failed to stage copy archive: {e}")))?
-            .into_temp_path();
-
-        boxlite_shared::tar::pack(
+        // Packed straight into the upload: the archive never lands on disk and
+        // never sits in host memory whole. `pack_stream` reports the source
+        // shape it saw, which spares the guest the peek-and-stage arm.
+        let (source_is_dir, tar) = boxlite_shared::tar::pack_stream(
             host_src.to_path_buf(),
-            temp_tar.to_path_buf(),
             boxlite_shared::tar::PackContext {
                 follow_symlinks: opts.follow_symlinks,
                 include_parent: opts.include_parent,
@@ -891,12 +882,17 @@ impl BoxImpl {
 
         let mut files_iface = live.guest_session.files().await?;
         files_iface
-            .upload_tar(
-                &temp_tar,
+            .upload_stream(
+                tar,
                 container_dst,
                 Some(self.container_id()),
                 true,
                 opts.overwrite,
+                if source_is_dir {
+                    CopySourceKind::Dir
+                } else {
+                    CopySourceKind::File
+                },
             )
             .await?;
 
@@ -941,37 +937,48 @@ impl BoxImpl {
             return Err(BoxliteError::Config("source path cannot be empty".into()));
         }
 
-        // Same as `copy_into`: a refused source and a failed extraction both
-        // return through a `?`, so the deletion belongs to the value, not to
-        // the one path that reaches the end.
-        let temp_tar = tempfile::Builder::new()
-            .prefix(&format!("cp-out-{}-", self.config.id.as_str()))
-            .suffix(".tar")
-            .tempfile_in(self.runtime.layout.temp_dir())
-            .map_err(|e| BoxliteError::Storage(format!("failed to stage copy archive: {e}")))?
-            .into_temp_path();
-
         let mut files_iface = live.guest_session.files().await?;
-        files_iface
-            .download_tar(
+        let (tar, source) = files_iface
+            .download_stream(
                 container_src,
                 Some(self.container_id()),
                 opts.include_parent,
                 opts.follow_symlinks,
-                &temp_tar,
             )
             .await?;
 
-        boxlite_shared::tar::unpack(
-            temp_tar.to_path_buf(),
-            host_dst.to_path_buf(),
-            boxlite_shared::tar::UnpackContext {
-                overwrite: opts.overwrite,
-                mkdir_parents: true,
-                force_directory: false,
-            },
-        )
-        .await?;
+        let unpack_opts = boxlite_shared::tar::UnpackContext {
+            overwrite: opts.overwrite,
+            mkdir_parents: true,
+            // The guest reports the *source* shape; the destination's own
+            // signals — an existing directory, or a trailing slash naming one —
+            // must still win for a single file, matching Unix cp semantics.
+            force_directory: source.is_dir()
+                || host_dst.is_dir()
+                || host_dst.as_os_str().to_string_lossy().ends_with('/'),
+        };
+
+        match source {
+            // A guest that predates the shape hint leaves nothing honest to
+            // put in `force_directory`, so stage the archive and let the peek
+            // decide instead of extracting a tree as a single file.
+            CopySourceKind::Unknown => {
+                copy::unpack_stream_spooled(
+                    tar,
+                    host_dst.to_path_buf(),
+                    unpack_opts,
+                    copy::SpoolPolicy {
+                        dir: self.runtime.layout.temp_dir(),
+                        cap_bytes: boxlite_shared::constants::files::FALLBACK_CAP_BYTES,
+                    },
+                )
+                .await?;
+            }
+            CopySourceKind::File | CopySourceKind::Dir => {
+                boxlite_shared::tar::unpack_stream(tar, host_dst.to_path_buf(), unpack_opts)
+                    .await?;
+            }
+        }
 
         for listener in &self.event_listeners {
             listener.on_file_copied_out(
@@ -1514,10 +1521,6 @@ impl crate::runtime::backend::BoxBackend for BoxImpl {
         self.config.name.as_deref()
     }
 
-    fn as_any_arc(self: std::sync::Arc<Self>) -> std::sync::Arc<dyn std::any::Any + Send + Sync> {
-        self
-    }
-
     async fn info(&self) -> BoxliteResult<BoxInfo> {
         Ok(BoxImpl::info(self))
     }
@@ -1558,6 +1561,33 @@ impl crate::runtime::backend::BoxBackend for BoxImpl {
         opts: CopyOptions,
     ) -> BoxliteResult<()> {
         self.copy_out(container_src, host_dst, opts).await
+    }
+
+    fn copy_in_stream(
+        self: std::sync::Arc<Self>,
+        stream: boxlite_shared::BoxByteStream,
+        container_dst: String,
+        source: CopySourceKind,
+        opts: CopyOptions,
+    ) -> futures::future::BoxFuture<'static, BoxliteResult<()>> {
+        Box::pin(BoxImpl::copy_in_stream(
+            self,
+            stream,
+            container_dst,
+            source,
+            opts,
+        ))
+    }
+
+    fn copy_out_stream(
+        self: std::sync::Arc<Self>,
+        container_src: String,
+        opts: CopyOptions,
+    ) -> futures::future::BoxFuture<
+        'static,
+        BoxliteResult<(boxlite_shared::BoxByteStream, CopySourceKind)>,
+    > {
+        Box::pin(BoxImpl::copy_out_stream(self, container_src, opts))
     }
 
     async fn clone_box(

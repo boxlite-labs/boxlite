@@ -23,24 +23,6 @@ pub struct PackContext {
     pub include_parent: bool,
 }
 
-/// Pack `src` (file or directory) into a tar archive at `tar_path`.
-///
-/// Runs blocking I/O on a dedicated thread via `spawn_blocking`.
-pub async fn pack(src: PathBuf, tar_path: PathBuf, opts: PackContext) -> BoxliteResult<()> {
-    tokio::task::spawn_blocking(move || {
-        let tar_file = std::fs::File::create(&tar_path).map_err(|e| {
-            BoxliteError::Storage(format!(
-                "failed to create tar {}: {}",
-                tar_path.display(),
-                e
-            ))
-        })?;
-        pack_blocking(&src, tar_file, &opts)
-    })
-    .await
-    .map_err(|e| BoxliteError::Storage(format!("pack task join error: {}", e)))?
-}
-
 /// Pack `src` into `writer` (generic over `std::io::Write`).
 fn pack_blocking<W: Write>(src: &Path, writer: W, opts: &PackContext) -> BoxliteResult<()> {
     let mut builder = tar::Builder::new(writer);
@@ -156,12 +138,24 @@ impl Drop for PipeWriter {
     }
 }
 
+/// The concrete stream [`pack_stream`] produces.
+///
+/// Deliberately *not* erased to [`BoxByteStream`]. Handing a `dyn` stream to
+/// the generic gRPC upload defeats rustc's auto-trait leak check inside an
+/// `#[async_trait]` method — the whole transfer then fails to compile with
+/// "`Send` is not general enough". Callers that genuinely need erasure box it
+/// themselves; the ones that just forward it keep the concrete type.
+pub type PackedByteStream = ReceiverStream<io::Result<Vec<u8>>>;
+
 /// Stream `src` into a tar byte stream.
 ///
 /// Returns the source shape (`source_is_dir = src.is_dir()`) alongside the
 /// stream. The pack runs on a `spawn_blocking` thread; a pack failure surfaces
 /// as a terminal `Err` item on the stream.
-pub async fn pack_stream(src: PathBuf, opts: PackContext) -> BoxliteResult<(bool, BoxByteStream)> {
+pub async fn pack_stream(
+    src: PathBuf,
+    opts: PackContext,
+) -> BoxliteResult<(bool, PackedByteStream)> {
     let source_is_dir = src.is_dir();
     if !src.exists() {
         return Err(BoxliteError::NotFound(format!(
@@ -183,7 +177,7 @@ pub async fn pack_stream(src: PathBuf, opts: PackContext) -> BoxliteResult<(bool
             let _ = task_tx.blocking_send(Err(io::Error::other(e)));
         }
     });
-    Ok((source_is_dir, Box::pin(ReceiverStream::new(rx))))
+    Ok((source_is_dir, ReceiverStream::new(rx)))
 }
 
 /// Body of the pack task: runs [`pack_blocking`] under `catch_unwind` so a
@@ -645,6 +639,26 @@ mod tests {
     use tempfile::TempDir;
 
     // ── Helpers ───────────────────────────────────────────────────
+
+    /// Pack `src` into a tar archive *file*, for the file-based [`unpack`]
+    /// cases below.
+    ///
+    /// Test-only: production packs straight into a stream ([`pack_stream`]),
+    /// so nothing outside these tests needs an archive on disk.
+    async fn pack(src: PathBuf, tar_path: PathBuf, opts: PackContext) -> BoxliteResult<()> {
+        tokio::task::spawn_blocking(move || {
+            let tar_file = std::fs::File::create(&tar_path).map_err(|e| {
+                BoxliteError::Storage(format!(
+                    "failed to create tar {}: {}",
+                    tar_path.display(),
+                    e
+                ))
+            })?;
+            pack_blocking(&src, tar_file, &opts)
+        })
+        .await
+        .map_err(|e| BoxliteError::Storage(format!("pack task join error: {}", e)))?
+    }
 
     fn uc(overwrite: bool, mkdir_parents: bool, force_directory: bool) -> UnpackContext {
         UnpackContext {
@@ -1707,7 +1721,7 @@ mod tests {
         assert!(!source_is_dir);
 
         let dest = tmp.path().join("dest.txt");
-        let report = unpack_stream(stream, dest.clone(), uc(true, true, false))
+        let report = unpack_stream(Box::pin(stream), dest.clone(), uc(true, true, false))
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "streaming hello");
@@ -1738,7 +1752,7 @@ mod tests {
         assert!(source_is_dir);
 
         let dest = tmp.path().join("out");
-        let report = unpack_stream(stream, dest.clone(), uc(true, true, true))
+        let report = unpack_stream(Box::pin(stream), dest.clone(), uc(true, true, true))
             .await
             .unwrap();
         assert_eq!(

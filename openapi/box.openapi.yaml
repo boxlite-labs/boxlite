@@ -951,6 +951,16 @@ paths:
           schema:
             type: boolean
             default: true
+        - name: source_is_dir
+          in: query
+          description: |
+            Shape of the archive being uploaded: `true` for a directory tree,
+            `false` for a single file. Omit it when the shape is not known —
+            the box then peeks the archive itself, which is what a client
+            predating this parameter gets. An unparseable value is read as
+            omitted rather than rejected.
+          schema:
+            type: boolean
       requestBody:
         required: true
         content:
@@ -997,7 +1007,21 @@ paths:
             default: false
       responses:
         "200":
-          description: Tar archive of requested path
+          description: |
+            Tar archive of the requested path, streamed.
+
+            A failure that occurs after the response is committed severs the
+            connection instead of ending the body: a tar cut on a block
+            boundary extracts without error, so a clean end would be
+            indistinguishable from a whole archive.
+          headers:
+            X-Boxlite-Source-Is-Dir:
+              description: |
+                Shape of the archived source: `true` for a directory tree,
+                `false` for a single file. Absent when the box could not tell,
+                in which case the client must determine the shape itself.
+              schema:
+                type: boolean
           content:
             application/x-tar:
               schema:

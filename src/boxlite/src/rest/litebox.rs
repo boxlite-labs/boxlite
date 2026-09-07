@@ -8,13 +8,14 @@ use async_trait::async_trait;
 use reqwest::Method;
 use tokio::sync::mpsc;
 
+use boxlite_shared::BoxByteStream;
 use boxlite_shared::constants::files::FALLBACK_CAP_BYTES;
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 use futures::StreamExt;
 use std::io;
 
 use crate::BoxInfo;
-use crate::litebox::copy::CopyOptions;
+use crate::litebox::copy::{CopyOptions, CopySourceKind};
 use crate::litebox::snapshot_mgr::SnapshotInfo;
 use crate::litebox::{
     AttachOptions, BoxCommand, BoxTunnel, ExecResult, ExecStderr, ExecStdin, ExecStdout, Execution,
@@ -120,6 +121,86 @@ impl RestBox {
     }
 }
 
+impl RestBox {
+    /// PUT an archive stream at `container_dst`, carrying the shape hint.
+    ///
+    /// The one place the upload wire format lives, so `copy_into` (which packs
+    /// a host path first) and `copy_in_stream` (which is handed the bytes)
+    /// cannot drift apart.
+    async fn upload_archive(
+        &self,
+        archive: BoxByteStream,
+        container_dst: &str,
+        source: CopySourceKind,
+    ) -> BoxliteResult<()> {
+        let body = reqwest::Body::wrap_stream(archive.map(|r| r.map(bytes::Bytes::from)));
+
+        let encoded_dst = urlencoding::encode(container_dst);
+        // The hint is omitted, not guessed, when the caller could not tell:
+        // the server then peeks the archive, its pre-hint behaviour.
+        let hint = match source.to_wire() {
+            Some(is_dir) => format!("&source_is_dir={is_dir}"),
+            None => String::new(),
+        };
+        let path = format!(
+            "/boxes/{}/files?path={}{}",
+            self.box_id_str(),
+            encoded_dst,
+            hint
+        );
+        let builder = self
+            .client
+            .authorized_request(Method::PUT, &path)
+            .await?
+            .header("Content-Type", "application/x-tar")
+            .body(body);
+
+        let resp = builder.send().await.map_err(transport_error)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(map_http_body(status, &text));
+        }
+        Ok(())
+    }
+
+    /// GET `container_src` as an archive, returning the live response and the
+    /// shape header the server sent (`None` from a server predating it).
+    ///
+    /// Hands back the `Response` rather than a byte stream because the two
+    /// callers need different things from it: `copy_out` may still have to
+    /// buffer it (and wants `reqwest`'s error classification while doing so),
+    /// while `copy_out_stream` only forwards the bytes.
+    async fn open_archive(
+        &self,
+        container_src: &str,
+    ) -> BoxliteResult<(reqwest::Response, Option<bool>)> {
+        let encoded_src = urlencoding::encode(container_src);
+        let path = format!("/boxes/{}/files?path={}", self.box_id_str(), encoded_src);
+        let builder = self
+            .client
+            .authorized_request(Method::GET, &path)
+            .await?
+            .header("Accept", "application/x-tar");
+
+        let resp = builder.send().await.map_err(transport_error)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(map_http_body(status, &text));
+        }
+
+        let source_is_dir = resp
+            .headers()
+            .get("x-boxlite-source-is-dir")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<bool>().ok());
+        Ok((resp, source_is_dir))
+    }
+}
+
 #[async_trait]
 impl BoxBackend for RestBox {
     fn id(&self) -> &BoxID {
@@ -128,10 +209,6 @@ impl BoxBackend for RestBox {
 
     fn name(&self) -> Option<&str> {
         self.name.as_deref()
-    }
-
-    fn as_any_arc(self: std::sync::Arc<Self>) -> std::sync::Arc<dyn std::any::Any + Send + Sync> {
-        self
     }
 
     async fn info(&self) -> BoxliteResult<BoxInfo> {
@@ -309,8 +386,6 @@ impl BoxBackend for RestBox {
         container_dst: &str,
         opts: CopyOptions,
     ) -> BoxliteResult<()> {
-        let box_id = self.box_id_str();
-
         // Honor overwrite=false at the REST boundary. The runner's
         // upload handler always extracts the tar over whatever's at
         // container_dst (the test in apps/e2e/cases/test_files_io.py::
@@ -340,29 +415,12 @@ impl BoxBackend for RestBox {
         )
         .await?;
 
-        let body = reqwest::Body::wrap_stream(tar.map(|r| r.map(bytes::Bytes::from)));
-
-        // Upload tar to server, carrying the archive-shape hint.
-        let encoded_dst = urlencoding::encode(container_dst);
-        let path = format!(
-            "/boxes/{}/files?path={}&source_is_dir={}",
-            box_id, encoded_dst, source_is_dir
-        );
-        let builder = self
-            .client
-            .authorized_request(Method::PUT, &path)
-            .await?
-            .header("Content-Type", "application/x-tar")
-            .body(body);
-
-        let resp = builder.send().await.map_err(transport_error)?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(map_http_body(status, &text));
-        }
-        Ok(())
+        self.upload_archive(
+            Box::pin(tar),
+            container_dst,
+            CopySourceKind::from_wire(Some(source_is_dir)),
+        )
+        .await
     }
 
     async fn copy_out(
@@ -371,32 +429,9 @@ impl BoxBackend for RestBox {
         host_dst: &Path,
         _opts: CopyOptions,
     ) -> BoxliteResult<()> {
-        let box_id = self.box_id_str();
-
-        // Download tar from server
-        let encoded_src = urlencoding::encode(container_src);
-        let path = format!("/boxes/{}/files?path={}", box_id, encoded_src);
-        let builder = self
-            .client
-            .authorized_request(Method::GET, &path)
-            .await?
-            .header("Accept", "application/x-tar");
-
-        let resp = builder.send().await.map_err(transport_error)?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(map_http_body(status, &text));
-        }
-
         // The archive shape is carried on the response header (newer servers);
         // absence means the peer predates it → capped buffered fallback.
-        let source_is_dir = resp
-            .headers()
-            .get("x-boxlite-source-is-dir")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<bool>().ok());
+        let (resp, source_is_dir) = self.open_archive(container_src).await?;
 
         let Some(source_is_dir) = source_is_dir else {
             // Legacy peer: without the shape hint we must buffer to detect it.
@@ -448,6 +483,52 @@ impl BoxBackend for RestBox {
                 Err(fault.unwrap_or(unpack_err))
             }
         }
+    }
+
+    fn copy_in_stream(
+        self: Arc<Self>,
+        stream: BoxByteStream,
+        container_dst: String,
+        source: CopySourceKind,
+        opts: CopyOptions,
+    ) -> futures::future::BoxFuture<'static, BoxliteResult<()>> {
+        Box::pin(async move {
+            // Same protocol limit `copy_into` refuses on, and for the same
+            // reason: a single-tar upload cannot express per-entry
+            // skip-if-exists, so honouring `overwrite=false` here would mean
+            // silently clobbering.
+            if !opts.overwrite {
+                return Err(BoxliteError::Unsupported(
+                    "copy_in_stream with overwrite=false is not supported over the REST \
+                     backend; the current upload protocol cannot express per-entry \
+                     skip-if-exists. Use the FFI backend or pre-check the destination."
+                        .into(),
+                ));
+            }
+            self.upload_archive(stream, &container_dst, source).await
+        })
+    }
+
+    fn copy_out_stream(
+        self: Arc<Self>,
+        container_src: String,
+        _opts: CopyOptions,
+    ) -> futures::future::BoxFuture<'static, BoxliteResult<(BoxByteStream, CopySourceKind)>> {
+        Box::pin(async move {
+            let (resp, source_is_dir) = self.open_archive(&container_src).await?;
+            // No buffered fallback here, unlike `copy_out`: there is no
+            // destination path to spool the archive to, so a server that omits
+            // the header honestly reports `Unknown` and the caller — which
+            // does have somewhere to put it — decides what to do.
+            let stream: BoxByteStream = Box::pin(resp.bytes_stream().map(|chunk| {
+                chunk.map(|b| b.to_vec()).map_err(|e| {
+                    // Keep the transport classification in the message; the
+                    // stream contract can only carry an `io::Error`.
+                    std::io::Error::other(transport_error(e).to_string())
+                })
+            }));
+            Ok((stream, CopySourceKind::from_wire(source_is_dir)))
+        })
     }
 
     async fn clone_box(
@@ -2532,5 +2613,114 @@ mod tests {
         );
 
         server.await.unwrap();
+    }
+
+    // ── Streaming copy over REST ──────────────────────────────────
+    //
+    // `copy_out_stream` hands the archive to its caller instead of unpacking
+    // it, so it has nowhere to spool a shapeless archive and must report the
+    // server's answer verbatim. Getting that wrong is silent: a fabricated
+    // `false` extracts a directory tree as one file.
+
+    /// Serve a tar body, with or without the shape header.
+    async fn serve_archive(header: Option<&'static str>) -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                head.push(socket.read_u8().await.unwrap());
+            }
+            let shape = match header {
+                Some(value) => format!("X-Boxlite-Source-Is-Dir: {value}\r\n"),
+                None => String::new(),
+            };
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\n\
+                         Content-Type: application/x-tar\r\n\
+                         {shape}Content-Length: 5\r\n\
+                         Connection: close\r\n\r\nabcde"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        (port, server)
+    }
+
+    async fn stream_out(header: Option<&'static str>) -> (Vec<u8>, CopySourceKind) {
+        let (port, server) = serve_archive(header).await;
+        let rest_box = Arc::new(rest_box_for(port, "box1"));
+
+        let (mut stream, source) = rest_box
+            .copy_out_stream("/tmp/archive".to_string(), CopyOptions::default())
+            .await
+            .expect("copy_out_stream");
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            bytes.extend_from_slice(&chunk.expect("chunk"));
+        }
+        server.await.unwrap();
+        (bytes, source)
+    }
+
+    #[tokio::test]
+    async fn copy_out_stream_reports_the_shape_the_server_sent() {
+        let (bytes, dir) = stream_out(Some("true")).await;
+        assert_eq!(dir, CopySourceKind::Dir);
+        assert_eq!(bytes, b"abcde");
+
+        let (_, file) = stream_out(Some("false")).await;
+        assert_eq!(file, CopySourceKind::File);
+    }
+
+    /// A server predating the header — and, on the hosted path, any proxy that
+    /// drops it. There is no destination to spool to here, so the honest answer
+    /// is `Unknown`; the bytes must still arrive.
+    #[tokio::test]
+    async fn copy_out_stream_reports_unknown_when_the_server_omits_the_header() {
+        let (bytes, source) = stream_out(None).await;
+
+        assert_eq!(source, CopySourceKind::Unknown);
+        assert_eq!(bytes, b"abcde");
+    }
+
+    /// `overwrite=false` cannot be expressed on this wire, so the refusal has
+    /// to come *before* the upload starts — a request that reached the server
+    /// would clobber what the caller asked us to preserve.
+    #[tokio::test]
+    async fn copy_in_stream_refuses_no_overwrite_without_sending_anything() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let served = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let saw_request = Arc::clone(&served);
+        let server = tokio::spawn(async move {
+            if listener.accept().await.is_ok() {
+                saw_request.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+
+        let rest_box = Arc::new(rest_box_for(port, "box1"));
+        let archive: BoxByteStream = Box::pin(futures::stream::empty());
+        let error = rest_box
+            .copy_in_stream(
+                archive,
+                "/tmp/dst".to_string(),
+                CopySourceKind::File,
+                CopyOptions::default().no_overwrite(),
+            )
+            .await
+            .expect_err("overwrite=false must be refused");
+
+        assert!(matches!(error, BoxliteError::Unsupported(_)), "{error:?}");
+        assert!(
+            !served.load(std::sync::atomic::Ordering::SeqCst),
+            "the refusal must happen before any request is sent"
+        );
+        server.abort();
     }
 }

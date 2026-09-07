@@ -2,6 +2,7 @@
 
 mod advanced_options;
 mod box_handle;
+mod copy_stream;
 mod exec;
 mod images;
 mod info;
@@ -57,6 +58,8 @@ fn boxlite_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyExecStdin>()?;
     m.add_class::<PyExecStdout>()?;
     m.add_class::<PyExecStderr>()?;
+    m.add_class::<crate::copy_stream::PyCopyInStream>()?;
+    m.add_class::<crate::copy_stream::PyCopyOutStream>()?;
     m.add_class::<PyImageHandle>()?;
     m.add_class::<PyImageInfo>()?;
     m.add_class::<PyImagePullResult>()?;

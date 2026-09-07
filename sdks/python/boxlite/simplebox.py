@@ -5,6 +5,7 @@ Provides common functionality for all specialized boxes (CodeBox, BrowserBox, et
 """
 
 import asyncio
+import inspect
 import logging
 from enum import IntEnum
 from typing import TYPE_CHECKING, Optional
@@ -494,3 +495,156 @@ class SimpleBox:
             include_parent=include_parent,
         )
         await self._box.copy_out(container_src, host_dest, opts)
+
+    async def copy_in_stream(
+        self,
+        container_dest: str,
+        source,
+        *,
+        source_is_dir: bool | None = None,
+        overwrite: bool = True,
+    ) -> None:
+        """
+        Stream a tar archive into the container, with no file on the host.
+
+        For payloads that have no path: a tar built in memory, one being
+        relayed from elsewhere, or a file too large to want a second copy of.
+        The bytes are forwarded to the box as they arrive — nothing is
+        buffered whole on either side.
+
+        Args:
+            container_dest: Destination path inside the container
+            source: The archive bytes — ``bytes``, an iterable or async
+                iterable of ``bytes``, or any object with a ``read(n)`` method
+                (an open file, ``io.BytesIO``, a socket wrapper)
+            source_is_dir: Shape of the archive: True for a directory tree,
+                False for a single file. Leave as None only when the shape is
+                genuinely unknown — the box then has to stage the archive to
+                peek at it
+            overwrite: If True, overwrite existing files (default: True)
+
+        Raises:
+            The copy's own error — a refused destination, a failed extraction —
+            is raised at the end of the transfer, not from the first chunk. A
+            source that fails part-way aborts the copy rather than committing
+            the truncated archive.
+
+        Examples:
+            Stream a tar someone handed you::
+
+                await box.copy_in_stream("/app", tar_bytes, source_is_dir=True)
+
+            Stream a file without loading it::
+
+                with open("big.tar", "rb") as f:
+                    await box.copy_in_stream("/app", f, source_is_dir=True)
+        """
+        if not self._started:
+            raise RuntimeError(
+                "Box not started. Use 'async with SimpleBox(...) as box:' "
+                "or call 'await box.start()' first."
+            )
+
+        from .boxlite import CopyOptions
+
+        opts = CopyOptions(recursive=True, overwrite=overwrite)
+        stream = self._box.copy_in_stream(container_dest, source_is_dir, opts)
+        try:
+            async for chunk in _as_chunks(source):
+                await stream.write(chunk)
+        except BaseException:
+            # The archive is incomplete; a clean close would hand the box a
+            # truncated tar, which extracts without complaint.
+            await stream.abort()
+            raise
+        await stream.close()
+
+    async def copy_out_stream(
+        self,
+        container_src: str,
+        *,
+        include_parent: bool = True,
+        follow_symlinks: bool = False,
+    ):
+        """
+        Stream a tar archive out of the container, with no file on the host.
+
+        Args:
+            container_src: Source path inside the container
+            include_parent: If True, include the parent directory in the
+                archive (default: True)
+            follow_symlinks: If True, follow symlinks when archiving
+                (default: False)
+
+        Returns:
+            An async-iterable of ``bytes`` chunks, carrying the archive's shape
+            on its ``source_is_dir`` attribute (None when the box could not
+            tell). Iteration raises if the transfer is cut short, so a
+            truncated archive cannot pass for a whole one.
+
+        Examples:
+            ::
+
+                stream = await box.copy_out_stream("/app/out")
+                async for chunk in stream:
+                    sink.write(chunk)
+        """
+        if not self._started:
+            raise RuntimeError(
+                "Box not started. Use 'async with SimpleBox(...) as box:' "
+                "or call 'await box.start()' first."
+            )
+
+        from .boxlite import CopyOptions
+
+        opts = CopyOptions(
+            recursive=True,
+            follow_symlinks=follow_symlinks,
+            include_parent=include_parent,
+        )
+        return await self._box.copy_out_stream(container_src, opts)
+
+
+#: Bytes read per ``read()`` call when ``copy_in_stream`` is handed a
+#: file-like object. Matches the 1 MiB chunk the transfer itself uses, so a
+#: file is read at the same granularity it is sent.
+_COPY_CHUNK_BYTES = 1024 * 1024
+
+
+async def _as_chunks(source):
+    """
+    Normalise every shape a caller may hand to ``copy_in_stream`` into an
+    async iterator of ``bytes``.
+
+    Accepts raw bytes, a file-like object (anything with ``read(n)``, sync or
+    async), and sync or async iterables of bytes — the point being that
+    ``open(path, "rb")`` and an ``async def`` generator both just work.
+    """
+    if isinstance(source, (bytes, bytearray, memoryview)):
+        yield bytes(source)
+        return
+
+    read = getattr(source, "read", None)
+    if callable(read):
+        while True:
+            chunk = read(_COPY_CHUNK_BYTES)
+            if inspect.isawaitable(chunk):
+                chunk = await chunk
+            if not chunk:
+                return
+            yield bytes(chunk)
+
+    if hasattr(source, "__aiter__"):
+        async for chunk in source:
+            yield bytes(chunk)
+        return
+
+    if hasattr(source, "__iter__"):
+        for chunk in source:
+            yield bytes(chunk)
+        return
+
+    raise TypeError(
+        "copy_in_stream source must be bytes, a file-like object, or an "
+        f"(async) iterable of bytes, not {type(source).__name__}"
+    )

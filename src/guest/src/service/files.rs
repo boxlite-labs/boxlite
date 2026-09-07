@@ -19,7 +19,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
-use tracing::info;
+use tracing::{info, warn};
 
 const MAX_UPLOAD_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB safety cap
 
@@ -239,6 +239,48 @@ impl DestBefore {
                 && !self.existing_dirs.contains(target)
         });
         targets
+    }
+}
+
+/// Undo what a refused streamed upload wrote.
+///
+/// The hinted arm extracts before it can check the mounts — the shape hint is
+/// what saves the spool, so there is no archive left to pre-scan — which used
+/// to leave a refused copy half-applied on the rootfs, invisible beneath the
+/// mount that caused the refusal. Removing exactly [`DestBefore::created`],
+/// the same set the ownership hand-off claims as "made by this copy", puts the
+/// tree back.
+///
+/// Not a perfect inverse: a file the archive *overwrote* lost its old content
+/// the moment extraction wrote it, so it is removed rather than left carrying
+/// the refused payload's bytes. Directories the image shipped are never
+/// touched — [`DestBefore::created`] excludes them.
+///
+/// Best-effort per node, and deepest-first so a directory is empty by the time
+/// it is removed. A node a workload holds or races simply stays; the refusal is
+/// what the caller sees either way.
+fn remove_extracted(dest_root: &Path, entry_paths: &[PathBuf], before: &DestBefore) {
+    let mut targets = before.created(dest_root, entry_paths);
+    targets.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    for target in targets {
+        let removed = if target.is_dir() {
+            std::fs::remove_dir(&target)
+        } else {
+            std::fs::remove_file(&target)
+        };
+        match removed {
+            Ok(()) => {}
+            // Already gone, or a directory still holding paths this copy did
+            // not create — both mean there is nothing here to undo.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    || e.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
+            Err(e) => warn!(
+                path = %target.display(),
+                error = %e,
+                "could not roll back a refused upload's payload"
+            ),
+        }
     }
 }
 
@@ -532,13 +574,17 @@ impl Files for GuestServer {
                     .map(|rel| dest_root.join(rel))
                     .collect();
                 let entry_paths: Arc<[PathBuf]> = entry_paths.into();
+                let before = DestBefore::recorded(created_dirs, dest_existed, existing_dirs);
 
                 // The stream cannot be pre-scanned without spooling, so the
-                // mount-shadow refusal runs after extraction: weaker than the
-                // hintless arm's refuse-before (a refused copy may have
-                // partially landed), but the failure surfaces instead of a
-                // silent write beneath the mount.
-                dest.refuse_shadowed_payload(&entry_paths)?;
+                // mount-shadow refusal runs *after* extraction — the hintless
+                // arm refuses before writing a byte. The payload is therefore
+                // rolled back here, so a refused copy leaves nothing behind
+                // either way.
+                if let Err(refusal) = dest.refuse_shadowed_payload(&entry_paths) {
+                    remove_extracted(&dest_root, &entry_paths, &before);
+                    return Err(refusal);
+                }
 
                 // Hand the recorded paths to the box user, plus the
                 // ancestors captured above — the recording names what the
@@ -548,7 +594,7 @@ impl Files for GuestServer {
                     &container_id,
                     dest_root.clone(),
                     Arc::clone(&entry_paths),
-                    DestBefore::recorded(created_dirs, dest_existed, existing_dirs),
+                    before,
                 )
                 .await;
             }
@@ -1162,4 +1208,65 @@ fn staged_tar_tolerates_missing_file() {
 
     let _guard = StagedTar::new(path);
     // Dropping happens at end of scope; no panic is the assertion.
+}
+
+/// A refused streamed upload must undo its own writes — the payload it landed
+/// beneath the mount and the directories it conjured on the way there.
+#[test]
+fn rollback_removes_what_the_copy_wrote() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dest_root = tmp.path().join("dest");
+    // What the archive carried: a file at the root and one a level down.
+    std::fs::create_dir_all(dest_root.join("nested")).unwrap();
+    std::fs::write(dest_root.join("landed.txt"), b"payload").unwrap();
+    std::fs::write(dest_root.join("nested/deep.txt"), b"payload").unwrap();
+    let entries = [
+        PathBuf::from("landed.txt"),
+        PathBuf::from("nested"),
+        PathBuf::from("nested/deep.txt"),
+    ];
+
+    // The destination and both directories are ours: nothing pre-existed.
+    let before = DestBefore::recorded(vec![dest_root.clone()], false, HashSet::new());
+    remove_extracted(&dest_root, &entries, &before);
+
+    assert!(
+        !dest_root.exists(),
+        "a destination this copy created must go with it"
+    );
+}
+
+/// The inverse must stop at the tree's edge: a directory the image shipped is
+/// not this copy's to delete, even when the archive wrote into it.
+#[test]
+fn rollback_keeps_directories_it_did_not_create() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dest_root = tmp.path().join("usr-local");
+    let shipped = dest_root.join("bin");
+    std::fs::create_dir_all(&shipped).unwrap();
+    std::fs::write(shipped.join("preexisting"), b"from the image").unwrap();
+    std::fs::write(shipped.join("tool"), b"payload").unwrap();
+    let entries = [PathBuf::from("bin"), PathBuf::from("bin/tool")];
+
+    // `dest_root` and `bin` were both already there — the recorded shape a
+    // streamed unpack reports when it extracts into an existing tree.
+    let before = DestBefore::recorded(
+        Vec::new(),
+        true,
+        HashSet::from([dest_root.clone(), shipped.clone()]),
+    );
+    remove_extracted(&dest_root, &entries, &before);
+
+    assert!(
+        shipped.is_dir(),
+        "an image directory must survive a rollback"
+    );
+    assert!(
+        shipped.join("preexisting").exists(),
+        "a file this copy never named must survive a rollback"
+    );
+    assert!(
+        !shipped.join("tool").exists(),
+        "the payload the copy wrote must be gone"
+    );
 }

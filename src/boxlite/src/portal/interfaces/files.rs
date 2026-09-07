@@ -1,17 +1,13 @@
 //! Files service interface.
 //!
-//! Provides tar-based upload/download to the guest container rootfs.
+//! Provides streaming upload/download to the guest container rootfs.
 
 use crate::litebox::CopySourceKind;
 use boxlite_shared::{
     BoxByteStream, BoxliteError, BoxliteResult, DownloadRequest, FilesClient, UploadChunk,
 };
 use futures::StreamExt;
-use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tonic::transport::Channel;
-
-const CHUNK_SIZE: usize = 1 << 20; // 1 MiB
 
 /// Files service interface.
 pub struct FilesInterface {
@@ -24,118 +20,6 @@ impl FilesInterface {
         Self {
             client: FilesClient::new(channel),
         }
-    }
-
-    /// Upload a tar file to the guest and extract at dest_path.
-    pub async fn upload_tar(
-        &mut self,
-        tar_path: &std::path::Path,
-        dest_path: &str,
-        container_id: Option<&str>,
-        mkdir_parents: bool,
-        overwrite: bool,
-    ) -> BoxliteResult<()> {
-        let dest = dest_path.to_string();
-        let cid = container_id.unwrap_or_default().to_string();
-
-        // Read entire tar file and build chunks
-        // Note: For very large files, consider streaming with async_stream crate
-        let mut file = File::open(tar_path)
-            .await
-            .map_err(|e| BoxliteError::Storage(format!("Failed to open tar file: {}", e)))?;
-
-        let mut chunks = Vec::new();
-        let mut buf = vec![0u8; CHUNK_SIZE];
-        let mut first = true;
-
-        loop {
-            match file.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => {
-                    let chunk = UploadChunk {
-                        dest_path: if first { dest.clone() } else { String::new() },
-                        container_id: cid.clone(),
-                        data: buf[..n].to_vec(),
-                        mkdir_parents,
-                        overwrite,
-                        source_is_dir: None,
-                    };
-                    first = false;
-                    chunks.push(chunk);
-                }
-                Err(e) => {
-                    return Err(BoxliteError::Storage(format!(
-                        "Failed to read tar file: {}",
-                        e
-                    )));
-                }
-            }
-        }
-
-        // Use futures::stream::iter for the upload stream
-        let stream = futures::stream::iter(chunks);
-
-        let response = self
-            .client
-            .upload(stream)
-            .await
-            .map_err(map_tonic_err)?
-            .into_inner();
-
-        if response.success {
-            Ok(())
-        } else {
-            Err(BoxliteError::Internal(
-                response.error.unwrap_or_else(|| "Upload failed".into()),
-            ))
-        }
-    }
-
-    /// Download a path from guest into a local tar file.
-    pub async fn download_tar(
-        &mut self,
-        container_src: &str,
-        container_id: Option<&str>,
-        include_parent: bool,
-        follow_symlinks: bool,
-        tar_dest: &std::path::Path,
-    ) -> BoxliteResult<()> {
-        let request = DownloadRequest {
-            src_path: container_src.to_string(),
-            container_id: container_id.unwrap_or_default().to_string(),
-            include_parent,
-            follow_symlinks,
-        };
-
-        let mut stream = self
-            .client
-            .download(request)
-            .await
-            .map_err(map_tonic_err)?
-            .into_inner();
-
-        let mut file = File::create(tar_dest)
-            .await
-            .map_err(|e| BoxliteError::Storage(format!("Failed to create tar file: {}", e)))?;
-
-        // Use explicit match for proper error handling
-        loop {
-            match stream.message().await {
-                Ok(Some(chunk)) => {
-                    file.write_all(&chunk.data).await.map_err(|e| {
-                        BoxliteError::Storage(format!("Failed to write tar file: {}", e))
-                    })?;
-                }
-                Ok(None) => break, // Stream ended
-                Err(e) => return Err(map_tonic_err(e)),
-            }
-        }
-
-        file.flush()
-            .await
-            .map_err(|e| BoxliteError::Storage(format!("Failed to flush tar file: {}", e)))?;
-
-        Ok(())
     }
 
     /// Upload a byte stream to the guest and extract at `dest_path`.
@@ -359,5 +243,114 @@ mod tests {
         ));
 
         assert!(error.to_string().contains("'/tmp' mount"), "{error}");
+    }
+
+    // ── The pre-hint guest ────────────────────────────────────────
+    //
+    // The guest ships inside the guest image, so it can be older than the host
+    // binary that talks to it. A guest built before the archive-shape hint
+    // simply leaves `source_is_dir` unset, and the host must read that as
+    // `Unknown` — not as `false`, which would extract a directory archive as a
+    // single file. These stand a real `Files` service up over a socket so the
+    // hint crosses the wire rather than being asserted in place.
+
+    /// A guest whose `download` sends the shape hint, or omits it the way a
+    /// pre-hint peer does.
+    struct StubGuest {
+        source_is_dir: Option<bool>,
+    }
+
+    #[tonic::async_trait]
+    impl boxlite_shared::Files for StubGuest {
+        type DownloadStream =
+            tokio_stream::wrappers::ReceiverStream<Result<boxlite_shared::DownloadChunk, Status>>;
+
+        async fn upload(
+            &self,
+            _request: tonic::Request<tonic::Streaming<UploadChunk>>,
+        ) -> Result<tonic::Response<boxlite_shared::UploadResponse>, Status> {
+            Err(Status::unimplemented("this stub only answers downloads"))
+        }
+
+        async fn download(
+            &self,
+            _request: tonic::Request<DownloadRequest>,
+        ) -> Result<tonic::Response<Self::DownloadStream>, Status> {
+            let (tx, rx) = tokio::sync::mpsc::channel(2);
+            let source_is_dir = self.source_is_dir;
+            tokio::spawn(async move {
+                // The hint rides the first chunk only — the second one proves
+                // the reader keeps the first chunk's answer and its bytes.
+                let _ = tx
+                    .send(Ok(boxlite_shared::DownloadChunk {
+                        data: b"first".to_vec(),
+                        source_is_dir,
+                    }))
+                    .await;
+                let _ = tx
+                    .send(Ok(boxlite_shared::DownloadChunk {
+                        data: b"second".to_vec(),
+                        source_is_dir: None,
+                    }))
+                    .await;
+            });
+            Ok(tonic::Response::new(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            ))
+        }
+    }
+
+    async fn download_from_stub(source_is_dir: Option<bool>) -> (Vec<u8>, CopySourceKind) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let incoming = async_stream::stream! {
+            loop {
+                match listener.accept().await {
+                    Ok((socket, _)) => yield Ok::<_, std::io::Error>(socket),
+                    Err(e) => yield Err(e),
+                }
+            }
+        };
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(boxlite_shared::FilesServer::new(StubGuest {
+                    source_is_dir,
+                }))
+                .serve_with_incoming(incoming),
+        );
+
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .expect("connect to the stub guest");
+        let (mut stream, source) = FilesInterface::new(channel)
+            .download_stream("/src", None, false, false)
+            .await
+            .expect("download");
+
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            bytes.extend_from_slice(&chunk.expect("chunk"));
+        }
+        (bytes, source)
+    }
+
+    #[tokio::test]
+    async fn a_guest_that_omits_the_hint_reports_unknown() {
+        let (bytes, source) = download_from_stub(None).await;
+
+        assert_eq!(source, CopySourceKind::Unknown);
+        assert_eq!(bytes, b"firstsecond");
+    }
+
+    #[tokio::test]
+    async fn the_first_chunks_hint_is_the_reported_shape() {
+        let (bytes, dir) = download_from_stub(Some(true)).await;
+        assert_eq!(dir, CopySourceKind::Dir);
+        assert_eq!(bytes, b"firstsecond");
+
+        let (_, file) = download_from_stub(Some(false)).await;
+        assert_eq!(file, CopySourceKind::File);
     }
 }

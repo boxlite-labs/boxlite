@@ -307,26 +307,30 @@ async fn streaming_hintless_corrupt_archive_fails(bx: &LiteBox, _tmp: &Path) {
 
 /// A hinted (streaming) upload whose archive names an entry under a mount
 /// must be refused — post-hoc for the stream (it cannot be pre-scanned
-/// without spooling), but the failure must surface instead of silently
-/// writing beneath the mount.
+/// without spooling) — and the refusal must be *total*: the guest rolls the
+/// extracted payload back, so nothing is left half-applied beneath the mount.
 async fn streaming_payload_under_mount_is_refused(bx: &LiteBox, tmp: &Path) {
     let host_src = tmp.join("stream-mount-payload.txt");
     std::fs::write(&host_src, "PAYLOAD-STREAM-MOUNT\n").unwrap();
 
     // The entry lands under the guest's /tmp tmpfs mount: destination root
     // is reachable, only the payload entry is shadowed — exactly the case
-    // the staged arm refuses via entry_paths pre-scan.
+    // the staged arm refuses via entry_paths pre-scan. The second entry is
+    // reachable and harmless, and is what makes "nothing landed" a claim with
+    // something to be false about.
     let mut tar_bytes = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut tar_bytes);
         let content = std::fs::read(&host_src).unwrap();
-        let mut header = tar::Header::new_gnu();
-        header.set_size(content.len() as u64);
-        header.set_mode(0o644);
-        header.set_cksum();
-        builder
-            .append_data(&mut header, "tmp/stream-mount-payload.txt", &content[..])
-            .unwrap();
+        for name in ["tmp/stream-mount-payload.txt", "stream-mount-harmless.txt"] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, name, &content[..])
+                .unwrap();
+        }
         builder.finish().unwrap();
     }
     let poisoned: boxlite_shared::BoxByteStream = Box::pin(tokio_stream::iter(vec![Ok(tar_bytes)]));
@@ -341,6 +345,14 @@ async fn streaming_payload_under_mount_is_refused(bx: &LiteBox, tmp: &Path) {
         msg.contains("'/tmp' mount"),
         "refusal should name the mount that blocks it, got: {msg}"
     );
+
+    // Same invariant the staged arm gets from refusing before it writes.
+    let code = exec_exit_code(
+        bx,
+        BoxCommand::new("test").args(["-e", "/stream-mount-harmless.txt"]),
+    )
+    .await;
+    assert_eq!(code, 1, "a refused streamed copy must leave nothing behind");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -386,4 +386,13 @@ pub(super) struct RemoveQuery {
 #[derive(Deserialize)]
 pub(super) struct FileQuery {
     pub path: String,
+    /// Archive shape hint, as the client sent it.
+    ///
+    /// Deliberately a `String`, not a `bool`: serde would reject the whole
+    /// request on a malformed value, while the runner's `parseSourceIsDir`
+    /// (apps/runner/pkg/api/controllers/boxlite_files.go) reads anything
+    /// unparseable as "no hint". Both servers answer the same clients, so both
+    /// have to be that forgiving.
+    #[serde(default)]
+    pub source_is_dir: Option<String>,
 }

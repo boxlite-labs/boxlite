@@ -457,12 +457,29 @@ pub fn add_self_to_cgroup_raw(cgroup_procs_path: &std::ffi::CStr) -> Result<(), 
 /// This should be called in the parent process before spawning.
 #[cfg(target_os = "linux")]
 pub fn build_cgroup_procs_path(box_id: &str) -> Option<std::ffi::CString> {
-    if !is_cgroup_v2_available() {
+    let path = cgroup_path(box_id).join("cgroup.procs");
+    if !path.exists() {
         return None;
     }
-
-    let path = cgroup_path(box_id).join("cgroup.procs");
     std::ffi::CString::new(path.to_string_lossy().as_bytes()).ok()
+}
+
+/// Return a `pre_exec` closure that joins the cgroup and propagates failure.
+///
+/// The closure calls [`add_self_to_cgroup_raw`] and maps any errno to
+/// [`std::io::Error`]. When installed via `Command::pre_exec`, a non-zero
+/// errno causes [`Command::spawn`] to return that error before `execve` —
+/// the join is fail-closed.
+///
+/// # Safety
+/// The closure performs only async-signal-safe operations (open, write,
+/// close, getpid). Callers must mark the `pre_exec` block `unsafe` per
+/// [`std::os::unix::process::CommandExt::pre_exec`].
+#[cfg(target_os = "linux")]
+pub fn cgroup_join_pre_exec(
+    cgroup_procs: std::ffi::CString,
+) -> impl FnMut() -> std::io::Result<()> {
+    move || add_self_to_cgroup_raw(&cgroup_procs).map_err(std::io::Error::from_raw_os_error)
 }
 
 #[cfg(test)]
@@ -594,6 +611,54 @@ mod tests {
         assert!(
             msg.contains("none of cpu/memory/pids"),
             "error must spell out the missing controllers; got {msg:?}"
+        );
+    }
+
+    /// Load-bearing regression guard: a failed cgroup join must abort
+    /// `spawn()`, not be discarded. Crosses the production closure built by
+    /// `cgroup_join_pre_exec` — the same one `BwrapSandbox::apply` installs.
+    ///
+    /// Two-sided: restore `let _ = add_self_to_cgroup_raw(..); Ok(())` in
+    /// `cgroup_join_pre_exec` and this fails — spawn succeeds and the child
+    /// runs in the inherited parent cgroup, which is the reported bug.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_join_failure_aborts_spawn() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::process::CommandExt;
+
+        let dir = std::env::temp_dir().join(format!("cgroup-join-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let procs = dir.join("cgroup.procs");
+        fs::write(&procs, b"").expect("create probe");
+        fs::set_permissions(&procs, fs::Permissions::from_mode(0o000)).expect("chmod 000");
+
+        // Skip if the 0o000 file is still writable (e.g. running as root).
+        let still_writable = std::fs::OpenOptions::new().write(true).open(&procs).is_ok();
+        if still_writable {
+            let _ = fs::set_permissions(&procs, fs::Permissions::from_mode(0o600));
+            let _ = fs::remove_dir_all(&dir);
+            eprintln!("skipping: process can write to a 0o000 file (likely root)");
+            return;
+        }
+
+        let c_path =
+            std::ffi::CString::new(procs.as_os_str().as_encoded_bytes()).expect("no interior NUL");
+        let mut cmd = std::process::Command::new("/bin/true");
+        // SAFETY: the closure performs only async-signal-safe work.
+        unsafe {
+            cmd.pre_exec(cgroup_join_pre_exec(c_path));
+        }
+        let spawned = cmd.spawn();
+
+        let _ = fs::set_permissions(&procs, fs::Permissions::from_mode(0o600));
+        let _ = fs::remove_dir_all(&dir);
+
+        let err = spawned.expect_err("spawn must fail closed when the cgroup join fails");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "expected EACCES from the join to surface verbatim, got {err:?}"
         );
     }
 }

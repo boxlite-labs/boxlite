@@ -62,6 +62,9 @@ test('parseBootstrapOptions reads the flags bootstrap acts on', () => {
     { stage: 'dev', repo: 'someone/boxlite', reviewers: '1,2', force: true },
   )
   assert.deepEqual(parseBootstrapOptions([]), {})
+  // Read by the GCP branch only — a protected GCP stage needs it too, and the
+  // AWS branch never looks at it.
+  assert.deepEqual(parseBootstrapOptions(['--stage', 'gcp-dev', '--confirm']), { stage: 'gcp-dev', confirm: true })
 })
 
 test('parseBootstrapOptions refuses an option whose value is the next flag', () => {

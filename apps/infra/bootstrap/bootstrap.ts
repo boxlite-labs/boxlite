@@ -2,12 +2,23 @@
 // Copyright (c) 2026 BoxLite AI
 
 /*
- * Idempotent, human-run environment preparation for a BoxLite SST
- * deployment: the GitHub OIDC deploy role + runtime IAM boundary
+ * Idempotent, human-run environment preparation for a BoxLite deployment, on
+ * whichever cloud `mstage.config.json` says the requested stage lives in
+ * (`homeFor`, the same field `mdeploy` reads to pick its engine).
+ *
+ * On AWS: the GitHub OIDC deploy role + runtime IAM boundary
  * (bootstrap/aws/github-deploy-role.yaml), the GitHub `<stage>` Environment the
  * deploy workflow binds to, the Cloudflare provider credentials in SSM, and the
  * stage's own configuration — OIDC_CLIENT_ID, and every key from .env that is not
- * local-only (deployableStageConfig) — in its SST secret store.
+ * local-only (deployableStageConfig) — in its SST secret store. Everything below
+ * this point in the file is that AWS path, unchanged by the branch above it.
+ *
+ * On GCP: the enabled APIs, the state bucket, the two Secret Manager records,
+ * a workload identity pool, the deployer and publisher service accounts, and
+ * the Artifact Registry repository — everything `mdeploy`/`mbuild` need and
+ * cannot create for themselves. See `gcp.ts`, and `bootstrapGcpStage` below for
+ * how the same GitHub Environment and repository-resolution steps are shared
+ * with the AWS path rather than duplicated.
  *
  * Four things are written on the GitHub side, all on the stage's own Environment
  * rather than the repository, so two stages never share them: the variables
@@ -53,6 +64,9 @@
  *                Mint the stage's send-only SES SMTP credential and store both
  *                halves, then ask AWS for production access once the sender
  *                domain verifies. Rerunning rotates the credential.
+ *   --confirm    Required to bootstrap a stage `mstage.config.json` marks
+ *                `protect: true`. Read on the GCP path only — no AWS stage is
+ *                protected today, so the AWS path never checks it.
  * Sign-in: run `npm run login` first, which walks the browser sign-in for every
  * provider this needs (AWS via `aws login`, AWS CLI 2.32.0+ — no IAM user,
  * access keys, or IAM Identity Center setup required). An existing profile or
@@ -102,6 +116,9 @@ import {
 } from './github.js'
 import { resolveAwsCliPath } from '../shared/exec.js'
 import { sesProductionAccess, sesSmtpPasswordV4 } from './ses-smtp.js'
+import { homeFor, loadConfig, type MstageConfig } from 'mstage/config'
+import { loadBuildConfig, registryFor } from 'mbuild/config'
+import { bootstrapGcp, type GitHubRepository } from './gcp.js'
 
 const SCRIPT_NAME = 'bootstrap-environment'
 // The one stage that must never end up with an unreviewed deploy path. Matches
@@ -976,9 +993,15 @@ function deployGithubDeployRoleStack({ awsCliPath, region, stage, repo }: any) {
  * prod silently repoint dev's deploys at prod's account. The region goes the same way and for the
  * same reason as before: it is read before any AWS access exists, so it cannot come from the store,
  * and a stage outside the default region has nowhere else to say so.
+ *
+ * `stage` is nullable for the same reason `--env` is sometimes absent below:
+ * GCP_IMAGE_PUBLISHER is read by a workflow with no `environment:` declared,
+ * shared by every stage for the same reason the AWS ECR push role is
+ * (bootstrap/aws's ecr-push-role-trust.json trusts both claim shapes too).
  */
 function ghEnvironmentVariableSet({ repo, stage, name, value }: any) {
-  execFileSync('gh', ['variable', 'set', name, '--repo', repo, '--env', stage, '--body', value], {
+  const scope = stage ? ['--env', stage] : []
+  execFileSync('gh', ['variable', 'set', name, '--repo', repo, ...scope, '--body', value], {
     stdio: ['ignore', 'inherit', 'inherit'],
     timeout: 30_000,
     killSignal: 'SIGTERM',
@@ -991,6 +1014,143 @@ function wireGithubEnvironment({ repo, stage, accountId, region }: any) {
   console.log(`[${SCRIPT_NAME}] GitHub ${stage} environment ... AWS_ACCOUNT_ID, AWS_REGION set`)
 }
 
+/**
+ * The numeric owner/repository ids a GCP identity provider's attribute
+ * condition pins, so a rename cannot silently widen who may assume it — the
+ * same property `repo:<owner>/<repo>:environment:<stage>` gets for free on
+ * the AWS side from GitHub's own OIDC claim, and GCP's condition has to ask
+ * for explicitly (`gcp.ts`'s `attributeCondition`).
+ */
+function resolveGitHubRepositoryIds(repo: any) {
+  let stdout
+  try {
+    stdout = execFileSync(
+      'gh',
+      ['api', `repos/${repo}`, '--jq', '{ownerId: (.owner.id|tostring), repositoryId: (.id|tostring)}'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15_000, killSignal: 'SIGTERM' },
+    )
+  } catch (cause: any) {
+    throw new Error(`could not read ${repo}'s numeric owner/repository ids from the GitHub API`, { cause })
+  }
+  return JSON.parse(stdout) as { ownerId: string; repositoryId: string }
+}
+
+/**
+ * `gcp.ts`'s injected `Run`: a result to reconcile against, never a thrown
+ * error — the same contract `awsFor`'s `Aws.present` gives the AWS functions
+ * above, and for the same reason: absence of a resource is an answer gcloud
+ * gives with a non-zero exit, not a fault in this process.
+ */
+async function gcloudRun(command: string, args: string[], options: { stdin?: string } = {}) {
+  try {
+    const stdout = execFileSync(command, args, {
+      input: options.stdin,
+      encoding: 'utf8',
+      stdio: [options.stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+      // Generous: a fresh project enabling a dozen APIs, or a workload identity
+      // pool provider settling, both take longer than an IAM call does on AWS.
+      timeout: 120_000,
+      killSignal: 'SIGTERM',
+    })
+    return { code: 0, stdout, stderr: '' }
+  } catch (error: any) {
+    return {
+      code: typeof error.status === 'number' ? error.status : 1,
+      stdout: error.stdout?.toString() ?? '',
+      stderr: error.stderr?.toString() ?? '',
+    }
+  }
+}
+
+/**
+ * The GCP half of bootstrap, reached from `main()` below when `mstage.config.json`
+ * says this stage's home is `gcp`.
+ *
+ * Shares three things with the AWS path rather than duplicating them:
+ * `parseBootstrapOptions`'s flags, the GitHub Environment + reviewer
+ * protection (`ensureGithubEnvironment`), and the variable-writing convention
+ * (`ghEnvironmentVariableSet`) — none of the three are AWS-specific, and a
+ * second copy of any would drift the moment one changed and not the other.
+ * Everything GCP-specific — the APIs, the state bucket, the identity pool, the
+ * service accounts, the registry — lives in gcp.ts instead.
+ */
+async function bootstrapGcpStage({
+  stage,
+  options,
+  config,
+}: {
+  stage: string
+  options: any
+  config: MstageConfig
+}): Promise<void> {
+  const declared = config.stages[stage]
+  if (declared.protect && options.confirm !== true) {
+    throw new Error(`Stage "${stage}" is protected in ${config.path}. Add --confirm to bootstrap it.`)
+  }
+  if (!declared.project) throw new Error(`Stage "${stage}" declares no project in ${config.path}`)
+  if (!declared.region) throw new Error(`Stage "${stage}" declares no region in ${config.path}`)
+
+  requireGhAuthenticated()
+  const repo = resolveRepo(options.repo)
+  const reviewerIds = parseReviewerIds(options.reviewers)
+  const effectiveReviewerIds = reviewerIds.length > 0 ? reviewerIds : [authenticatedGitHubUserId()]
+
+  console.log(
+    `[${SCRIPT_NAME}] stage=${stage} home=gcp project=${declared.project} region=${declared.region} repo=${repo}`,
+  )
+  ensureGithubEnvironment({ repo, stage, reviewerIds: effectiveReviewerIds })
+
+  const [owner, repositoryName] = repo.split('/')
+  const { ownerId, repositoryId } = resolveGitHubRepositoryIds(repo)
+  const github: GitHubRepository = {
+    issuer: GITHUB_OIDC_PROVIDER_URL,
+    owner,
+    ownerId,
+    repository: repositoryName,
+    repositoryId,
+  }
+
+  const buildConfig = loadBuildConfig({ cwd: INFRA_ROOT, environment: process.env })
+  const registry = registryFor(buildConfig, stage)
+  if (registry.kind !== 'artifact-registry') {
+    throw new Error(
+      `Stage "${stage}" publishes to ${registry.kind} in ${buildConfig.path}; a GCP bootstrap creates an Artifact Registry repository`,
+    )
+  }
+
+  const result = await bootstrapGcp({
+    run: gcloudRun,
+    project: declared.project,
+    region: declared.region,
+    app: config.app,
+    stage,
+    repository: registry.repository,
+    github,
+    log: (line) => console.log(`[${SCRIPT_NAME}] ${line}`),
+  })
+
+  // Written the same way wireGithubEnvironment writes the AWS pair: bootstrap
+  // wires CI at what it just made rather than asking the operator to paste it.
+  ghEnvironmentVariableSet({
+    repo,
+    stage,
+    name: 'GCP_WORKLOAD_IDENTITY_PROVIDER',
+    value: result.workloadIdentityProvider,
+  })
+  ghEnvironmentVariableSet({ repo, stage, name: 'GCP_DEPLOYER', value: result.deployerEmail })
+  // Repository-wide, not `--env`: mbuild.yml's publish job runs before any
+  // stage-specific environment would apply, matching AWS_ECR_PUSH_ROLE_ARN.
+  ghEnvironmentVariableSet({ repo, stage: null, name: 'GCP_IMAGE_PUBLISHER', value: result.publisherEmail })
+  console.log(
+    `[${SCRIPT_NAME}] GitHub ${stage} environment ... GCP_WORKLOAD_IDENTITY_PROVIDER, GCP_DEPLOYER set; ` +
+      'GCP_IMAGE_PUBLISHER set repository-wide',
+  )
+
+  console.log(
+    `[${SCRIPT_NAME}] done. Preview next: gh workflow run mdeploy.yml --repo ${repo} --ref main -f stage=${stage} -f apply=false`,
+  )
+}
+
 async function main() {
   // deployment/sst.ts loads the stage dotenv before it does anything else, and this script has to
   // match it: without it AWS_REGION/STACK_DOMAIN from .env are silently ignored and the stage
@@ -1000,6 +1160,16 @@ async function main() {
   const args = process.argv.slice(2)
   const options = parseBootstrapOptions(args)
   const stage = resolveSstStage(args)
+
+  // One field, read once, decides which half of this file runs — the same
+  // switch mstage makes for the store and mdeploy for the engine. Everything
+  // below this check is the AWS path, exactly as it ran before this branch
+  // existed; a GCP stage never reaches any of it.
+  const mstageConfig = loadConfig({ cwd: INFRA_ROOT, environment: process.env })
+  if (homeFor(mstageConfig, stage) === 'gcp') {
+    return await bootstrapGcpStage({ stage, options, config: mstageConfig })
+  }
+
   const force = Boolean(options.force)
   const region = resolveAwsRegion()
   const awsCliPath = resolveAwsCliPath()

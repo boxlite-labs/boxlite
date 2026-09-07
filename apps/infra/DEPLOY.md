@@ -139,7 +139,7 @@ npm run mdeploy -- --stage dev --remove --confirm
 | mstage — sign-ins, the store, digests, object versions, state repair | 327 tests |
 | mbuild — addresses, the publish sequence, the scan gate, the workflow | 58 tests |
 | mdeploy — the plan, both configs, the environment, the wiring, both bundles | 82 tests |
-| the incumbent stack and its release guards | 512 tests |
+| the incumbent stack and its release guards, plus `bootstrap/gcp.ts` | 522 tests |
 | mstage, mbuild **and mdeploy** typecheck | `tsc` clean, without `sst install` |
 | every GCP provider, applied | **never run** — no project, no network, no billing |
 
@@ -152,8 +152,16 @@ file says so.
 
 ## What is left
 
-- **A GCP account.** The deploy path is written, typechecked and tested. What it
-  lacks is a project, an identity pool, two repository variables and billing.
+- **A GCP account.** The deploy path is written, typechecked and tested, and
+  `bootstrap/gcp.ts` now creates everything an identity needs beyond the
+  project itself — the enabled APIs, the state bucket, the workload identity
+  pool, the deployer and publisher service accounts, the Artifact Registry
+  repository — and wires `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_DEPLOYER` and
+  `GCP_IMAGE_PUBLISHER` into GitHub the same way the AWS half already wires
+  its own role ARN. What is still manual is the project and its billing
+  account: nothing here creates either, and no bootstrap can — a project
+  needs a parent to be created under, and enabling billing needs a billing
+  account already linked to it.
 - **The batch pipeline.** `src/plan.ts` and `--module` are complete and tested,
   and `sst` targeting aborts with `Duplicate resource URN`
   ([pulumi/pulumi#24303](https://github.com/pulumi/pulumi/issues/24303), open).

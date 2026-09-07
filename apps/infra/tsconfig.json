@@ -9,7 +9,8 @@
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,
-    "types": ["node"]
+    "types": ["node"],
+    "customConditions": ["development"]
   },
   "ts-node": {
     "esm": true,

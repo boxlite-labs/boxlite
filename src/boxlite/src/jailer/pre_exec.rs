@@ -8,6 +8,8 @@
 //! 1. **Write PID file** - Single source of truth for process tracking
 //! 2. **Close inherited FDs** - Prevents information leakage
 //! 3. **Apply rlimits** - Resource limits (max files, memory, CPU time, etc.)
+//! 4. **Drop to the box's dedicated UID/GID** - privileged callers only; done
+//!    after rlimits so `RLIMIT_NPROC` is charged against the dedicated UID
 //!
 //! The order is load-bearing. `Command::spawn` blocks the parent only until
 //! the child closes its CLOEXEC exec-error pipe, and step 2 is what closes
@@ -38,7 +40,8 @@ use std::process::Command;
 ///
 /// Runs after fork() but before the new program starts in the child process.
 /// Applies, in order: PID file writing, FD preservation (dup2), FD cleanup,
-/// rlimits. See the module docs for why the PID file goes first.
+/// rlimits, dedicated-UID drop. See the module docs for why the PID file
+/// goes first.
 ///
 /// # Arguments
 ///
@@ -69,6 +72,7 @@ pub fn add_pre_exec_hook(
     pid_writer: Option<PidFileWriter>,
     preserved_fds: Vec<(RawFd, i32)>,
     detach: bool,
+    drop_to: Option<(u32, u32, Vec<u32>)>,
 ) {
     use std::os::unix::process::CommandExt;
 
@@ -130,7 +134,34 @@ pub fn add_pre_exec_hook(
             common::rlimit::apply_limits_raw(&resource_limits)
                 .map_err(std::io::Error::from_raw_os_error)?;
 
-            // 4. Detach=true → setsid: child becomes a session leader,
+            // 4. Drop to the box's dedicated UID/GID (privileged callers only).
+            // Done after rlimits so RLIMIT_NPROC — set above while still the
+            // spawning UID — is enforced at bwrap's `clone(CLONE_NEWUSER)`
+            // against this clean per-box UID, not the shared runner UID. Order
+            // mirrors Firecracker's jailer: gid, drop supplementary groups,
+            // then uid (so CAP_SETGID/CAP_SETUID are dropped last). All three
+            // are async-signal-safe.
+            #[cfg(target_os = "linux")]
+            if let Some((uid, gid, ref groups)) = drop_to {
+                if libc::setresgid(gid, gid, gid) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // Set the supplementary groups to exactly `groups` (device
+                // groups like kvm, so the dropped UID can still open /dev/kvm);
+                // empty list clears all. `as_ptr()` on an empty Vec is unused
+                // because the count is 0.
+                let (n, ptr) = (groups.len() as libc::size_t, groups.as_ptr());
+                if libc::setgroups(n, ptr) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::setresuid(uid, uid, uid) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            let _ = &drop_to;
+
+            // 5. Detach=true → setsid: child becomes a session leader,
             // detaching from the parent's controlling terminal. Without
             // this a SIGHUP on the parent's terminal cascades into the
             // daemon (the `BoxOptions::detach` contract relies on it).
@@ -153,7 +184,7 @@ mod tests {
         let mut cmd = Command::new("/bin/echo");
         let limits = ResourceLimits::default();
 
-        add_pre_exec_hook(&mut cmd, limits, None, vec![], false);
+        add_pre_exec_hook(&mut cmd, limits, None, vec![], false, None);
     }
 
     #[test]
@@ -161,7 +192,7 @@ mod tests {
         let mut cmd = Command::new("/bin/echo");
         let limits = ResourceLimits::default();
         let writer = PidFileWriter::at(std::path::Path::new("/tmp/test.pid")).ok();
-        add_pre_exec_hook(&mut cmd, limits, writer, vec![], false);
+        add_pre_exec_hook(&mut cmd, limits, writer, vec![], false, None);
     }
 
     #[test]
@@ -184,6 +215,7 @@ mod tests {
             // descriptors; this stand-in otherwise has none.
             vec![(keepalive.as_raw_fd(), 1023)],
             false,
+            None,
         );
         let status = cmd.status().expect("spawn child with pre-exec hook");
         assert!(status.success());
@@ -251,6 +283,7 @@ mod tests {
                     Some(writer),
                     preserved_fds.clone(),
                     detach,
+                    None,
                 );
 
                 let mut child = cmd.spawn().expect("spawn child with pre-exec hook");
@@ -279,6 +312,57 @@ mod tests {
         let limits = ResourceLimits::default();
 
         // Simulate preserving fd 5 → target fd 3
-        add_pre_exec_hook(&mut cmd, limits, None, vec![(5, 3)], false);
+        add_pre_exec_hook(&mut cmd, limits, None, vec![(5, 3)], false, None);
+    }
+
+    /// Verifies, via the child's own `/proc` files, that `drop_to` lands the
+    /// child on the dedicated UID and that `RLIMIT_NPROC` is in force there —
+    /// i.e. the per-box process cap is charged against the dedicated UID, not
+    /// the spawning UID. Needs `CAP_SETUID` (root), so it self-skips otherwise.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn drop_to_sets_child_uid_and_scopes_nproc() {
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!(
+                "skipping drop_to_sets_child_uid_and_scopes_nproc: requires root (CAP_SETUID)"
+            );
+            return;
+        }
+        use std::process::Stdio;
+        let uid = 2_000_123u32;
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg("grep '^Uid:' /proc/self/status; grep 'Max processes' /proc/self/limits")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let limits = ResourceLimits {
+            max_processes: Some(100),
+            ..Default::default()
+        };
+        add_pre_exec_hook(
+            &mut cmd,
+            limits,
+            None,
+            vec![],
+            false,
+            Some((uid, uid, vec![])),
+        );
+
+        let out = cmd.output().expect("spawn /bin/sh");
+        let report = String::from_utf8_lossy(&out.stdout);
+        eprintln!("--- child /proc evidence ---\n{report}---");
+
+        // Real/effective/saved UID are all the dedicated UID.
+        assert!(
+            report.contains(&format!("Uid:\t{uid}\t{uid}\t{uid}")),
+            "child should run as dedicated UID {uid}; got:\n{report}"
+        );
+        // RLIMIT_NPROC soft cap is 100, accounted against UID {uid}.
+        assert!(
+            report
+                .lines()
+                .any(|l| l.starts_with("Max processes") && l.contains("100")),
+            "child RLIMIT_NPROC should be 100; got:\n{report}"
+        );
     }
 }

@@ -75,6 +75,8 @@ pub(crate) mod credentials;
 pub mod landlock;
 #[cfg(target_os = "linux")]
 pub mod seccomp;
+#[cfg(target_os = "linux")]
+pub(crate) mod uid_alloc;
 
 // ============================================================================
 // Public re-exports
@@ -505,11 +507,22 @@ impl<S: Sandbox> Jail for Jailer<S> {
             tracing::info!("Jailer disabled, running shim without sandbox isolation");
         }
 
-        // Pre-exec hook: PID file, FD preservation, FD cleanup, rlimits. The
-        // PID file goes first on purpose — see `pre_exec`'s module docs.
+        // Per-box dedicated UID. When privileged, allocate one and chown the box
+        // dir to it; the pre_exec hook then `setresuid`s into it so RLIMIT_NPROC
+        // is charged against this clean per-box UID instead of the shared runner
+        // UID. When not privileged (no dedicated UID), drop the per-box NPROC —
+        // applying it to the shared runner UID is exactly what broke spawn on a
+        // busy host; the cgroup `pids.max` cap still bounds the box.
+        let drop_to = self.resolve_box_credentials();
+        let mut resource_limits = self.security.resource_limits.clone();
+        if drop_to.is_none() {
+            resource_limits.max_processes = None;
+        }
+
+        // Pre-exec hook: PID file, FD preservation, FD cleanup, rlimits, UID
+        // drop. The PID file goes first on purpose — see `pre_exec`'s module docs.
         // Sandbox-specific pre_exec hooks (cgroup, Landlock) are already added
         // by sandbox.apply() above — Command supports multiple pre_exec closures.
-        let resource_limits = self.security.resource_limits.clone();
         let pid_writer = self.pid_file_writer();
         pre_exec::add_pre_exec_hook(
             &mut cmd,
@@ -517,12 +530,90 @@ impl<S: Sandbox> Jail for Jailer<S> {
             pid_writer,
             self.preserved_fds.clone(),
             self.detach,
+            drop_to,
         );
         cmd
     }
 }
 
+/// Fail-closed UID for a root runner that can't get a dedicated one: the box
+/// drops to `nobody` rather than ever staying root.
+#[cfg(target_os = "linux")]
+const NOBODY_UID: u32 = 65534;
+
 impl<S: Sandbox> Jailer<S> {
+    /// Resolve the `(uid, gid, supplementary_gids)` the child should
+    /// `setresuid`/`setgroups` into, or `None` to keep the (already non-root)
+    /// spawning UID.
+    ///
+    /// Invariant: **the box never runs as root.** A privileged (root) runner
+    /// therefore *always* drops — to a dedicated per-box UID when one can be
+    /// allocated, otherwise to `nobody` as a fail-closed fallback (never back to
+    /// root). A non-root runner already satisfies the invariant, so it keeps its
+    /// UID (`None`) and relies on cgroup `pids.max`. Supplementary groups carry
+    /// the device groups the box still needs (kvm).
+    #[cfg(target_os = "linux")]
+    fn resolve_box_credentials(&self) -> Option<(u32, u32, Vec<u32>)> {
+        if !self.security.jailer_enabled {
+            return None;
+        }
+
+        // Any UID drop needs CAP_SETUID, which in practice means root. A
+        // non-root runner can't `setresuid` into a foreign UID — and it is
+        // already non-root — so keep its UID and rely on cgroup pids.max. This
+        // gate is FIRST, before honoring `security.uid`: attempting the drop
+        // unprivileged would fail the pre_exec hook with EPERM and abort spawn.
+        if !uid_alloc::UidAllocator::is_supported() {
+            return None;
+        }
+
+        // Device groups the dropped UID keeps: kvm (libkrun opens /dev/kvm,
+        // root:kvm 0660). /dev/net/tun is world-accessible (0666), needs none.
+        let groups: Vec<u32> = uid_alloc::group_gid("kvm").into_iter().collect();
+
+        // Explicit override from SecurityOptions.
+        if let Some(uid) = self.security.uid {
+            return Some((uid, self.security.gid.unwrap_or(uid), groups));
+        }
+
+        // Root runner: must drop to a non-root UID. Prefer a dedicated one.
+        let box_dir = self.layout.root();
+        let creds = box_dir
+            .parent()
+            .map(|boxes_dir| {
+                uid_alloc::UidAllocator::new(
+                    boxes_dir.to_path_buf(),
+                    boxes_dir.join(".uidpool.lock"),
+                )
+            })
+            .and_then(|allocator| match allocator.allocate(box_dir) {
+                Ok(creds) => Some(creds),
+                Err(e) => {
+                    tracing::warn!(error = %e, "per-box UID allocation failed; box will drop to nobody");
+                    None
+                }
+            });
+
+        // Fail closed to `nobody` (65534) rather than ever leaving the box root.
+        let (uid, gid) = match creds {
+            Some(c) => (c.uid, c.gid),
+            None => (NOBODY_UID, NOBODY_UID),
+        };
+
+        // Best-effort: the dropped UID must own its working tree to use it. A
+        // failure here breaks the box, but the box still drops (never root).
+        if let Err(e) = uid_alloc::chown_tree(box_dir, uid, gid) {
+            tracing::warn!(error = %e, uid, "chown box dir to dropped UID failed");
+        }
+        tracing::info!(uid, gid, "box will drop to a non-root host UID");
+        Some((uid, gid, groups))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn resolve_box_credentials(&self) -> Option<(u32, u32, Vec<u32>)> {
+        None
+    }
+
     /// Get the security options.
     pub fn security(&self) -> &SecurityOptions {
         &self.security

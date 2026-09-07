@@ -2019,7 +2019,7 @@ mod tests {
         assert!(direct.jailer_enabled);
         assert!(direct.close_fds);
         assert!(direct.sanitize_env);
-        assert_eq!(direct.uid, Some(65534));
+        assert_eq!(direct.uid, None); // default: auto-allocate a dedicated per-box UID
         #[cfg(target_os = "linux")]
         {
             assert!(direct.seccomp_enabled);

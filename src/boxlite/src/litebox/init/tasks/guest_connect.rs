@@ -147,6 +147,20 @@ async fn wait_for_guest_ready(
         ))
     })?;
 
+    // The box may have dropped to a dedicated non-root UID (see jailer
+    // resolve_box_credentials), so the in-VM side connects to this host-bound
+    // socket as that UID — which needs write permission on the socket file.
+    // Connecting to a unix socket requires `w`; grant it. The per-box sockets
+    // dir already gates who can reach this path.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) =
+            std::fs::set_permissions(ready_socket_path, std::fs::Permissions::from_mode(0o666))
+        {
+            tracing::warn!(error = %e, socket = %ready_socket_path.display(), "chmod ready socket connectable failed");
+        }
+    }
+
     tracing::debug!(
         socket = %ready_socket_path.display(),
         "Listening for guest ready notification"

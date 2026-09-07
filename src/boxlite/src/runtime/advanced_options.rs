@@ -221,8 +221,8 @@ impl Default for SecurityOptions {
         Self {
             jailer_enabled: true,
             seccomp_enabled: cfg!(target_os = "linux"),
-            uid: Some(65534), // nobody
-            gid: Some(65534), // nogroup
+            uid: None, // auto-allocate a dedicated per-box UID (jailer); see resolve_box_credentials
+            gid: None, // auto-allocate a dedicated per-box GID
             new_pid_ns: cfg!(target_os = "linux"),
             new_net_ns: false, // gvproxy provides networking
             chroot_base: default_chroot_base(),

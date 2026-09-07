@@ -239,14 +239,19 @@ impl BoxSockets {
     }
 }
 
-/// Create `dir` as a 0700 directory owned by the current user, verifying an
+/// Create `dir` as a 0711 directory owned by the current user, verifying an
 /// existing entry the way tmux verifies `/tmp/tmux-{uid}`: must be a real
-/// directory (not a symlink) owned by us; group/other permission bits are
+/// directory (not a symlink) owned by us; group/other read/write bits are
 /// repaired; anything else is a loud error (a squatted parent is a denial of
 /// service, never a redirection).
+///
+/// 0711 (not 0700) so a box that dropped to its own dedicated UID can still
+/// *traverse* this per-runner parent to reach its binding symlink. Listing is
+/// denied (no `r`), and each box's sockets stay protected by the ownership of
+/// the symlink target (the box's sockets dir), so traverse-only is safe.
 fn ensure_owned_private_dir(dir: &Path) -> BoxliteResult<()> {
     use std::os::unix::fs::DirBuilderExt;
-    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+    match std::fs::DirBuilder::new().mode(0o711).create(dir) {
         Ok(()) => return Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => {
@@ -277,9 +282,11 @@ fn ensure_owned_private_dir(dir: &Path) -> BoxliteResult<()> {
             uid,
         )));
     }
-    // Repair permissions opened up by a foreign umask or an older release.
-    if meta.permissions().mode() & 0o077 != 0 {
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
+    // Normalize to exactly 0711: strip any group/other read/write opened up by
+    // a foreign umask or an older release, and add the traverse bit that older
+    // 0700 dirs lack (so a dropped-UID box can reach its binding symlink).
+    if meta.permissions().mode() & 0o777 != 0o711 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o711)).map_err(|e| {
             BoxliteError::Storage(format!(
                 "Failed to tighten permissions on {}: {}",
                 dir.display(),
@@ -430,8 +437,9 @@ mod tests {
 
     #[test]
     fn ensure_repairs_parent_permissions() {
-        // A pre-existing 0755 parent (older release / foreign umask) gets
-        // tightened to 0700 rather than rejected.
+        // A pre-existing 0755 parent (older release / foreign umask) gets its
+        // group/other read/write stripped, normalized to 0711 (traverse kept so
+        // a dropped-UID box can reach its binding symlink) rather than rejected.
         let parent = BoxSockets::parent_dir();
         std::fs::create_dir_all(&parent).unwrap();
         std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -443,7 +451,7 @@ mod tests {
             .unwrap()
             .permissions()
             .mode();
-        assert_eq!(mode & 0o777, 0o700, "parent must be repaired to 0700");
+        assert_eq!(mode & 0o777, 0o711, "parent must be normalized to 0711");
         s.remove();
     }
 

@@ -61,6 +61,7 @@ export class OrganizationRegionController {
     summary: 'List all available regions for the organization',
     operationId: 'listAvailableRegions',
   })
+  @RequireFlagsEnabled({ flags: [{ flagKey: FeatureFlags.ORGANIZATION_INFRASTRUCTURE, defaultValue: false }] })
   @ApiResponse({
     status: 200,
     description: 'List of all available regions',

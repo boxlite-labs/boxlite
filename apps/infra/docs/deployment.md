@@ -383,19 +383,19 @@ access keys are stored in GitHub, and no stage configuration either — a job re
 that from the stage's SST secret store using the credentials it just assumed, so
 nothing is written to disk and there is no `.env` for a failed job to leave behind.
 
-`bootstrap/aws/github-deploy-role.yaml` bootstraps three things that must exist **before** an
-SST deploy: the OIDC role, the immutable Api ECR repository, and the private
-Runner artifact bucket. That bucket expires only superseded object versions —
+`npm run bootstrap` (`bootstrap/aws.ts`, from the documents in `bootstrap/aws/`) reconciles three
+things that must exist **before** an SST deploy: the OIDC role, the immutable Api ECR repository,
+and the private Runner artifact bucket. That bucket expires only superseded object versions —
 first boot re-fetches the commit-keyed tarball at every instance launch, so
 expiring the current object would make a later replacement fail to boot. The role
 grants only the AWS control-plane actions
 used by this SST stack. IAM mutation is limited to `boxlite-<stage>-*` roles, policies, and
 instance profiles, so one stage cannot rewrite another's. Every role created by SST must carry the stage's runtime
 permissions boundary, which excludes IAM mutation and limits workloads to the
-data-plane APIs they need. Redeploy that CloudFormation stack whenever its policy
-or resources change. `IAM_PERMISSIONS_BOUNDARY_STAGE` must match both the SST stage
-and the template's `GitHubEnvironment`; deployment fails before creating roles if
-they differ. Keep required reviewers enabled on each Environment.
+data-plane APIs they need. Re-run bootstrap whenever its policy documents change — it reconciles
+rather than recreates, so a re-run is how an edit reaches AWS. `IAM_PERMISSIONS_BOUNDARY_STAGE`
+must match the `--stage` bootstrap was run with; deployment fails before creating roles if they
+differ. Keep required reviewers enabled on each Environment.
 
 ## Secrets & credentials
 

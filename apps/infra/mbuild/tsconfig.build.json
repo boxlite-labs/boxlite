@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "outDir": "dist",
+    "rootDir": ".",
+    // The sources import each other as `./x.ts` so `tsx` can run them straight
+    // from bin/. This rewrites those to `./x.js` on the way out, which is what a
+    // consumer running compiled output has to import.
+    "allowImportingTsExtensions": false,
+    "rewriteRelativeImportExtensions": true
+  },
+  "include": ["bin/**/*.ts", "src/**/*.ts"],
+  "exclude": ["test/**/*.ts", "dist/**/*"]
+}

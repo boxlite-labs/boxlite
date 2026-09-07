@@ -27,7 +27,12 @@ __pycache__/
 .eggs/
 .venv/
 venv/
-env/
+# Anchored to the repository root. Unanchored, this matched every directory
+# named `env` at any depth — including `apps/infra/mstage/src/env/`, whose seven
+# TypeScript sources were silently untracked while everything importing them was
+# committed. A Python virtualenv lives at the root or beside its own project, so
+# the anchor costs nothing.
+/env/
 .python-version
 .pytest_cache/
 .mypy_cache/

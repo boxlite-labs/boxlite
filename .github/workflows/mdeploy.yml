@@ -1,0 +1,240 @@
+# Deploys BoxLite through mdeploy, on whichever cloud the stage lives in.
+#
+# The workflow makes no cloud decision of its own. `mstage.config.json` says
+# which cloud each stage is in — `home`, per stage or per repository — and the
+# preflight below reads it, so adding a stage on another cloud is an edit to a
+# config file rather than to this file. Nothing here names ECR, Artifact
+# Registry, a region or a repository.
+#
+# One apply, not module by module. `mdeploy/src/plan.ts` and `--module` exist
+# and are tested, and the batch pipeline they describe is not dispatched here
+# for one upstream reason: `sst` targeting aborts with `Duplicate resource URN`
+# on a child of `sst:aws:Vpc` (pulumi/pulumi#24303, open). Pulumi still orders
+# the modules — every provider takes the handles it depends on as arguments and
+# `stack/index.ts` threads them — and an unchanged module is a no-op in the
+# diff, so a whole-stack apply does no more work. What is lost is attribution:
+# a failure names a resource rather than a module.
+#
+# Everything that can refuse the deploy happens in the first job, and every one
+# of those checks is a read.
+name: mdeploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      # A choice rather than free text: this value selects the job's deployment
+      # Environment, and an Environment carries the secrets and the reviewers of
+      # the stage it names. Enforced across every workflow by
+      # apps/infra/deployment/release-safety.test.ts.
+      stage:
+        description: Stage to deploy, as declared in mstage.config.json
+        required: true
+        default: dev
+        type: choice
+        options:
+          - dev
+          - prod
+          - gcp-dev
+
+      image_tag:
+        description: Commit SHA of the images to deploy (defaults to this ref)
+        required: false
+      apply:
+        description: Apply the change. Off previews it and stops.
+        required: true
+        type: boolean
+        default: false
+      confirm:
+        description: Required for a stage mstage.config.json marks protected
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  # An app and stage keep one checkpoint, and two applies against one stage read
+  # and write the same file — the second to finish erases what the first
+  # recorded. A repository-wide group name is what serialises them.
+  group: mdeploy-${{ inputs.stage }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  BOXLITE_IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
+  # gh is installed on a runner but never signed in, and mstage.config.json
+  # declares github a required provider — so every step that reaches mstage
+  # fails on the session before it fails on anything worth reading.
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  preflight:
+    name: preflight
+    # The job that reaches a protected Environment reaches the cloud role behind
+    # it, so it runs from main and nowhere else.
+    if: github.ref == 'refs/heads/main'
+    environment: ${{ inputs.stage }}
+    runs-on: ubuntu-latest
+    outputs:
+      kind: ${{ steps.config.outputs.kind }}
+      region: ${{ steps.config.outputs.region }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-infra
+
+      # ----------------------------------------------------------- 1/5
+      # Which cloud this stage deploys to, and where in it. One file says both,
+      # and nothing after this point knows the answer in advance.
+      - name: Resolve the stage
+        id: config
+        working-directory: apps/infra
+        run: |
+          set -Eeuo pipefail
+          if ! output="$(npm run --silent mbuild inspect -- --stage "${{ inputs.stage }}" 2>&1)"; then
+            echo "::error title=stage::$output"
+            exit 1
+          fi
+          echo "$output"
+          echo "$output" >> "$GITHUB_OUTPUT"
+
+      # ----------------------------------------------------------- 2/5
+      # An identity for that cloud. GitHub's OIDC token is the only thing this
+      # runner can prove, so federation goes through the provider's own action;
+      # mstage cannot mint a session it holds no token for.
+      - name: Federate an AWS identity
+        if: steps.config.outputs.kind == 'ecr'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # Composed from the stage's AWS_ACCOUNT_ID, not a stored role ARN: the
+          # role name is fixed per stage (bootstrap/environment.ts's
+          # githubDeployRoleName, the same name bootstrap/aws.ts creates the role
+          # under), so only the account id has to be configured. Every other
+          # deploy workflow in this repository composes it the same way.
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/boxlite-${{ inputs.stage }}-github-deploy
+          aws-region: ${{ steps.config.outputs.region }}
+          role-session-name: mdeploy-${{ github.run_id }}
+
+      - name: Federate a GCP identity
+        if: steps.config.outputs.kind == 'artifact-registry'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER }}
+
+      # ----------------------------------------------------------- 3/5
+      # A read, so a transient failure says nothing about the answer: retried.
+      - name: Verify the session through mstage
+        working-directory: apps/infra
+        run: |
+          set -Eeuo pipefail
+          for attempt in 1 2 3; do
+            if npm run --silent mstage login; then exit 0; fi
+            echo "mstage reports no usable session (attempt $attempt/3); retrying in $((attempt * 5))s"
+            sleep $((attempt * 5))
+          done
+          echo "::error title=mstage::No usable session for ${{ steps.config.outputs.kind }} after 3 attempts"
+          exit 1
+
+      # Both of these answer about the stage's own contents, so a second ask
+      # returns the same answer: neither is retried.
+      - name: Verify the stage configuration still matches its own fingerprint
+        working-directory: apps/infra
+        run: npm run --silent mstage env digest -- --stage "${{ inputs.stage }}"
+
+      # ----------------------------------------------------------- 4/5
+      # Does this stage hold this commit yet? mbuild answers, because mbuild
+      # composes the address the deploy resolves — a check that built its own
+      # string could pass against an address nothing pulls.
+      #
+      # A deploy dispatched while its commit is still being published used to
+      # fail minutes in, on a task that could not pull, after the apply had
+      # already created resources.
+      - name: Verify the images
+        working-directory: apps/infra
+        run: npm run --silent mbuild verify -- --tag "$BOXLITE_IMAGE_TAG" --stage "${{ inputs.stage }}"
+
+      # ----------------------------------------------------------- 5/5
+      - name: Confirm a protected stage
+        working-directory: apps/infra
+        run: |
+          set -Eeuo pipefail
+          protected=$(node -e '
+            const config = require("./mstage.config.json")
+            process.stdout.write(String(Boolean(config.stages[process.argv[1]]?.protect)))
+          ' "${{ inputs.stage }}")
+          if [ "$protected" = "true" ] && [ "${{ inputs.confirm }}" != "true" ]; then
+            echo "::error title=protected::${{ inputs.stage }} is protected in mstage.config.json; re-dispatch with confirm"
+            exit 1
+          fi
+
+  deploy:
+    name: ${{ inputs.apply && 'deploy' || 'preview' }} ${{ inputs.stage }}
+    needs: preflight
+    if: github.ref == 'refs/heads/main'
+    environment: ${{ inputs.stage }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-infra
+
+      - name: Federate an AWS identity
+        if: needs.preflight.outputs.kind == 'ecr'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # Composed from the stage's AWS_ACCOUNT_ID, not a stored role ARN: the
+          # role name is fixed per stage (bootstrap/environment.ts's
+          # githubDeployRoleName, the same name bootstrap/aws.ts creates the role
+          # under), so only the account id has to be configured. Every other
+          # deploy workflow in this repository composes it the same way.
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/boxlite-${{ inputs.stage }}-github-deploy
+          aws-region: ${{ needs.preflight.outputs.region }}
+          role-session-name: mdeploy-${{ github.run_id }}
+
+      - name: Federate a GCP identity
+        if: needs.preflight.outputs.kind == 'artifact-registry'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER }}
+
+      # Never retried. A run killed mid-apply can leave the per-stage lock held,
+      # and a second attempt then fails on the lock rather than on the cause
+      # worth reading. Clearing it by hand is a first-class command:
+      # `npm run mstage state unlock -- --stage <stage>`.
+      - name: Apply
+        working-directory: apps/infra
+        run: |
+          set -Eeuo pipefail
+          if [ "${{ inputs.apply }}" = "true" ]; then
+            npm run mdeploy -- --stage "${{ inputs.stage }}" ${{ inputs.confirm && '--confirm' || '' }}
+          else
+            npm run mdeploy -- --stage "${{ inputs.stage }}" --diff
+          fi
+
+      - name: Report
+        if: always()
+        run: |
+          set -Eeuo pipefail
+          {
+            echo "### mdeploy ${{ inputs.stage }}"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| commit | \`$BOXLITE_IMAGE_TAG\` |"
+            echo "| cloud | \`${{ needs.preflight.outputs.kind == 'ecr' && 'aws' || 'gcp' }}\` in \`${{ needs.preflight.outputs.region }}\` |"
+            echo "| intent | \`${{ inputs.apply && 'apply' || 'preview' }}\` |"
+            echo "| result | \`${{ job.status }}\` |"
+            echo
+            echo "From a checkout:"
+            echo
+            echo '```'
+            echo "npm run mdeploy -- --stage ${{ inputs.stage }} --diff"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

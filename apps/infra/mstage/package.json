@@ -1,0 +1,98 @@
+{
+  "name": "mstage",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Shared BoxLite sign-in, stage configuration and AWS identity. No repository-specific deployment lives here",
+  "bin": {
+    "mstage": "bin/mstage.ts"
+  },
+  "//": "apps/infra runs mstage from source under tsx and passes --conditions=development; anything consuming the built package resolves to dist.",
+  "exports": {
+    "./auth": {
+      "development": "./src/auth/sessions.ts",
+      "types": "./dist/src/auth/sessions.d.ts",
+      "default": "./dist/src/auth/sessions.js"
+    },
+    "./aws": {
+      "development": "./src/aws/identity.ts",
+      "types": "./dist/src/aws/identity.d.ts",
+      "default": "./dist/src/aws/identity.js"
+    },
+    "./child-env": {
+      "development": "./src/aws/child-env.ts",
+      "types": "./dist/src/aws/child-env.d.ts",
+      "default": "./dist/src/aws/child-env.js"
+    },
+    "./cli": {
+      "development": "./src/cli/argv.ts",
+      "types": "./dist/src/cli/argv.d.ts",
+      "default": "./dist/src/cli/argv.js"
+    },
+    "./config": {
+      "development": "./src/config/load.ts",
+      "types": "./dist/src/config/load.d.ts",
+      "default": "./dist/src/config/load.js"
+    },
+    "./identity": {
+      "development": "./src/identity.ts",
+      "types": "./dist/src/identity.d.ts",
+      "default": "./dist/src/identity.js"
+    },
+    "./env": {
+      "development": "./src/env/store.ts",
+      "types": "./dist/src/env/store.d.ts",
+      "default": "./dist/src/env/store.js"
+    },
+    "./home": {
+      "development": "./src/home.ts",
+      "types": "./dist/src/home.d.ts",
+      "default": "./dist/src/home.js"
+    },
+    "./secret-address": {
+      "development": "./src/env/secret-address.ts",
+      "types": "./dist/src/env/secret-address.d.ts",
+      "default": "./dist/src/env/secret-address.js"
+    },
+    "./select-group": {
+      "development": "./src/env/select-group.ts",
+      "types": "./dist/src/env/select-group.d.ts",
+      "default": "./dist/src/env/select-group.js"
+    },
+    "./run": {
+      "development": "./src/cli/run.ts",
+      "types": "./dist/src/cli/run.d.ts",
+      "default": "./dist/src/cli/run.js"
+    },
+    "./scope": {
+      "development": "./src/aws/precedence.ts",
+      "types": "./dist/src/aws/precedence.d.ts",
+      "default": "./dist/src/aws/precedence.js"
+    }
+  },
+  "files": [
+    "dist",
+    "bin",
+    "src"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "mstage": "tsx bin/mstage.ts",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1124.0",
+    "@aws-sdk/client-ssm": "^3.1124.0",
+    "@aws-sdk/client-sts": "^3.1124.0",
+    "@aws-sdk/credential-providers": "^3.1124.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

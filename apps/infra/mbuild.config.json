@@ -1,0 +1,47 @@
+{
+  "root": "../..",
+  "artifacts": {
+    "api": {
+      "dockerfile": "apps/api/Dockerfile",
+      "context": "."
+    },
+    "proxy": {
+      "dockerfile": "apps/proxy/Dockerfile",
+      "context": "."
+    },
+    "otel-collector": {
+      "dockerfile": "apps/otel-collector/Dockerfile",
+      "context": "."
+    }
+  },
+  "scan": {
+    "blockOn": ["CRITICAL", "HIGH"],
+    "timeoutSeconds": 300
+  },
+  "stages": {
+    "dev": {
+      "registry": {
+        "kind": "ecr",
+        "repository": "boxlite-app-dev",
+        "immutableTags": true,
+        "scanOnPush": true
+      }
+    },
+    "prod": {
+      "registry": {
+        "kind": "ecr",
+        "repository": "boxlite-app-prod",
+        "immutableTags": true,
+        "scanOnPush": true
+      }
+    },
+    "gcp-dev": {
+      "registry": {
+        "kind": "artifact-registry",
+        "repository": "boxlite-app-gcp-dev",
+        "immutableTags": true,
+        "scanOnPush": true
+      }
+    }
+  }
+}

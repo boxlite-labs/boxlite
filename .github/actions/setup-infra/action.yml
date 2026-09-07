@@ -1,0 +1,68 @@
+# What every apps/infra job needs before it can build or deploy anything.
+#
+# apps/infra is not one of the root workspaces and carries its own lockfile, so
+# a root `yarn install` leaves mstage, mbuild, mdeploy and sst unresolved and
+# every step that follows fails on a missing script.
+#
+# The last step is the one that is easy to forget and hard to diagnose: `sst`
+# bundles `mdeploy/sst.config.ts` without the `development` export condition, so
+# it resolves `mbuild/address` and `mstage/config` to their `dist/`, and `dist/`
+# is a build artefact that is not in the repository. Without it the config does
+# not build at all — `Could not resolve "mstage/config"` is what a missing one
+# looks like.
+#
+# The cache key is exact and carries no `restore-keys`: a partial hit would be a
+# wrong install, and paying the install is the correct outcome of a miss.
+name: Set up apps/infra
+description: Node, the apps/infra install, the pulumi CLI, and the build artefacts sst resolves without conditions.
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+
+    - name: Restore the apps/infra install
+      id: modules
+      uses: actions/cache@v4
+      with:
+        path: apps/infra/node_modules
+        key: infra-modules-${{ runner.os }}-node22-${{ hashFiles('apps/infra/package-lock.json') }}
+
+    - name: Install
+      if: steps.modules.outputs.cache-hit != 'true'
+      shell: bash
+      working-directory: apps/infra
+      run: npm ci
+
+    # Only `platform/`. The rest of `.sst` is one run's own state — `outputs.json`
+    # names every resource the stack created — and a cache is readable by every
+    # workflow run in the repository.
+    - name: Restore the sst platform
+      uses: actions/cache@v4
+      with:
+        path: apps/infra/mdeploy/.sst/platform
+        key: sst-platform-${{ runner.os }}-${{ hashFiles('apps/infra/package-lock.json', 'apps/infra/mdeploy/sst.config.ts') }}
+
+    # `@pulumi/pulumi/automation` does not bundle the engine — it spawns the
+    # `pulumi` binary — so a GCP stage cannot deploy without this on PATH.
+    # Pinned to the SDK's own version, because Pulumi releases the CLI and the
+    # SDK together. Install-only: omitting `command` is how this action stops
+    # after putting the binary there.
+    #
+    # Every job rather than the GCP ones alone: `mstage.config.json` decides per
+    # stage which cloud a job is for, and a job that discovered the binary was
+    # missing would have done so after federating an identity.
+    - uses: pulumi/actions@v6
+      with:
+        pulumi-version: 3.261.0
+
+    # Both, not one: the config resolves `mstage/config` as well as
+    # `mbuild/address` and `mbuild/config`, and each is resolved the same way.
+    - name: Build what sst resolves without the development condition
+      shell: bash
+      working-directory: apps/infra
+      run: |
+        npm run build:mstage
+        npm run build:mbuild

@@ -5,15 +5,13 @@
  * CI preflight: confirm the assumed deploy role can actually attach the
  * runtime IAM permissions boundary before `sst diff`/`sst deploy` run.
  * apps/infra/stack/deploy.ts requires every role it manages to carry that
- * boundary (see the $transform there); if the bootstrap CloudFormation
- * stack (bootstrap/aws/github-deploy-role.yaml, provisioned by
- * bootstrap/bootstrap.ts) was never (re)deployed for this role,
- * every one of those roles fails identically with an
- * iam:PutRolePermissionsBoundary AccessDenied — a ~2-minute wall of
- * duplicate errors, discovered only after install + tests + preview already
- * ran. This step catches the same gap in seconds, using only the read-only
- * IAM actions the deploy role already has (ReadIamAndAccountMetadata in
- * bootstrap/aws/github-deploy-role.yaml).
+ * boundary (see the $transform there); if bootstrap/aws.ts (driven by
+ * bootstrap/bootstrap.ts) was never (re)run for this stage, every one of
+ * those roles fails identically with an iam:PutRolePermissionsBoundary
+ * AccessDenied — a ~2-minute wall of duplicate errors, discovered only after
+ * install + tests + preview already ran. This step catches the same gap in
+ * seconds, using only the read-only IAM actions the deploy role already has
+ * (ReadIamAndAccountMetadata in bootstrap/aws/deploy-role-policy.json).
  *
  * Usage: npm run verify-deploy-role
  * Reads the SST stage from IAM_PERMISSIONS_BOUNDARY_STAGE (already required
@@ -95,8 +93,8 @@ function main() {
       `deploy role '${roleName}' has no policy statement allowing iam:PutRolePermissionsBoundary for ` +
         `${boundaryArn} on role/boxlite-<stage>-*. apps/infra/stack/deploy.ts requires every SST-managed role to carry ` +
         `this boundary. Run \`npm run bootstrap -- --stage ${stage}\` with AWS admin ` +
-        'credentials (it redeploys bootstrap/aws/github-deploy-role.yaml), then confirm the GitHub environment variable ' +
-        `AWS_ACCOUNT_ID for '${stage}' still matches the account that stack was deployed into. ` +
+        'credentials (it reconciles the role against bootstrap/aws/deploy-role-policy.json), then confirm the GitHub environment variable ' +
+        `AWS_ACCOUNT_ID for '${stage}' still matches the account that role was created in. ` +
         'See apps/infra/README.md#deploy-an-existing-stack.',
     )
   }

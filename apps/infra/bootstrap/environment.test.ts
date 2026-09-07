@@ -11,11 +11,8 @@ import { parse as parseDotenv } from 'dotenv'
 
 import {
   GITHUB_OIDC_PROVIDER_URL,
-  cloudFormationDeployChanged,
-  cloudFormationParameterOverrides,
   deployableStageConfig,
   githubDeployRoleName,
-  githubDeployRoleStackName,
   hasGitHubOidcProvider,
   isAwsCliVersionAtLeast,
   parseAwsCliVersion,
@@ -35,33 +32,15 @@ import {
   parseStageConfigManifest,
 } from '../deployment/stage-config.js'
 
-test('githubDeployRoleStackName rejects a stage CloudFormation cannot name', () => {
-  // CloudFormation stack names allow only alphanumerics and hyphens. An
-  // underscore has to be refused up front: bootstrap makes external changes
-  // before it ever calls `cloudformation deploy`, so accepting `dev_blue` here
-  // means failing partway through with a half-provisioned stage.
-  assert.throws(() => githubDeployRoleStackName('dev_blue'), /must match/)
-  assert.equal(githubDeployRoleStackName('dev-blue'), 'boxlite-dev-blue-github-deploy')
-})
-
-test('githubDeployRoleStackName stays stable per stage so a re-run updates one stack', () => {
-  assert.equal(githubDeployRoleStackName('dev'), 'boxlite-dev-github-deploy')
-})
-
-test('cloudFormationParameterOverrides validates repo shape and stage', () => {
-  assert.deepEqual(cloudFormationParameterOverrides({ repo: 'boxlite-ai/boxlite', stage: 'dev' }), [
-    'GitHubRepository=boxlite-ai/boxlite',
-    'GitHubEnvironment=dev',
-  ])
-  assert.throws(() => cloudFormationParameterOverrides({ repo: 'not-a-repo', stage: 'dev' }), /must look like/)
-})
-
 test('parseBootstrapOptions reads the flags bootstrap acts on', () => {
   assert.deepEqual(
     parseBootstrapOptions(['--stage', 'dev', '--repo', 'someone/boxlite', '--reviewers', '1,2', '--force']),
     { stage: 'dev', repo: 'someone/boxlite', reviewers: '1,2', force: true },
   )
   assert.deepEqual(parseBootstrapOptions([]), {})
+  // Read by the GCP branch only — a protected GCP stage needs it too, and the
+  // AWS branch never looks at it.
+  assert.deepEqual(parseBootstrapOptions(['--stage', 'gcp-dev', '--confirm']), { stage: 'gcp-dev', confirm: true })
 })
 
 test('parseBootstrapOptions refuses an option whose value is the next flag', () => {
@@ -90,22 +69,12 @@ test('validateGitHubRepo accepts a community fork owner/name', () => {
   assert.throws(() => validateGitHubRepo('boxlite'), /must look like/)
 })
 
-test('cloudFormationDeployChanged reads the no-op sentinel line', () => {
-  assert.equal(cloudFormationDeployChanged('\nWaiting for changeset to be created..\nNo changes to deploy. Stack boxlite-dev-github-deploy is up to date\n'), false)
-  assert.equal(cloudFormationDeployChanged('\nSuccessfully created/updated stack - boxlite-dev-github-deploy\n'), true)
-})
-
 test('ssmParameterName is stage-scoped', () => {
   assert.equal(ssmParameterName('dev', 'cloudflare-api-token'), '/boxlite/dev/cloudflare-api-token')
   assert.throws(() => ssmParameterName('dev', ''), /param is required/)
 })
 
-test('githubDeployRoleName matches the RoleName the CloudFormation template declares', () => {
-  // The workflows compose the deploy role ARN from this name, and the template creates the role, so
-  // a drift between them is a deploy that cannot assume its own role. Read from the template rather
-  // than restated, so editing either side alone fails here.
-  const template = readFileSync(new URL('./aws/github-deploy-role.yaml', import.meta.url), 'utf8')
-  assert.match(template, /RoleName: !Sub boxlite-\$\{GitHubEnvironment\}-github-deploy$/m)
+test('githubDeployRoleName is what bootstrap/aws.ts creates and the workflows compose an ARN from', () => {
   assert.equal(githubDeployRoleName('dev'), 'boxlite-dev-github-deploy')
   assert.throws(() => githubDeployRoleName('dev_blue'), /must match/)
 })

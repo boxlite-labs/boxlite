@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "types": [
+      "node"
+    ],
+    "customConditions": [
+      "development"
+    ],
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
+  },
+  "include": [
+    "globals.d.ts",
+    "bin/**/*.ts",
+    "src/**/*.ts",
+    "stack/**/*.ts",
+    "pulumi/**/*.ts",
+    "test/**/*.ts"
+  ]
+}

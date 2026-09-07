@@ -1,0 +1,52 @@
+{
+  "database": {
+    "name": "boxlite",
+    "size": "small",
+    "highlyAvailable": false,
+    "backupRetentionDays": 7,
+    "protected": false
+  },
+  "cache": {
+    "size": "small",
+    "clustered": false,
+    "encryptInTransit": true
+  },
+  "storage": {
+    "volumePrefix": "boxlite-volume",
+    "versioning": true
+  },
+  "clickhouse": {
+    "mode": "self-hosted",
+    "database": "otel",
+    "writerUsername": "otel_writer",
+    "readerUsername": "otel_reader",
+    "instanceSize": "medium",
+    "dataGb": 50
+  },
+  "runners": {
+    "size": "large",
+    "rootDiskGb": 100
+  },
+  "alarms": {
+    "apiServerErrors": { "threshold": 1, "periods": 1 },
+    "proxyUnhealthyTargets": { "threshold": 1, "periods": 2 },
+    "runnersUnreachable": { "threshold": 1, "periods": 3 }
+  },
+  "stages": {
+    "prod": {
+      "database": {
+        "highlyAvailable": true,
+        "backupRetentionDays": 30,
+        "protected": true
+      },
+      "cache": {
+        "size": "medium"
+      }
+    },
+    "gcp-dev": {
+      "clickhouse": {
+        "mode": "disabled"
+      }
+    }
+  }
+}

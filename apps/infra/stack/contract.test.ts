@@ -570,7 +570,7 @@ test('the Api deploys either a published image or a build of the deployed checko
   assert.doesNotMatch(apiService, /new aws\.ecr\.Repository/)
   // A cross-reference in a comment, deliberately read from the raw file: the point is that
   // the stack tells a reader where the repository is created, not that anything executes.
-  assert.match(source, /bootstrap\/aws\/github-deploy-role\.yaml/)
+  assert.match(source, /bootstrap\/aws\.ts's ensureApiImageRepository/)
 })
 
 test('the Runner can read only staged build artifacts from the bootstrapped bucket', () => {
@@ -806,9 +806,9 @@ test("the mail configuration set falls inside the deploy role's stage-scoped SES
   assert.ok(configuredName, 'stack/mail.ts must name the SES configuration set explicitly')
   const composed = configuredName.replace('${$app.name}', 'boxlite').replace('${$app.stage}', 'dev')
 
-  const deployRole = readFileSync(new URL('../bootstrap/aws/github-deploy-role.yaml', import.meta.url), 'utf8')
-  const grant = deployRole.match(/:configuration-set\/(\S+)/)?.[1]
-  assert.equal(grant, 'boxlite-${GitHubEnvironment}-*')
+  const deployRolePolicy = readFileSync(new URL('../bootstrap/aws/deploy-role-policy.json', import.meta.url), 'utf8')
+  const grant = deployRolePolicy.match(/:configuration-set\/(\S+)"/)?.[1]
+  assert.equal(grant, 'boxlite-<STAGE>-*')
   assert.ok(
     composed.startsWith('boxlite-dev-'),
     `the configuration set '${composed}' falls outside the deploy role's configuration-set/boxlite-<stage>-* grant`,

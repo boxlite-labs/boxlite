@@ -1,0 +1,50 @@
+{
+  "name": "mbuild",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Shared BoxLite image build and publish. What is built, and where it is uploaded, comes from each repository's mbuild.config.json",
+  "bin": {
+    "mbuild": "bin/mbuild.ts"
+  },
+  "//": "apps/infra runs mbuild from source under tsx and passes --conditions=development; anything consuming the built package resolves to dist.",
+  "exports": {
+    "./address": {
+      "development": "./src/address.ts",
+      "types": "./dist/src/address.d.ts",
+      "default": "./dist/src/address.js"
+    },
+    "./config": {
+      "development": "./src/config.ts",
+      "types": "./dist/src/config.d.ts",
+      "default": "./dist/src/config.js"
+    },
+    "./publish": {
+      "development": "./src/publish.ts",
+      "types": "./dist/src/publish.d.ts",
+      "default": "./dist/src/publish.js"
+    }
+  },
+  "files": [
+    "dist",
+    "bin",
+    "src"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "mbuild": "tsx bin/mbuild.ts",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "mstage": "file:../mstage"
+  }
+}

@@ -1,0 +1,248 @@
+# Builds and publishes BoxLite's container images, through mbuild.
+#
+# Every decision this workflow makes is read from a file rather than written
+# here: which artifacts exist and which repository receives them come from
+# mbuild.config.json, and where a stage lives comes from mstage.config.json. The
+# workflow's own job is to federate an identity for the cloud that stage
+# publishes to, and to run mbuild once. Nothing about ECR, Artifact Registry or
+# a repository name is written below.
+#
+# Separate from build-apps-api-image.yml on purpose. That one still publishes
+# the API image on its own trigger and is the path in use; this is the
+# replacement being built beside it, dispatched by hand until it takes over —
+# and unlike it, this one publishes every artifact mbuild.config.json declares
+# (the API, the proxy and the collector) from one commit, so a deploy names one
+# SHA rather than three selectors.
+#
+# Every step retries, because everything here that fails transiently is a
+# registry or a token endpoint. The retries are safe rather than hopeful: mbuild
+# skips an artifact that is already published, so a second attempt resumes a
+# half-finished run instead of failing on an immutable tag it wrote itself.
+name: mbuild
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: Build and push a commit, or move one between stages
+        required: true
+        type: choice
+        options: [publish, promote]
+        default: publish
+      tag:
+        description: Commit SHA to publish (defaults to this ref)
+        required: false
+      # A choice rather than free text, and not for convenience: this value
+      # selects the job's deployment Environment, and an Environment carries the
+      # secrets and the reviewers of the stage it names. A typo in a free-text
+      # field is a dispatcher reaching an Environment nobody granted them.
+      # Enforced across every workflow by
+      # apps/infra/deployment/release-safety.test.ts.
+      stage:
+        description: Stage to publish to; ignored by promote
+        required: true
+        default: dev
+        type: choice
+        options:
+          - dev
+          - prod
+          - gcp-dev
+      from:
+        description: Stage to promote from; ignored by publish
+        required: false
+        type: choice
+        options:
+          - dev
+          - prod
+          - gcp-dev
+      to:
+        description: Stage to promote to; ignored by publish
+        required: false
+        type: choice
+        options:
+          - dev
+          - prod
+          - gcp-dev
+
+
+concurrency:
+  # One publisher per stage. Two pushing the same immutable tag would have one
+  # fail on a tag that cannot be overwritten, which reads as a broken build
+  # rather than as the race it is.
+  group: mbuild-${{ inputs.command }}-${{ inputs.stage || inputs.to }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  mbuild:
+    name: ${{ inputs.command }} to ${{ inputs.stage || inputs.to }}
+    # The job that reaches a protected Environment reaches the cloud role behind
+    # it, so it runs from main and nowhere else.
+    if: github.ref == 'refs/heads/main'
+    environment: ${{ inputs.stage || inputs.to }}
+    runs-on: ubuntu-latest
+    env:
+      # The stage whose registry receives the image. For a promotion that is the
+      # destination; the source is reached with the same identity, which is why
+      # both stages have to live in one account.
+      TARGET_STAGE: ${{ inputs.stage || inputs.to }}
+      IMAGE_TAG: ${{ inputs.tag || github.sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # apps/infra is not one of the root workspaces and carries its own
+      # lockfile, so a root install leaves mstage, mbuild and sst unresolved and
+      # every step below fails on a missing script. The action installs there,
+      # from cache when the lockfile has not moved.
+      - uses: ./.github/actions/setup-infra
+
+      # docker writes the registry token to disk in cleartext, so it is written
+      # outside HOME, where a cache key or an artifact upload that globs the
+      # home directory cannot reach it and where the runner empties it when the
+      # job ends. It stays readable to every later step in the job, which is
+      # what GITHUB_ENV is for; RUNNER_TEMP is a default runner variable rather
+      # than the `runner` context, which GitHub offers to a step but not to an
+      # `env` block. The directory is created rather than left to whichever
+      # tool writes first, and only its owner may list it.
+      - name: Keep registry credentials out of HOME
+        run: |
+          set -Eeuo pipefail
+          mkdir -p -m 700 "$RUNNER_TEMP/docker"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
+
+      # --------------------------------------------------------------- 1/5
+      # Which cloud this stage publishes to. Nothing after this point knows the
+      # answer in advance, which is the point: adding a stage on another cloud
+      # is an edit to mbuild.config.json, not to this file.
+      - name: Read mbuild.config.json
+        id: config
+        working-directory: apps/infra
+        run: |
+          set -Eeuo pipefail
+          if ! output="$(npm run --silent mbuild inspect -- --stage "$TARGET_STAGE" 2>&1)"; then
+            echo "::error title=mbuild config::$output"
+            exit 1
+          fi
+          echo "$output"
+          echo "$output" >> "$GITHUB_OUTPUT"
+
+      # --------------------------------------------------------------- 2/5
+      # An identity for that cloud. GitHub's OIDC token is the only thing this
+      # runner can prove, so federation happens through the provider's own
+      # action; mstage cannot mint a session it holds no token for.
+      - name: Federate an AWS identity
+        if: steps.config.outputs.kind == 'ecr'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # Composed from the stage's AWS_ACCOUNT_ID, not a stored role ARN: the
+          # role name is fixed per stage (bootstrap/environment.ts's
+          # githubDeployRoleName, the same name bootstrap/aws.ts creates the role
+          # under), so only the account id has to be configured. Every other
+          # deploy workflow in this repository composes it the same way.
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/boxlite-${{ inputs.stage || inputs.to }}-github-deploy
+          aws-region: ${{ steps.config.outputs.region }}
+          role-session-name: mbuild-${{ github.run_id }}
+
+      - name: Federate a GCP identity
+        if: steps.config.outputs.kind == 'artifact-registry'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_IMAGE_PUBLISHER }}
+
+      # --------------------------------------------------------------- 3/5
+      # mstage is asked whether that identity is usable before anything long
+      # starts. A build that runs ten minutes and then cannot push has wasted
+      # the ten minutes and reports the wrong failure.
+      - name: Verify the session through mstage
+        working-directory: apps/infra
+        env:
+          # gh is installed on a runner but not signed in, and mstage declares
+          # github a required provider — without a token the check fails before
+          # anything else is tried.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          for attempt in 1 2 3; do
+            if npm run --silent mstage login; then exit 0; fi
+            echo "mstage reports no usable session (attempt $attempt/3); retrying in $((attempt * 5))s"
+            sleep $((attempt * 5))
+          done
+          echo "::error title=mstage::No usable session for ${{ steps.config.outputs.kind }} after 3 attempts"
+          exit 1
+
+      # --------------------------------------------------------------- 4/5
+      # Build and push, or pull from one stage and push to the other. mbuild
+      # decides which artifacts exist, refuses a promotion whose source is
+      # missing an artifact, and blocks on scan findings.
+      #
+      # The registry login is mbuild's, not this workflow's. It logs in before
+      # it builds anything, and a promotion logs into both registries, which a
+      # step here could not do knowing only the target stage. Logging in here
+      # as well would write the same token to the same file twice.
+      - name: Build and upload
+        if: inputs.command == 'publish'
+        working-directory: apps/infra
+        run: |
+          set -Eeuo pipefail
+          # Retried, but not blindly. mbuild exits 78 when the image scan
+          # refuses a publish, and that answer does not change on a second ask:
+          # retrying it spends three attempts and ninety seconds of backoff
+          # re-reading the same findings before reporting them. Only the push
+          # and the token endpoint around it fail transiently.
+          for attempt in 1 2 3; do
+            npm run --silent mbuild publish -- --tag "$IMAGE_TAG" --stage "$TARGET_STAGE" && exit 0
+            status=$?
+            if [ "$status" -eq 78 ]; then
+              echo "::error title=publish::$IMAGE_TAG was refused by the image scan gate; findings are above"
+              exit 1
+            fi
+            echo "Publish failed (attempt $attempt/3, exit $status); retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "::error title=publish::Could not publish $IMAGE_TAG to $TARGET_STAGE after 3 attempts"
+          exit 1
+
+      - name: Download and upload
+        if: inputs.command == 'promote'
+        working-directory: apps/infra
+        env:
+          FROM_STAGE: ${{ inputs.from }}
+        run: |
+          set -Eeuo pipefail
+          if [ -z "$FROM_STAGE" ] || [ -z "$TARGET_STAGE" ]; then
+            echo "::error title=promote::promote needs both from and to"
+            exit 1
+          fi
+          for attempt in 1 2 3; do
+            if npm run --silent mbuild promote -- --tag "$IMAGE_TAG" --from "$FROM_STAGE" --to "$TARGET_STAGE"; then
+              exit 0
+            fi
+            echo "Promotion failed (attempt $attempt/3); retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "::error title=promote::Could not promote $IMAGE_TAG from $FROM_STAGE to $TARGET_STAGE after 3 attempts"
+          exit 1
+
+      # --------------------------------------------------------------- 5/5
+      # What was published, so a deploy can be dispatched against exactly these
+      # bytes without reading the log above.
+      - name: Report what was published
+        run: |
+          set -Eeuo pipefail
+          {
+            echo "### mbuild ${{ inputs.command }}"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| commit | \`$IMAGE_TAG\` |"
+            echo "| stage | \`$TARGET_STAGE\` |"
+            echo "| registry | \`${{ steps.config.outputs.kind }}\` in \`${{ steps.config.outputs.region }}\` |"
+            echo "| repository | \`${{ steps.config.outputs.repository }}\` |"
+            echo "| artifacts | \`${{ steps.config.outputs.artifacts }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

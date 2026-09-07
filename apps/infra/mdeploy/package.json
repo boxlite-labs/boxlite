@@ -1,0 +1,27 @@
+{
+  "name": "mdeploy",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "How BoxLite deploys, on whichever cloud a stage lives in. Calls mstage for sign-in, stage configuration and identity",
+  "bin": {
+    "mdeploy": "bin/mdeploy.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "mdeploy": "tsx bin/mdeploy.ts",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "mbuild": "file:../mbuild",
+    "mstage": "file:../mstage"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

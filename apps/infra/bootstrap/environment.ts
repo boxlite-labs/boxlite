@@ -11,10 +11,6 @@
  * rather than in bootstrap.ts so that file's three security properties stay testable.
  */
 
-// No underscore: the stage is interpolated into a CloudFormation stack name
-// (githubDeployRoleStackName), and CloudFormation accepts only alphanumerics
-// and hyphens. Allowing `dev_blue` here would pass validation and then fail at
-// `cloudformation deploy`, after bootstrap had already made external changes.
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -31,6 +27,10 @@ import {
 } from '../deployment/stage-config.js'
 import { isLocalOnlyDeploymentKey, isStorableStageConfigKey } from '../deployment/key-policy.js'
 
+// No underscore: the stage is interpolated into the Runner artifacts bucket name
+// (deployment/environment.ts's runnerArtifactsBucketName), and S3 bucket names may
+// not contain one. Allowing `dev_blue` here would pass validation and then fail at
+// `s3api create-bucket`, after bootstrap had already made external changes.
 const STAGE_LIKE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9-]*$/
 const GITHUB_REPO_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/
 
@@ -65,6 +65,7 @@ export function parseBootstrapOptions(args: readonly string[]) {
     args: [...args],
     strict: true,
     options: {
+      confirm: { type: 'boolean' },
       force: { type: 'boolean' },
       'provision-auth0': { type: 'boolean' },
       'provision-ses': { type: 'boolean' },
@@ -85,28 +86,6 @@ export function validateGitHubRepo(repo: any) {
   return repo
 }
 
-// CloudFormation stack name for the GitHub deploy role. Stable per stage so
-// `cloudformation deploy` updates the existing stack in place rather than
-// creating a second one; changing it would orphan whatever is already deployed.
-export function githubDeployRoleStackName(stage: any) {
-  requireStageLike('stage', stage)
-  return `boxlite-${stage}-github-deploy`
-}
-
-export function cloudFormationParameterOverrides({ repo, stage }: any) {
-  validateGitHubRepo(repo)
-  requireStageLike('stage', stage)
-  return [`GitHubRepository=${repo}`, `GitHubEnvironment=${stage}`]
-}
-
-// `aws cloudformation deploy --no-fail-on-empty-changeset` exits 0 whether or
-// not anything changed; the only signal is this literal stdout line, so the
-// script can report "already up to date" instead of claiming every rerun
-// made a change.
-export function cloudFormationDeployChanged(stdout: any) {
-  return !stdout.includes('No changes to deploy')
-}
-
 export function ssmParameterName(stage: any, param: any) {
   requireStageLike('stage', stage)
   if (!param) throw new Error('param is required')
@@ -116,15 +95,13 @@ export function ssmParameterName(stage: any, param: any) {
 /*
  * IAM role name for the GitHub deploy role.
  *
- * Its own function even though it currently returns the same string as githubDeployRoleStackName: a
- * CloudFormation stack name and the IAM role that stack declares are separate contracts, and the
- * workflows compose the role ARN from this name while `cloudformation deploy` addresses the stack by
- * the other. Renaming one must not silently rename the other. Pinned against the template's own
- * `RoleName` by a test, which turns a drift into a failure instead of a deploy that cannot assume its
- * role.
+ * Called directly as `--role-name` when bootstrap/aws.ts's ensureDeployRole creates or updates the
+ * role, and by the deploy workflows to compose its ARN from AWS_ACCOUNT_ID — one spelling used by
+ * both, so a rename cannot drift between them the way two independent literals could.
  *
  * It sits outside the grammar awsResourceName composes (deployment/environment.ts) for now — see the
- * note there. Moving it costs a CloudFormation replacement and an edit to every workflow that
+ * note there. Moving it costs an IAM role rename (AWS has no rename primitive, so this is a delete
+ * and recreate under a session that trusted the old name) and an edit to every workflow that
  * composes the ARN, which is its own change rather than a rider on this one.
  */
 export function githubDeployRoleName(stage: any) {

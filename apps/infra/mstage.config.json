@@ -1,0 +1,114 @@
+{
+  "app": "boxlite",
+  "home": "aws",
+  "login": {
+    "aws": {
+      "required": true
+    },
+    "github": {
+      "required": true
+    },
+    "auth0": {
+      "required": false
+    }
+  },
+  "env": {
+    "selectGroup": {
+      "deploy": {
+        "required": [
+          "STACK_DOMAIN",
+          "PROXY_DOMAIN",
+          "OIDC_ISSUER_BASE_URL",
+          "IAM_PERMISSIONS_BOUNDARY_STAGE",
+          "CLOUDFLARE_API_TOKEN",
+          "CLOUDFLARE_DEFAULT_ACCOUNT_ID",
+          "CLOUDFLARE_ZONE_ID",
+          "BOXLITE_STAGE_CONFIG_DIGEST"
+        ],
+        "optional": [
+          "PROXY_PROTOCOL",
+          "PROXY_TEMPLATE_URL",
+          "DASHBOARD_URL",
+          "DASHBOARD_BASE_API_URL",
+          "APP_URL",
+          "MAIL_DOMAIN",
+          "MAIL_RELAY_HOST",
+          "OIDC_AUDIENCE",
+          "OIDC_END_SESSION_ENDPOINT",
+          "OIDC_POST_LOGOUT_REDIRECT_ALLOWLIST",
+          "OIDC_MANAGEMENT_API_ENABLED",
+          "OIDC_MANAGEMENT_API_AUDIENCE",
+          "OIDC_MANAGEMENT_API_BASE_URL",
+          "OIDC_MANAGEMENT_API_TOKEN_URL",
+          "PUBLIC_OIDC_DOMAIN",
+          "RUNNERS",
+          "RUNNER_PORT",
+          "RUNNER_VERSION",
+          "DEFAULT_RUNNER_NAME",
+          "DEFAULT_REGION_ID",
+          "DEFAULT_TEMPLATE",
+          "CLICKHOUSE_MODE",
+          "CLICKHOUSE_URL",
+          "CLICKHOUSE_WRITER_PASSWORD_SECRET_ARN",
+          "CLICKHOUSE_READER_PASSWORD_SECRET_ARN",
+          "BOX_OTEL_ENDPOINT_URL",
+          "BOX_MIGRATION_ARCHIVE_PREFIX",
+          "BOXLITE_SYSTEM_BASE_IMAGE",
+          "BOXLITE_SYSTEM_IMAGES",
+          "BOXLITE_SYSTEM_IMAGE_TAG",
+          "BOXLITE_SYSTEM_NODE_IMAGE",
+          "BOXLITE_SYSTEM_PYTHON_IMAGE",
+          "BOXLITE_SYSTEM_SOURCE_REGISTRY_NAME",
+          "BOXLITE_SYSTEM_SOURCE_REGISTRY_PROJECT_ID",
+          "BOXLITE_SYSTEM_SOURCE_REGISTRY_URL",
+          "BOXLITE_SYSTEM_SOURCE_REGISTRY_USERNAME",
+          "BILLING_API_URL",
+          "USAGE_EXPORT_URL",
+          "SVIX_SERVER_URL",
+          "POSTHOG_HOST",
+          "INCIDENT_IO_ALERT_SOURCE_CONFIG_ID",
+          "INCIDENT_IO_HEARTBEAT_ID",
+          "STATUS_SYNC_DEDUP_PREFIX"
+        ]
+      },
+      "pulumi": ["PULUMI_CONFIG_PASSPHRASE"],
+      "api": {
+        "required": ["ADMIN_API_KEY", "ENCRYPTION_KEY", "ENCRYPTION_SALT", "OIDC_CLIENT_ID"],
+        "optional": [
+          "OIDC_MANAGEMENT_API_CLIENT_ID",
+          "OIDC_MANAGEMENT_API_CLIENT_SECRET",
+          "POSTHOG_API_KEY",
+          "SVIX_AUTH_TOKEN",
+          "INCIDENT_IO_TOKEN",
+          "USAGE_EXPORT_TOKEN",
+          "SMTP_USER",
+          "SMTP_PASSWORD",
+          "BOXLITE_SYSTEM_SOURCE_REGISTRY_PASSWORD",
+          "GHCR_USERNAME",
+          "GHCR_TOKEN"
+        ]
+      },
+      "proxy": ["PROXY_API_KEY"],
+      "otel-collector": ["OTEL_COLLECTOR_API_KEY"],
+      "runner": ["DEFAULT_RUNNER_API_KEY"]
+    },
+    "digest": {
+      "key": "BOXLITE_STAGE_CONFIG_DIGEST",
+      "group": "deploy"
+    }
+  },
+  "stages": {
+    "dev": {
+      "region": "ap-southeast-1"
+    },
+    "prod": {
+      "region": "ap-southeast-1",
+      "protect": true
+    },
+    "gcp-dev": {
+      "home": "gcp",
+      "region": "asia-southeast1",
+      "project": "boxlite-gcp-dev"
+    }
+  }
+}

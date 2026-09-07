@@ -12,13 +12,29 @@ import { RequiredOrganizationResourcePermissions } from '../decorators/required-
 import { OrganizationMemberRole } from '../enums/organization-member-role.enum'
 import { OrganizationService } from '../services/organization.service'
 import { OrganizationUserService } from '../services/organization-user.service'
-import { OrganizationAuthContext } from '../../common/interfaces/auth-context.interface'
+import { BaseAuthContext, OrganizationAuthContext } from '../../common/interfaces/auth-context.interface'
 import { SystemRole } from '../../user/enums/system-role.enum'
-import { RunnerAuthGuard } from '../../auth/runner-auth.guard'
 import { isRunnerContext } from '../../common/interfaces/runner-context.interface'
+import { isProxyContext } from '../../common/interfaces/proxy-context.interface'
+import { isRegionProxyContext } from '../../common/interfaces/region-proxy.interface'
 import { OR_GUARD_INNER_GUARDS } from '../../auth/or.guard'
 
-const RUNNER_COMPATIBLE_RESOURCE_GUARD_NAMES = new Set(['RunnerAuthGuard', 'BoxAccessGuard'])
+// Machine identities carry no organization — ApiKeyStrategy mints a bare
+// { role } context for the runner, the proxy and the region proxy — so
+// organization-scoped access can never be satisfied by one. A handler opts a
+// machine role in by declaring one of that role's own guards; guards are matched
+// by name because importing them here would close a module cycle.
+//
+// `ProxyGuard` alone speaks for the proxy. BoxAccessGuard admits any proxy
+// context for any box, so listing it under the proxy would widen every route
+// that uses it, not just the routes meant for the proxy.
+const MACHINE_ROLE_RESOURCE_GUARD_NAMES: ReadonlyArray<
+  readonly [(user: BaseAuthContext) => boolean, ReadonlySet<string>]
+> = [
+  [isRunnerContext, new Set(['RunnerAuthGuard', 'BoxAccessGuard'])],
+  [isProxyContext, new Set(['ProxyGuard'])],
+  [isRegionProxyContext, new Set(['RegionBoxAccessGuard'])],
+]
 
 @Injectable()
 export class OrganizationResourceActionGuard extends OrganizationAccessGuard {
@@ -33,7 +49,7 @@ export class OrganizationResourceActionGuard extends OrganizationAccessGuard {
   }
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest()
-    if (isRunnerContext(request.user) && this.handlerAllowsRunnerResourceAccess(context)) {
+    if (this.handlerAllowsMachineResourceAccess(context, request.user)) {
       return true
     }
 
@@ -76,23 +92,28 @@ export class OrganizationResourceActionGuard extends OrganizationAccessGuard {
     return requiredPermissions.every((permission) => assignedPermissions.has(permission))
   }
 
-  private handlerAllowsRunnerResourceAccess(context: ExecutionContext): boolean {
+  private handlerAllowsMachineResourceAccess(context: ExecutionContext, user: BaseAuthContext | undefined): boolean {
+    if (!user) {
+      return false
+    }
+
+    const allowedGuardNames = MACHINE_ROLE_RESOURCE_GUARD_NAMES.find(([isRole]) => isRole(user))?.[1]
+    if (!allowedGuardNames) {
+      return false
+    }
+
     const guards =
       this.reflector.getAllAndMerge<Array<unknown>>(GUARDS_METADATA, [context.getHandler(), context.getClass()]) ?? []
-    return guards.some((guard) => this.guardAllowsRunnerResourceAccess(guard))
+    return guards.some((guard) => this.guardAllowsResourceAccess(guard, allowedGuardNames))
   }
 
-  private guardAllowsRunnerResourceAccess(guard: unknown): boolean {
-    if (guard === RunnerAuthGuard) {
+  private guardAllowsResourceAccess(guard: unknown, allowedGuardNames: ReadonlySet<string>): boolean {
+    if (allowedGuardNames.has(this.guardName(guard))) {
       return true
     }
 
     const innerGuards = (guard as { [OR_GUARD_INNER_GUARDS]?: Type<CanActivate>[] })?.[OR_GUARD_INNER_GUARDS]
-    if (innerGuards?.some((innerGuard) => this.guardAllowsRunnerResourceAccess(innerGuard))) {
-      return true
-    }
-
-    return RUNNER_COMPATIBLE_RESOURCE_GUARD_NAMES.has(this.guardName(guard))
+    return innerGuards?.some((innerGuard) => this.guardAllowsResourceAccess(innerGuard, allowedGuardNames)) ?? false
   }
 
   private guardName(guard: unknown): string {

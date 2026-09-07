@@ -9,10 +9,12 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	apiclient "github.com/boxlite-ai/boxlite/libs/api-client-go"
 	common_cache "github.com/boxlite-ai/common-go/pkg/cache"
 	common_proxy "github.com/boxlite-ai/common-go/pkg/proxy"
 )
@@ -110,6 +112,60 @@ func TestTunnelConnectRejectsPrivateBoxBeforeRunnerDial(t *testing.T) {
 
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusForbidden)
+	}
+}
+
+func TestTunnelConnectRenewsBoxActivityBeforeStreaming(t *testing.T) {
+	const boxID = "AbCdEf123456"
+
+	renewed := make(chan string, 1)
+	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/last-activity") {
+			select {
+			case renewed <- request.URL.Path:
+			default:
+			}
+			writer.WriteHeader(http.StatusCreated)
+			return
+		}
+		writer.WriteHeader(http.StatusNotFound)
+	}))
+	defer api.Close()
+
+	ctx := context.Background()
+	publicCache := common_cache.NewMapCache[bool](ctx)
+	if err := publicCache.Set(ctx, boxID, true, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	// A runner that refuses the dial: the renewal must already have been sent by
+	// the time streaming fails, which is the ordering this test pins.
+	runnerCache := common_cache.NewMapCache[RunnerInfo](ctx)
+	if err := runnerCache.Set(ctx, boxID, RunnerInfo{ApiUrl: "http://127.0.0.1:1", ApiKey: "runner-key"}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	clientConfig := apiclient.NewConfiguration()
+	clientConfig.Servers[0].URL = api.URL
+	proxy := &Proxy{
+		apiclient:                  apiclient.NewAPIClient(clientConfig),
+		boxPublicCache:             publicCache,
+		boxRunnerCache:             runnerCache,
+		boxLastActivityUpdateCache: common_cache.NewMapCache[bool](ctx),
+	}
+
+	request := httptest.NewRequest(http.MethodConnect, "http://proxy.test", nil)
+	request.Host = "3000-d-416243644566313233343536.proxy.test:443"
+	response := httptest.NewRecorder()
+
+	proxy.handleTunnelConnect(response, request)
+
+	select {
+	case path := <-renewed:
+		if want := "/box/" + boxID + "/last-activity"; path != want {
+			t.Fatalf("renewal path = %q, want %q", path, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("CONNECT tunnel did not renew the box's last activity")
 	}
 }
 

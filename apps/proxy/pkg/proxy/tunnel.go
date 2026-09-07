@@ -44,6 +44,16 @@ func (p *Proxy) handleTunnelConnect(writer http.ResponseWriter, request *http.Re
 		http.Error(writer, "box is not public", http.StatusForbidden)
 		return
 	}
+
+	// A CONNECT tunnel outlives any single HTTP request, so for tunnels the poll
+	// is the renewal rather than a fallback: bind its ticker to the stream, which
+	// ends when this handler returns. Renewing before the runner dial mirrors the
+	// API-side proxy, which renews ahead of its own readiness gate so a box being
+	// actively reached for is not reaped while the path to it is still coming up.
+	activityPoll := newActivityPollController()
+	defer activityPoll.stop()
+	go p.updateLastActivity(context.WithoutCancel(request.Context()), boxID, true, activityPoll.done)
+
 	runnerInfo, err := p.getBoxRunnerInfo(request.Context(), boxID)
 	if err != nil {
 		http.Error(writer, "runner unavailable", http.StatusBadGateway)

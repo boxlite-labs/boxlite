@@ -664,3 +664,91 @@ func TestBoxliteExecAttach_NotFound(t *testing.T) {
 		t.Fatalf("expected 404, got %v err=%v", resp, err)
 	}
 }
+
+// TestWaitForStreamDrain pins the post-Done drain semantics: it must keep
+// waiting while the stream is still delivering (so the exit frame never jumps
+// ahead of a large in-flight tail), give up promptly when a never-EOF pipe
+// goes idle, and fall back to a hard cap if a pipe trickles forever.
+func TestWaitForStreamDrain(t *testing.T) {
+	t.Run("waits for a still-delivering stream then reports drained", func(t *testing.T) {
+		var progress atomic.Uint64
+		pumpsDone := make(chan struct{})
+		// Deliver steadily for ~2.5s — past any 2s-style fixed cap — with
+		// each gap (50ms) under idleBound (100ms) so it never looks idle,
+		// then signal the pumps finished. The old fixed 2s cap would return
+		// drained=false here (cut the tail off); the idle bound waits it out.
+		go func() {
+			for i := 0; i < 50; i++ {
+				time.Sleep(50 * time.Millisecond)
+				progress.Add(1)
+			}
+			close(pumpsDone)
+		}()
+
+		start := time.Now()
+		drained := waitForStreamDrain(pumpsDone, &progress, 100*time.Millisecond, 30*time.Second)
+		elapsed := time.Since(start)
+
+		if !drained {
+			t.Fatal("expected drained=true: a stream still making progress must " +
+				"not be cut off before its pumps finish")
+		}
+		if elapsed < 2400*time.Millisecond {
+			t.Fatalf("returned after %v: gave up before the stream finished "+
+				"delivering (a fixed 2s cap would do this)", elapsed)
+		}
+	})
+
+	t.Run("gives up after one idle window on a stuck pipe", func(t *testing.T) {
+		var progress atomic.Uint64 // never bumped: a never-EOF pipe
+		pumpsDone := make(chan struct{})
+
+		start := time.Now()
+		drained := waitForStreamDrain(pumpsDone, &progress, 100*time.Millisecond, 10*time.Second)
+		elapsed := time.Since(start)
+
+		if drained {
+			t.Fatal("expected drained=false: a stuck pipe never finishes")
+		}
+		if elapsed > 2*time.Second {
+			t.Fatalf("took %v to give up on an idle stream; should release "+
+				"within ~idleBound so exit reports promptly", elapsed)
+		}
+		if elapsed < 80*time.Millisecond {
+			t.Fatalf("gave up after only %v; expected it to wait ~one idle "+
+				"window (100ms) before declaring the stream stuck", elapsed)
+		}
+	})
+
+	t.Run("falls back to hard cap when a pipe trickles forever", func(t *testing.T) {
+		var progress atomic.Uint64
+		pumpsDone := make(chan struct{})
+		stop := make(chan struct{})
+		defer close(stop)
+		// Bump within every idle window forever so the idle branch never
+		// fires; only the hard cap can break the wait.
+		go func() {
+			tick := time.NewTicker(20 * time.Millisecond)
+			defer tick.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-tick.C:
+					progress.Add(1)
+				}
+			}
+		}()
+
+		start := time.Now()
+		drained := waitForStreamDrain(pumpsDone, &progress, 100*time.Millisecond, 300*time.Millisecond)
+		elapsed := time.Since(start)
+
+		if drained {
+			t.Fatal("expected drained=false: pumps never finished")
+		}
+		if elapsed < 250*time.Millisecond || elapsed > 1500*time.Millisecond {
+			t.Fatalf("expected release near the 300ms hard cap, got %v", elapsed)
+		}
+	})
+}

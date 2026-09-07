@@ -164,7 +164,7 @@ func TestDrainAndDelete_RespondsToCloseSignal(t *testing.T) {
 // dispatch directly and verifies the handle is deleted afterwards.
 
 func TestExecutionStreamState_HandleDeletedOnExit(t *testing.T) {
-	state := newExecutionStreamState(ExecutionOptions{})
+	state := newExecutionStreamState(ExecutionOptions{}, nil)
 	streamHandle := cgo.NewHandle(state)
 
 	// Synthesize the C-side exit dispatch by calling the Go body of

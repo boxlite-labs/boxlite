@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/boxlite-ai/runner/pkg/boxlite"
@@ -207,6 +208,11 @@ func runAttachLoop(parentCtx context.Context, conn *websocket.Conn, exec attachE
 	// across reattach cycles.
 	stdoutCh, stderrCh, unsubscribe := exec.Subscribe(attachSubscriberBuffer)
 
+	// Monotonic count of stream frames written to the client. The post-Done
+	// drain watches it to bound the wait by progress, not a fixed wall clock
+	// (see the drain block below).
+	var streamProgress atomic.Uint64
+
 	defer func() {
 		// Recover from any panic so we don't leak the connection.
 		if r := recover(); r != nil {
@@ -230,7 +236,7 @@ func runAttachLoop(parentCtx context.Context, conn *websocket.Conn, exec attachE
 	pumpWg.Add(1)
 	go func() {
 		defer pumpWg.Done()
-		pumpSubscriberChannel(loopCtx, conn, &writeMu, stdoutCh, chanStdout, fail)
+		pumpSubscriberChannel(loopCtx, conn, &writeMu, stdoutCh, chanStdout, &streamProgress, fail)
 	}()
 
 	// stderr pump (for non-TTY only — TTY merges at the kernel, so stderr
@@ -239,7 +245,7 @@ func runAttachLoop(parentCtx context.Context, conn *websocket.Conn, exec attachE
 		pumpWg.Add(1)
 		go func() {
 			defer pumpWg.Done()
-			pumpSubscriberChannel(loopCtx, conn, &writeMu, stderrCh, chanStderr, fail)
+			pumpSubscriberChannel(loopCtx, conn, &writeMu, stderrCh, chanStderr, &streamProgress, fail)
 		}()
 	}
 
@@ -278,21 +284,31 @@ func runAttachLoop(parentCtx context.Context, conn *websocket.Conn, exec attachE
 			pumpWg.Wait()
 			close(pumpsDone)
 		}()
-		drained := false
-		select {
-		case <-pumpsDone:
-			drained = true
-		case <-time.After(2 * time.Second):
-		}
 
+		// Bound the drain by progress, not a fixed wall clock. Done has
+		// fired, so the exit code is authoritative and any remaining output
+		// is already buffered in the subscriber channels — it should flush
+		// back-to-back. A pump still writing keeps bumping streamProgress, so
+		// we keep waiting and never send the exit frame ahead of a large tail
+		// that is still in flight; a pump whose guest pipe never EOFs (a
+		// SIGTERM→SIGKILL'd process) stops bumping it, so we give up after an
+		// idle window and send exit anyway.
+		drained := waitForStreamDrain(pumpsDone, &streamProgress, streamDrainIdleBound, streamDrainHardCap)
+
+		// Send the exit frame regardless of whether the pumps drained: a
+		// process killed by its exec timeout (SIGTERM→SIGKILL in the guest)
+		// can leave the guest's stdout/stderr pipes without a natural EOF, so
+		// the pumps may never finish. Gating the exit frame on drain (the
+		// old behaviour) then dropped the frame entirely on the drain
+		// timeout, hanging the client's wait() forever.
+		_ = writeJSONFrame(conn, &writeMu, map[string]any{
+			"type":      "exit",
+			"exit_code": exec.ExitCodeValue(),
+		})
 		if drained {
-			_ = writeJSONFrame(conn, &writeMu, map[string]any{
-				"type":      "exit",
-				"exit_code": exec.ExitCodeValue(),
-			})
 			closeWS(websocket.CloseNormalClosure, "")
 		} else {
-			closeWS(websocket.CloseInternalServerErr, "pump drain timed out")
+			closeWS(websocket.CloseNormalClosure, "exit sent; output pumps did not drain")
 		}
 	}
 
@@ -310,11 +326,53 @@ func runAttachLoop(parentCtx context.Context, conn *websocket.Conn, exec attachE
 // starts dropping chunks for a slow consumer.
 const attachSubscriberBuffer = 256
 
+// streamDrainIdleBound is how long the post-Done drain tolerates no new
+// stream frame before treating the pipe as stuck and sending exit. The drain
+// starts only after Done, so buffered output flushes back-to-back; a full
+// window with no progress means a guest pipe that will never EOF (a
+// signal-killed process). Large enough to absorb scheduler/transport jitter,
+// small enough that a timeout-killed exec reports promptly.
+const streamDrainIdleBound = 300 * time.Millisecond
+
+// streamDrainHardCap backstops a pipe that never EOFs yet keeps trickling a
+// frame within every idle window forever. Generous so it never clips a
+// genuine high-throughput tail.
+const streamDrainHardCap = 30 * time.Second
+
+// waitForStreamDrain blocks until the stream pumps finish (clean drain), the
+// stream goes idle (no progress within idleBound — a stuck never-EOF pipe), or
+// hardCap elapses (backstop for a pipe that trickles forever). Returns true
+// only when the pumps fully drained. Bounding by progress rather than a fixed
+// wall clock keeps a still-delivering tail from being cut off ahead of the
+// exit frame.
+func waitForStreamDrain(pumpsDone <-chan struct{}, progress *atomic.Uint64, idleBound, hardCap time.Duration) bool {
+	idle := time.NewTicker(idleBound)
+	defer idle.Stop()
+	cap := time.NewTimer(hardCap)
+	defer cap.Stop()
+
+	lastProgress := progress.Load()
+	for {
+		select {
+		case <-pumpsDone:
+			return true
+		case <-cap.C:
+			return false
+		case <-idle.C:
+			now := progress.Load()
+			if now == lastProgress {
+				return false
+			}
+			lastProgress = now
+		}
+	}
+}
+
 // pumpSubscriberChannel forwards chunks from a broadcaster subscriber channel
 // to the WebSocket, prefixing each with the channel byte. Exits cleanly on
 // ctx cancellation, channel close (broadcaster ended / unsubscribed), or write
 // error.
-func pumpSubscriberChannel(ctx context.Context, conn *websocket.Conn, writeMu *sync.Mutex, ch <-chan []byte, channel byte, fail func(error)) {
+func pumpSubscriberChannel(ctx context.Context, conn *websocket.Conn, writeMu *sync.Mutex, ch <-chan []byte, channel byte, progress *atomic.Uint64, fail func(error)) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -330,6 +388,10 @@ func pumpSubscriberChannel(ctx context.Context, conn *websocket.Conn, writeMu *s
 				fail(fmt.Errorf("write %s frame: %w", channelName(channel), werr))
 				return
 			}
+			// Record forward progress so the post-Done drain can tell a
+			// still-delivering stream (keep waiting) from a stuck never-EOF
+			// pipe (send exit anyway).
+			progress.Add(1)
 		}
 	}
 }

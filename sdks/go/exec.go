@@ -69,6 +69,14 @@ type ExecutionOptions struct {
 	// means no timeout (the C side treats `timeout_secs <= 0` as
 	// unbounded — see `sdks/c/src/exec/command.rs`).
 	Timeout time.Duration
+	// StreamStallTimeout auto-kills the execution if back-pressure has fully
+	// stalled — i.e. there is output buffered but the caller's Stdout/Stderr
+	// sink has accepted nothing for this long. It guards against a permanently
+	// blocked/abandoned sink leaving the producer suspended (and the box's
+	// resources held) forever. A sink that keeps making progress, however
+	// slowly, is never killed; an execution that simply produces no output is
+	// never killed (nothing is buffered). Zero disables the guard.
+	StreamStallTimeout time.Duration
 }
 
 // executionStreamState holds the user-provided sinks for streaming output
@@ -85,7 +93,6 @@ type ExecutionOptions struct {
 // Memory overhead is bounded: each execution adds one map entry plus the
 // state struct (a few writers, two atomics, and a mutex).
 type executionStreamState struct {
-	mu       sync.Mutex
 	stdout   io.Writer
 	stderr   io.Writer
 	onStdout func([]byte)
@@ -103,57 +110,264 @@ type executionStreamState struct {
 	// buffer. The fold happens at the SDK boundary; the C-side Wait
 	// task stays decoupled from streams.
 	drained chan struct{}
+
+	// progress is a monotonic count of Stdout/Stderr callbacks delivered.
+	// Wait's drain barrier watches it: a SIGKILLed guest can leave a pipe
+	// without EOF, so the C exit pump never fires on_exit and `drained`
+	// never closes — bounding the barrier by progress lets Wait return
+	// (the stream has stalled) instead of hanging forever. While output is
+	// still flowing progress keeps advancing, so a large tail is never cut
+	// off early.
+	progress atomic.Uint64
+
+	// Stream output is delivered to the caller's sinks by a dedicated
+	// per-execution goroutine (deliverLoop), NOT inline on the shared
+	// per-Runtime drain goroutine. deliverStdout/deliverStderr are invoked on
+	// that single drain goroutine (runtime.go drainLoop -> C dispatch); writing
+	// to a caller-supplied Writer inline there lets one execution's slow or
+	// blocking sink wedge the drain goroutine and stall delivery — including
+	// Wait completions — for EVERY execution on the same Runtime
+	// (head-of-line blocking). Enqueue is non-blocking; the writer goroutine
+	// absorbs sink back-pressure in isolation.
+	qmu         sync.Mutex
+	qcond       *sync.Cond
+	queue       []streamChunk
+	exited      bool // on_exit seen: flush the queue, then close drained
+	stopped     bool // execution released/closed: stop the writer
+	drainedOnce sync.Once
+
+	// Bounded-queue back-pressure. queuedBytes is the bytes buffered but not
+	// yet written to the caller's sink. When it crosses the high-water mark the
+	// writer is falling behind, so we pause the C-side pump (which fills the
+	// bounded upstream channel and ultimately blocks the guest process's
+	// write()); we resume once it drains below the low-water mark. `pause` calls
+	// boxlite_execution_set_stream_paused under qmu — Close sets `stopped` under
+	// qmu before freeing the handle, so a pause call can never use it post-free.
+	queuedBytes int
+	paused      bool
+	pause       func(bool)
 }
 
-func newExecutionStreamState(opts ExecutionOptions) *executionStreamState {
-	return &executionStreamState{
+const (
+	// streamQueueHighWater: buffered bytes at which the writer is deemed behind
+	// and the producer is paused. streamQueueLowWater: resume threshold. The gap
+	// is hysteresis so a steady stream doesn't thrash pause/resume.
+	streamQueueHighWater = 4 << 20 // 4 MiB
+	streamQueueLowWater  = 1 << 20 // 1 MiB
+)
+
+// streamChunk is one ordered unit of stream output queued for async delivery.
+type streamChunk struct {
+	stderr bool
+	data   []byte
+}
+
+// newExecutionStreamState builds the stream state. setPaused, when non-nil, is
+// the raw C call that pauses/resumes the execution's pumps; it is wrapped so it
+// only runs while the handle is alive (guarded by qmu against Close's free).
+func newExecutionStreamState(opts ExecutionOptions, setPaused func(bool)) *executionStreamState {
+	s := &executionStreamState{
 		stdout:   opts.Stdout,
 		stderr:   opts.Stderr,
 		onStdout: opts.OnStdout,
 		onStderr: opts.OnStderr,
 		drained:  make(chan struct{}),
 	}
+	s.qcond = sync.NewCond(&s.qmu)
+	if setPaused != nil {
+		s.pause = func(p bool) {
+			// Call the C FFI while holding qmu and only when not stopped.
+			// markReleased sets `stopped` under qmu before Close frees the
+			// handle, so this can never touch a freed handle.
+			s.qmu.Lock()
+			if !s.stopped {
+				setPaused(p)
+			}
+			s.qmu.Unlock()
+		}
+	}
+	go s.deliverLoop()
+	return s
 }
 
-func (s *executionStreamState) deliverStdout(data []byte) {
+// deliverStdout/deliverStderr run on the shared per-Runtime drain goroutine.
+// They only enqueue — never write to the caller's sink — so a blocking sink
+// cannot wedge the drain goroutine (see executionStreamState). The bytes are
+// already a Go-owned copy (C.GoBytes at the cgo boundary), so the slice is safe
+// to retain in the queue.
+func (s *executionStreamState) deliverStdout(data []byte) { s.enqueue(streamChunk{false, data}) }
+func (s *executionStreamState) deliverStderr(data []byte) { s.enqueue(streamChunk{true, data}) }
+
+func (s *executionStreamState) enqueue(c streamChunk) {
 	if s.released.Load() {
 		return
 	}
-	s.mu.Lock()
-	stdout := s.stdout
-	cb := s.onStdout
-	s.mu.Unlock()
-	if cb != nil {
-		cb(data)
+	doPause := false
+	s.qmu.Lock()
+	if !s.exited && !s.stopped {
+		s.queue = append(s.queue, c)
+		s.queuedBytes += len(c.data)
+		if s.queuedBytes > streamQueueHighWater && !s.paused {
+			s.paused = true
+			doPause = true
+		}
+		s.qcond.Signal()
 	}
-	if stdout != nil {
-		_, _ = stdout.Write(data)
-	}
-}
-
-func (s *executionStreamState) deliverStderr(data []byte) {
-	if s.released.Load() {
-		return
-	}
-	s.mu.Lock()
-	stderr := s.stderr
-	cb := s.onStderr
-	s.mu.Unlock()
-	if cb != nil {
-		cb(data)
-	}
-	if stderr != nil {
-		_, _ = stderr.Write(data)
+	s.qmu.Unlock()
+	if doPause && s.pause != nil {
+		s.pause(true)
 	}
 }
 
+// deliverExit marks end-of-stream. The writer goroutine flushes whatever is
+// still queued (on_exit fires only after every stream callback for this
+// execution, so the queue holds the full tail) and then closes drained, which
+// Execution.Wait's drain barrier is waiting on.
 func (s *executionStreamState) deliverExit(_ int) {
 	s.released.Store(true)
-	close(s.drained)
+	s.qmu.Lock()
+	s.exited = true
+	s.qcond.Signal()
+	s.qmu.Unlock()
 }
 
 func (s *executionStreamState) markReleased() {
 	s.released.Store(true)
+	s.qmu.Lock()
+	s.stopped = true
+	s.qcond.Signal()
+	s.qmu.Unlock()
+}
+
+// deliverLoop is the per-execution writer goroutine. It drains the queue in
+// FIFO order (preserving stdout/stderr interleaving) into the caller's sinks,
+// bumping progress per chunk so Wait's progress-bounded drain barrier can tell
+// a still-delivering stream from a stalled one. Blocking here isolates sink
+// back-pressure to this one execution. Exits — closing drained — once on_exit
+// has been seen and the queue is empty, or when the execution is released.
+func (s *executionStreamState) deliverLoop() {
+	defer s.closeDrained()
+	for {
+		s.qmu.Lock()
+		for len(s.queue) == 0 && !s.exited && !s.stopped {
+			s.qcond.Wait()
+		}
+		q := s.queue
+		s.queue = nil
+		done := s.exited || s.stopped
+		s.qmu.Unlock()
+
+		batch := 0
+		for _, c := range q {
+			s.writeChunk(c)
+			batch += len(c.data)
+		}
+		// Account the drained bytes; resume the producer once we're back under
+		// the low-water mark (only while live — on exit/stop the pump is torn
+		// down anyway, and resuming there could race the handle free).
+		doResume := false
+		s.qmu.Lock()
+		s.queuedBytes -= batch
+		if s.paused && !done && s.queuedBytes < streamQueueLowWater {
+			s.paused = false
+			doResume = true
+		}
+		s.qmu.Unlock()
+		if doResume && s.pause != nil {
+			s.pause(false)
+		}
+		if done {
+			// No more chunks can arrive once exited/stopped is set (deliver*
+			// calls are serialized on the single drain goroutine), but a chunk
+			// enqueued before the flag was observed may remain — flush it.
+			s.qmu.Lock()
+			rest := s.queue
+			s.queue = nil
+			s.qmu.Unlock()
+			for _, c := range rest {
+				s.writeChunk(c)
+			}
+			return
+		}
+	}
+}
+
+// writeChunk hands one chunk to the caller's sink. Write errors are
+// deliberately not propagated: this runs on the async delivery goroutine with
+// no caller to return them to, and a transient sink hiccup should not tear down
+// a healthy execution. A sink that fails permanently simply stops accepting
+// bytes, which leaves output buffered and is exactly the condition
+// StreamStallTimeout watches for and kills — so a wedged sink is still handled,
+// without making every transient write error fatal.
+func (s *executionStreamState) writeChunk(c streamChunk) {
+	if c.stderr {
+		if s.onStderr != nil {
+			s.onStderr(c.data)
+		}
+		if s.stderr != nil {
+			_, _ = s.stderr.Write(c.data)
+		}
+	} else {
+		if s.onStdout != nil {
+			s.onStdout(c.data)
+		}
+		if s.stdout != nil {
+			_, _ = s.stdout.Write(c.data)
+		}
+	}
+	s.progress.Add(1)
+}
+
+func (s *executionStreamState) closeDrained() {
+	s.drainedOnce.Do(func() { close(s.drained) })
+}
+
+// stallWatchdog auto-kills (via the supplied closure) an execution whose
+// back-pressure has fully stalled: output is buffered (queuedBytes > 0) but the
+// caller's sink has delivered nothing — progress has not advanced — for the
+// whole timeout. Resets on any progress, so a slow-but-advancing sink is never
+// killed; ignores quiet executions, which buffer nothing. Exits when the stream
+// drains (clean end) or after it has fired the kill.
+func (s *executionStreamState) stallWatchdog(timeout time.Duration, kill func()) {
+	interval := timeout / 4
+	if interval < 50*time.Millisecond {
+		interval = 50 * time.Millisecond
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+
+	lastProgress := s.progress.Load()
+	var stalledSince time.Time // zero = not currently stalled
+	for {
+		select {
+		case <-s.drained:
+			return
+		case <-t.C:
+			now := s.progress.Load()
+			progressed := now != lastProgress
+			lastProgress = now
+
+			s.qmu.Lock()
+			pending := s.queuedBytes
+			s.qmu.Unlock()
+
+			// A stall is "output is buffered but nothing got delivered this
+			// interval". Time it from when the stall began (not from exec start
+			// or last progress), so a sink that goes quiet then stalls still
+			// gets the full timeout, and a quiet exec that buffers nothing is
+			// never killed.
+			if progressed || pending == 0 {
+				stalledSince = time.Time{}
+				continue
+			}
+			if stalledSince.IsZero() {
+				stalledSince = time.Now()
+			} else if time.Since(stalledSince) >= timeout {
+				kill()
+				return
+			}
+		}
+	}
 }
 
 // Execution is a handle to a running command.
@@ -249,7 +463,14 @@ func (b *Box) StartExecution(_ context.Context, name string, args []string, opts
 		return nil, freeError(&cerr)
 	}
 
-	state := newExecutionStreamState(cfg)
+	// The pause setter throttles this execution's guest producer when the
+	// delivery queue fills (end-to-end back-pressure). `handle` is valid for
+	// the closure's lifetime: it is only invoked while the stream state is not
+	// stopped, and Close frees the handle only after marking it stopped.
+	state := newExecutionStreamState(cfg, func(paused bool) {
+		var cerr C.CBoxliteError
+		C.boxlite_execution_set_stream_paused(handle, boolToCInt(paused), &cerr)
+	})
 	streamHandle := cgo.NewHandle(state)
 
 	if err := registerExecutionCallbacks(handle, streamHandle); err != nil {
@@ -269,6 +490,12 @@ func (b *Box) StartExecution(_ context.Context, name string, args []string, opts
 		closing:     b.runtime.closing,
 	}
 	execution.Stdin = &executionStdin{execution: execution}
+
+	if cfg.StreamStallTimeout > 0 {
+		go state.stallWatchdog(cfg.StreamStallTimeout, func() {
+			_ = execution.Kill(context.Background())
+		})
+	}
 	return execution, nil
 }
 
@@ -341,19 +568,69 @@ func (e *Execution) Wait(ctx context.Context) (int, error) {
 		return 0, ErrRuntimeClosed
 	}
 
-	// Drain barrier: wait for stream pumps to flush before returning,
-	// so the caller's stdout/stderr Writers see every chunk the exec
-	// produced. Non-cancelable by ctx — only runtime shutdown breaks
-	// it. Preserves the exit code from the wait result; overwrites
-	// err only if the wait itself had none.
-	select {
-	case <-e.streamState.drained:
-	case <-e.closing:
-		if err == nil {
-			err = ErrRuntimeClosed
-		}
+	// Drain barrier: wait for stream pumps to flush before returning, so
+	// the caller's stdout/stderr Writers see every chunk the exec produced.
+	// Bounded by stream *progress*, not a fixed wall clock: normally
+	// `drained` closes once C's exit pump (which keeps Exit strictly last)
+	// fires on_exit. But a SIGKILLed guest can leave a pipe without EOF, so
+	// the exit pump never fires and `drained` never closes — keep waiting
+	// while output is still arriving (progress advances; a large tail is
+	// never cut off), and give up once the stream goes idle. Non-cancelable
+	// by ctx (os/exec parity); only runtime shutdown, an idle/stalled
+	// stream, or the hard cap breaks it. Preserves the exit code; overwrites
+	// err only if the wait had none.
+	if closed := waitForStreamDrain(
+		e.streamState.drained, e.closing, &e.streamState.progress,
+		streamDrainIdleBound, streamDrainHardCap,
+	); closed && err == nil {
+		err = ErrRuntimeClosed
 	}
 	return code, err
+}
+
+// streamDrainIdleBound is how long Wait's drain barrier tolerates no new
+// Stdout/Stderr callback before treating the stream as stalled and
+// returning. The drain runs only after the exit code is in hand, so any
+// remaining output is buffered and arrives back-to-back; a full window with
+// no progress means a guest pipe that will never EOF (a signal-killed
+// process). Large enough to absorb scheduler/transport jitter, small enough
+// that a timeout-killed exec's Wait returns promptly.
+const streamDrainIdleBound = 300 * time.Millisecond
+
+// streamDrainHardCap backstops a pipe that never EOFs yet keeps trickling a
+// chunk within every idle window forever. Generous so it never clips a
+// genuine high-throughput tail.
+const streamDrainHardCap = 30 * time.Second
+
+// waitForStreamDrain blocks until the stream callbacks have flushed
+// (`drained` closes), the runtime is closing, the stream goes idle (no
+// progress within idleBound — a stuck never-EOF pipe), or hardCap elapses.
+// Returns true only when it ended because the runtime is closing, so the
+// caller can surface ErrRuntimeClosed. Bounding by progress rather than a
+// fixed wall clock keeps a still-delivering tail from being cut off.
+func waitForStreamDrain(drained, closing <-chan struct{}, progress *atomic.Uint64, idleBound, hardCap time.Duration) bool {
+	idle := time.NewTicker(idleBound)
+	defer idle.Stop()
+	cap := time.NewTimer(hardCap)
+	defer cap.Stop()
+
+	last := progress.Load()
+	for {
+		select {
+		case <-drained:
+			return false
+		case <-closing:
+			return true
+		case <-cap.C:
+			return false
+		case <-idle.C:
+			now := progress.Load()
+			if now == last {
+				return false
+			}
+			last = now
+		}
+	}
 }
 
 // Kill terminates the running command.

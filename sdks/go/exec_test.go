@@ -2,7 +2,9 @@ package boxlite
 
 import (
 	"reflect"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // envMapToFlatPairs is the pure-Go pivot point of ExecutionOptions.Env
@@ -65,6 +67,102 @@ func TestEnvMapToFlatPairs(t *testing.T) {
 		want := []string{"EMPTY", ""}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("empty-value pair must round-trip, want %v got %v", want, got)
+		}
+	})
+}
+
+// TestWaitForStreamDrain pins Wait's drain-barrier semantics: it must keep
+// waiting while the stream is still delivering (so a large tail is never cut
+// off before the exit code is returned), give up promptly when a never-EOF
+// pipe goes idle (instead of hanging forever), surface runtime close, and
+// fall back to a hard cap.
+func TestWaitForStreamDrain(t *testing.T) {
+	t.Run("waits for a still-delivering stream then returns when drained", func(t *testing.T) {
+		var progress atomic.Uint64
+		drained := make(chan struct{})
+		closing := make(chan struct{})
+		// Deliver steadily for ~2.5s — past any 2s-style fixed cap — with
+		// each gap (50ms) under idleBound (100ms) so it never looks idle,
+		// then close drained. A fixed 2s cap would have bailed mid-stream.
+		go func() {
+			for i := 0; i < 50; i++ {
+				time.Sleep(50 * time.Millisecond)
+				progress.Add(1)
+			}
+			close(drained)
+		}()
+
+		start := time.Now()
+		closed := waitForStreamDrain(drained, closing, &progress, 100*time.Millisecond, 30*time.Second)
+		elapsed := time.Since(start)
+
+		if closed {
+			t.Fatal("expected closed=false: ended via drained, not runtime close")
+		}
+		if elapsed < 2400*time.Millisecond {
+			t.Fatalf("returned after %v: gave up before the stream finished "+
+				"delivering (a fixed 2s cap would do this)", elapsed)
+		}
+	})
+
+	t.Run("gives up after one idle window on a stuck never-EOF pipe", func(t *testing.T) {
+		var progress atomic.Uint64 // never bumped
+		drained := make(chan struct{})
+		closing := make(chan struct{})
+
+		start := time.Now()
+		closed := waitForStreamDrain(drained, closing, &progress, 100*time.Millisecond, 30*time.Second)
+		elapsed := time.Since(start)
+
+		if closed {
+			t.Fatal("expected closed=false: idle stall, not runtime close")
+		}
+		if elapsed > 2*time.Second {
+			t.Fatalf("took %v to give up on an idle stream; Wait would hang "+
+				"that long on a SIGKILLed exec", elapsed)
+		}
+	})
+
+	t.Run("reports runtime close", func(t *testing.T) {
+		var progress atomic.Uint64
+		drained := make(chan struct{})
+		closing := make(chan struct{})
+		close(closing)
+
+		if closed := waitForStreamDrain(drained, closing, &progress, 100*time.Millisecond, 30*time.Second); !closed {
+			t.Fatal("expected closed=true when the runtime is closing")
+		}
+	})
+
+	t.Run("falls back to hard cap when a pipe trickles forever", func(t *testing.T) {
+		var progress atomic.Uint64
+		drained := make(chan struct{})
+		closing := make(chan struct{})
+		stop := make(chan struct{})
+		defer close(stop)
+		// Bump within every idle window forever so only the hard cap fires.
+		go func() {
+			tick := time.NewTicker(20 * time.Millisecond)
+			defer tick.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-tick.C:
+					progress.Add(1)
+				}
+			}
+		}()
+
+		start := time.Now()
+		closed := waitForStreamDrain(drained, closing, &progress, 100*time.Millisecond, 300*time.Millisecond)
+		elapsed := time.Since(start)
+
+		if closed {
+			t.Fatal("expected closed=false: hard cap, not runtime close")
+		}
+		if elapsed < 250*time.Millisecond || elapsed > 1500*time.Millisecond {
+			t.Fatalf("expected release near the 300ms hard cap, got %v", elapsed)
 		}
 	})
 }

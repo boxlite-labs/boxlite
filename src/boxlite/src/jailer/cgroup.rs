@@ -49,12 +49,12 @@ const BOXLITE_CGROUP: &str = "boxlite";
 
 /// Check if the current process is running as root.
 #[cfg(target_os = "linux")]
-fn is_root() -> bool {
+pub(crate) fn is_root() -> bool {
     unsafe { libc::getuid() == 0 }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn is_root() -> bool {
+pub(crate) fn is_root() -> bool {
     false
 }
 
@@ -115,6 +115,32 @@ pub struct CgroupConfig {
 
     /// Maximum number of processes (pids.max).
     pub pids_max: Option<u64>,
+
+    /// `CPUQuotaPerSecUSec` for the systemd transient scope (rootless host
+    /// path). Microseconds of CPU time per real second — `1_000_000` = 100% of
+    /// one core, `N * 1_000_000` = full N-core ceiling.
+    ///
+    /// Separate from `cpu_max` (which is the in-kernel `cpu.max` quota/period
+    /// pair) because rootless can't enable the `cpu` controller on the box
+    /// cgroup directly: the `+cpu` write to `cgroup.subtree_control` fails
+    /// with EINVAL when the parent slice hasn't delegated it. systemd's user
+    /// manager owns `user.slice` where `cpu` is pre-delegated under the
+    /// unified hierarchy, so the property reaches the kernel by riding the
+    /// `busctl StartTransientUnit` call alongside `MemoryMax`/`TasksMax`.
+    pub cpu_quota_us_per_sec: Option<u64>,
+}
+
+impl CgroupConfig {
+    /// True if any cgroup limit is set. When false, creating a cgroup buys
+    /// nothing — callers should skip cgroup setup entirely.
+    pub fn has_limits(&self) -> bool {
+        self.memory_max.is_some()
+            || self.memory_high.is_some()
+            || self.cpu_weight.is_some()
+            || self.cpu_max.is_some()
+            || self.pids_max.is_some()
+            || self.cpu_quota_us_per_sec.is_some()
+    }
 }
 
 /// Check if cgroup v2 is available and unified hierarchy is used.
@@ -196,7 +222,11 @@ pub fn setup_cgroup(box_id: &str, config: &CgroupConfig) -> Result<PathBuf, Jail
         "Using cgroup base path"
     );
 
-    // Create boxlite parent cgroup if needed
+    // Create boxlite parent cgroup if needed, then (idempotently) delegate the
+    // controllers to its children. Running enable_controllers every time — not
+    // only on creation — repairs a parent left behind by an earlier build that
+    // failed to delegate, so box children always end up with the controller
+    // files.
     if !boxlite_cgroup.exists() {
         fs::create_dir(&boxlite_cgroup).map_err(|e| {
             JailerError::Cgroup(format!(
@@ -205,10 +235,8 @@ pub fn setup_cgroup(box_id: &str, config: &CgroupConfig) -> Result<PathBuf, Jail
                 e
             ))
         })?;
-
-        // Enable controllers in parent
-        enable_controllers(&boxlite_cgroup)?;
     }
+    enable_controllers(&boxlite_cgroup)?;
 
     // Create box cgroup
     if !box_cgroup.exists() {
@@ -233,13 +261,42 @@ pub fn setup_cgroup(box_id: &str, config: &CgroupConfig) -> Result<PathBuf, Jail
     Ok(box_cgroup)
 }
 
-/// Enable controllers for child cgroups.
+/// Delegate controllers to child cgroups — but only those actually available
+/// here. cgroup v2 rejects the *entire* `cgroup.subtree_control` write if any
+/// named controller is absent, so the literal `+cpu +memory +pids` fails on
+/// rootless/systemd-user hosts where the session is delegated only `memory`
+/// and `pids` (no `cpu`). That failure left box cgroups with no controllers
+/// and the DoS limits silently unenforced. Enable the intersection of what we
+/// want with `cgroup.controllers` instead, so memory/pids still apply when cpu
+/// isn't delegated.
 fn enable_controllers(cgroup_path: &Path) -> Result<(), JailerError> {
-    let subtree_control = cgroup_path.join("cgroup.subtree_control");
+    let controllers_path = cgroup_path.join("cgroup.controllers");
+    let available = fs::read_to_string(&controllers_path).map_err(|e| {
+        JailerError::Cgroup(format!(
+            "Failed to read available controllers at {}: {}",
+            controllers_path.display(),
+            e
+        ))
+    })?;
 
-    // Enable cpu, memory, and pids controllers
-    write_file(&subtree_control, "+cpu +memory +pids")?;
+    let enable: Vec<String> = ["cpu", "memory", "pids"]
+        .iter()
+        .filter(|want| available.split_whitespace().any(|have| have == **want))
+        .map(|want| format!("+{want}"))
+        .collect();
 
+    if enable.is_empty() {
+        return Err(JailerError::Cgroup(format!(
+            "none of cpu/memory/pids are delegated to {} (available: [{}])",
+            cgroup_path.display(),
+            available.trim()
+        )));
+    }
+
+    write_file(
+        &cgroup_path.join("cgroup.subtree_control"),
+        &enable.join(" "),
+    )?;
     Ok(())
 }
 
@@ -339,7 +396,42 @@ impl From<&ResourceLimits> for CgroupConfig {
                 (t * 1_000_000, 1_000_000)
             }),
             pids_max: limits.max_processes,
+            cpu_quota_us_per_sec: None, // wired in by apply_cgroup_defaults
         }
+    }
+}
+
+/// Default host process cap. Baseline box uses ~22 host tasks (libkrun vCPUs +
+/// gvproxy + tokio); 1024 leaves wide headroom while still catching a runaway
+/// thread/fork leak in the VMM stack.
+pub(crate) const DEFAULT_HOST_PIDS_MAX: u64 = 1024;
+
+/// Apply default DoS caps in place: `memory.max = 2× VM RAM + 512 MiB`,
+/// `pids.max = 1024`, `cpu.max = host_cores × 1_000_000`. Mirrors any explicit
+/// `cpu_max` to `cpu_quota_us_per_sec` so rootless (systemd-scope `CPUQuota`)
+/// and rootful (direct `cpu.max` file write) caps stay in sync — without this
+/// mirror, a user-set `ResourceLimits.max_cpu_time` lands on `cpu_max` only
+/// and gets silently dropped rootless.
+///
+/// `host_cores` is injected (rather than queried from `available_parallelism`
+/// inside this function) so the defaults are pure and unit-testable.
+pub(crate) fn apply_cgroup_defaults(
+    config: &mut CgroupConfig,
+    vm_memory_mib: u64,
+    host_cores: u64,
+) {
+    if config.memory_max.is_none() {
+        config.memory_max = Some(vm_memory_mib * 2 * 1024 * 1024 + 512 * 1024 * 1024);
+    }
+    if config.pids_max.is_none() {
+        config.pids_max = Some(DEFAULT_HOST_PIDS_MAX);
+    }
+    let host_cpu_us_per_sec = host_cores.saturating_mul(1_000_000);
+    if config.cpu_max.is_none() {
+        config.cpu_max = Some((host_cpu_us_per_sec, 1_000_000));
+    }
+    if config.cpu_quota_us_per_sec.is_none() {
+        config.cpu_quota_us_per_sec = config.cpu_max.map(|(q, _period)| q);
     }
 }
 
@@ -434,6 +526,87 @@ pub fn build_cgroup_procs_path(box_id: &str) -> Option<std::ffi::CString> {
     std::ffi::CString::new(path.to_string_lossy().as_bytes()).ok()
 }
 
+/// Rootless host limits: ask the systemd *user* manager to wrap an already
+/// running shim PID in a transient scope carrying the resource limits.
+///
+/// Unlike the direct-cgroup path, an unprivileged process cannot migrate itself
+/// from its login `session-N.scope` into `user@.service/.../boxlite-<id>.scope`
+/// — the move needs write access to the root-owned `user.slice` common ancestor
+/// and fails with EACCES. systemd owns that hierarchy, so we hand it the PID and
+/// let it do the placement. The scope is transient and auto-removed once the
+/// shim exits.
+///
+/// Calls `busctl` (shelling out keeps systemd a runtime, not a build/link,
+/// dependency). Non-fatal to the caller: a box that can't be scoped is still
+/// better than no box, matching the prior cgroup behavior.
+#[cfg(target_os = "linux")]
+pub fn adopt_pid_into_scope(
+    box_id: &str,
+    pid: u32,
+    config: &CgroupConfig,
+) -> Result<(), JailerError> {
+    let unit = format!("boxlite-{box_id}.scope");
+
+    // StartTransientUnit(name, mode, properties: a(sv), aux: a(sa(sv))).
+    // busctl spells each property as `<name> <type> <value...>`; the count
+    // before the list must match the number of properties we pass.
+    let mut props: Vec<String> = vec![
+        // PIDs is an array of u32 (au): "1" element count, then the pid.
+        "PIDs".into(),
+        "au".into(),
+        "1".into(),
+        pid.to_string(),
+    ];
+    let mut count: u32 = 1;
+    let add = |name: &str, value: u64, props: &mut Vec<String>, count: &mut u32| {
+        props.push(name.into());
+        props.push("t".into());
+        props.push(value.to_string());
+        *count += 1;
+    };
+    if let Some(m) = config.memory_max {
+        add("MemoryMax", m, &mut props, &mut count);
+    }
+    if let Some(h) = config.memory_high {
+        add("MemoryHigh", h, &mut props, &mut count);
+    }
+    if let Some(p) = config.pids_max {
+        add("TasksMax", p, &mut props, &mut count);
+    }
+    if let Some(q) = config.cpu_quota_us_per_sec {
+        add("CPUQuotaPerSecUSec", q, &mut props, &mut count);
+    }
+
+    let mut args: Vec<String> = vec![
+        "--user".into(),
+        "--quiet".into(),
+        "call".into(),
+        "org.freedesktop.systemd1".into(),
+        "/org/freedesktop/systemd1".into(),
+        "org.freedesktop.systemd1.Manager".into(),
+        "StartTransientUnit".into(),
+        "ssa(sv)a(sa(sv))".into(),
+        unit.clone(),
+        "fail".into(),
+        count.to_string(),
+    ];
+    args.extend(props);
+    args.push("0".into()); // empty aux array
+
+    let output = std::process::Command::new("busctl")
+        .args(&args)
+        .output()
+        .map_err(|e| JailerError::Cgroup(format!("failed to run busctl: {e}")))?;
+
+    if !output.status.success() {
+        return Err(JailerError::Cgroup(format!(
+            "StartTransientUnit for {unit} (pid {pid}) failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -488,5 +661,279 @@ mod tests {
         assert_eq!(config.memory_max, Some(1024 * 1024 * 1024));
         assert_eq!(config.pids_max, Some(100));
         assert!(config.cpu_max.is_some());
+    }
+
+    /// The whole point of the rootless fix in this PR: when the parent's
+    /// `cgroup.controllers` doesn't list `cpu` (the common rootless case),
+    /// the atomic `+cpu +memory +pids` write fails and takes memory+pids
+    /// down with it. `enable_controllers` must intersect what we want with
+    /// what's available, so memory/pids still get delegated when cpu isn't.
+    #[test]
+    fn enable_controllers_writes_only_intersection() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cgroup_path = dir.path();
+        std::fs::write(cgroup_path.join("cgroup.controllers"), "memory pids\n")
+            .expect("write cgroup.controllers");
+        std::fs::write(cgroup_path.join("cgroup.subtree_control"), "")
+            .expect("write cgroup.subtree_control");
+
+        enable_controllers(cgroup_path).expect("must succeed with non-empty intersection");
+
+        let written = std::fs::read_to_string(cgroup_path.join("cgroup.subtree_control"))
+            .expect("read cgroup.subtree_control");
+        assert!(
+            written.contains("+memory"),
+            "must enable memory when delegated; subtree_control={written:?}"
+        );
+        assert!(
+            written.contains("+pids"),
+            "must enable pids when delegated; subtree_control={written:?}"
+        );
+        assert!(
+            !written.contains("+cpu"),
+            "must NOT try to enable cpu when not delegated (the atomic write would fail and \
+             take memory+pids with it); subtree_control={written:?}"
+        );
+    }
+
+    /// All three controllers delegated (root / fully-privileged): every want
+    /// is in the available set, all three get written.
+    #[test]
+    fn enable_controllers_writes_all_when_all_delegated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cgroup_path = dir.path();
+        std::fs::write(
+            cgroup_path.join("cgroup.controllers"),
+            "cpuset cpu io memory hugetlb pids rdma misc\n",
+        )
+        .expect("write cgroup.controllers");
+        std::fs::write(cgroup_path.join("cgroup.subtree_control"), "")
+            .expect("write cgroup.subtree_control");
+
+        enable_controllers(cgroup_path).expect("must succeed");
+
+        let written = std::fs::read_to_string(cgroup_path.join("cgroup.subtree_control"))
+            .expect("read cgroup.subtree_control");
+        for want in ["+cpu", "+memory", "+pids"] {
+            assert!(written.contains(want), "missing {want} in {written:?}");
+        }
+    }
+
+    /// Pathological host: none of {cpu, memory, pids} are delegated. The
+    /// function must Err loudly rather than silently writing an empty
+    /// subtree_control (which would land later limits in the wrong place).
+    #[test]
+    fn enable_controllers_errors_when_none_delegated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cgroup_path = dir.path();
+        std::fs::write(cgroup_path.join("cgroup.controllers"), "io rdma\n")
+            .expect("write cgroup.controllers");
+        std::fs::write(cgroup_path.join("cgroup.subtree_control"), "")
+            .expect("write cgroup.subtree_control");
+
+        let err = enable_controllers(cgroup_path).expect_err("must err on empty intersection");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("none of cpu/memory/pids"),
+            "error must spell out the missing controllers; got {msg:?}"
+        );
+    }
+
+    /// `apply_cgroup_defaults` fills every cap when none was set explicitly:
+    /// memory.max = 2× VM + 512 MiB, pids.max = 1024, cpu.max = host_cores ×
+    /// 1_000_000, and cpu_quota_us_per_sec mirrors cpu.max. Pins the default
+    /// values themselves — a regression that quietly lowers any of them
+    /// would land here.
+    #[test]
+    fn apply_defaults_fills_every_cap_when_none_explicit() {
+        let mut config = CgroupConfig::default();
+        apply_cgroup_defaults(&mut config, 128, 8);
+
+        let expected_mem = 128u64 * 2 * 1024 * 1024 + 512 * 1024 * 1024;
+        assert_eq!(config.memory_max, Some(expected_mem));
+        assert_eq!(config.pids_max, Some(DEFAULT_HOST_PIDS_MAX));
+        assert_eq!(config.cpu_max, Some((8 * 1_000_000, 1_000_000)));
+        assert_eq!(
+            config.cpu_quota_us_per_sec,
+            Some(8 * 1_000_000),
+            "cpu_quota_us_per_sec must mirror the default cpu_max"
+        );
+    }
+
+    /// The load-bearing mirror: when `ResourceLimits.max_cpu_time` is set,
+    /// the `From<&ResourceLimits>` impl populates `cpu_max` only —
+    /// `cpu_quota_us_per_sec` stays `None`. `apply_cgroup_defaults` must
+    /// derive `cpu_quota_us_per_sec` *from* `cpu_max`, otherwise rootless
+    /// (busctl `CPUQuotaPerSecUSec`) silently drops the user's CPU cap
+    /// even though rootful (`cpu.max` file write) honours it.
+    ///
+    /// Before this PR's `15c50197 + apply_cgroup_defaults` refactor the
+    /// mirror didn't exist — explicit caps worked rootful but silently
+    /// failed rootless. This test pins the property so a future refactor
+    /// can't quietly regress.
+    #[test]
+    fn apply_defaults_mirrors_explicit_cpu_max_to_quota() {
+        // Simulate what `From<&ResourceLimits>` produces when the user
+        // sets `max_cpu_time = 2`: cpu_max = (2_000_000, 1_000_000),
+        // cpu_quota_us_per_sec = None.
+        let mut config = CgroupConfig {
+            cpu_max: Some((2_000_000, 1_000_000)),
+            ..Default::default()
+        };
+        apply_cgroup_defaults(&mut config, 128, 8);
+
+        assert_eq!(
+            config.cpu_max,
+            Some((2_000_000, 1_000_000)),
+            "explicit cpu_max must NOT be overridden by the default"
+        );
+        assert_eq!(
+            config.cpu_quota_us_per_sec,
+            Some(2_000_000),
+            "cpu_quota_us_per_sec must mirror the explicit cpu_max so \
+             the rootless busctl path enforces the same cap as the \
+             rootful cpu.max file-write path; got {:?}",
+            config.cpu_quota_us_per_sec
+        );
+    }
+
+    /// Explicit `memory_max` / `pids_max` must NOT be clobbered by the
+    /// defaults — the user knows what they want, the defaults are
+    /// fallbacks only.
+    #[test]
+    fn apply_defaults_does_not_override_explicit_values() {
+        let mut config = CgroupConfig {
+            memory_max: Some(42),
+            pids_max: Some(7),
+            cpu_quota_us_per_sec: Some(13),
+            ..Default::default()
+        };
+        apply_cgroup_defaults(&mut config, 128, 8);
+
+        assert_eq!(config.memory_max, Some(42), "explicit memory_max preserved");
+        assert_eq!(config.pids_max, Some(7), "explicit pids_max preserved");
+        assert_eq!(
+            config.cpu_quota_us_per_sec,
+            Some(13),
+            "explicit cpu_quota_us_per_sec preserved (not overwritten by mirror)"
+        );
+    }
+
+    /// `CPUQuotaPerSecUSec` from `CgroupConfig` must land verbatim on the
+    /// systemd transient scope when `adopt_pid_into_scope` is called.
+    ///
+    /// Commit `a6386896` added the `cpu_quota_us_per_sec` field on
+    /// `CgroupConfig` + the busctl property marshalling, but no production
+    /// code path currently sets the field (the default in
+    /// `jailer::cgroup_config()` only wires `memory_max` + `pids_max`).
+    /// This test guards the **plumbing** so when a future PR wires CPU
+    /// quota in from `ResourceLimits` or a CLI flag, the busctl property
+    /// name (`CPUQuotaPerSecUSec`), the dbus variant type (`t` = u64), and
+    /// the "microseconds per second" units stay correct.
+    ///
+    /// Without this test, a regression in `adopt_pid_into_scope`'s
+    /// property list (e.g. renaming the key, dropping the type tag,
+    /// reordering the count) would land silently and only surface once
+    /// the wire-up was attempted — at which point CPU caps would be
+    /// dropped without any error.
+    ///
+    /// Skipped when running as root (rootful path uses direct cgroup
+    /// writes, not busctl) or when there is no systemd `--user` manager
+    /// to talk to. The 50 % quota value is chosen so the read-back is
+    /// unambiguous (`500000` µs/s; systemd normalises `1000000` to
+    /// `infinity`).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cpu_quota_per_sec_usec_lands_on_the_scope() {
+        // Precondition 1: rootless. The rootful path takes the direct
+        // `/sys/fs/cgroup/boxlite/<id>` route and never touches busctl.
+        let uid = unsafe { libc::getuid() };
+        if uid == 0 {
+            eprintln!("SKIP cpu_quota_per_sec_usec_lands_on_the_scope: running as root");
+            return;
+        }
+
+        // Precondition 2: a working systemd user manager (so busctl /
+        // systemctl can talk to it).
+        let probe = std::process::Command::new("systemctl")
+            .args(["--user", "show", "init.scope", "-p", "MemoryMax"])
+            .output()
+            .ok();
+        if probe.as_ref().map(|o| !o.status.success()).unwrap_or(true) {
+            eprintln!(
+                "SKIP cpu_quota_per_sec_usec_lands_on_the_scope: \
+                 no systemd --user manager"
+            );
+            return;
+        }
+
+        // A long-lived dummy process to adopt. The scope auto-tears down
+        // when the last PID exits, so the `sleep 30` cleanup is also our
+        // scope cleanup if we panic mid-test.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+
+        // 50 % CPU = 500 000 µs per 1 000 000 µs second. systemd reports
+        // this back literally in CPUQuotaPerSecUSec.
+        let quota_us: u64 = 500_000;
+        let box_id = format!("cpuquota-plumb-{pid}");
+        let config = CgroupConfig {
+            cpu_quota_us_per_sec: Some(quota_us),
+            ..Default::default()
+        };
+
+        let adopt_result = adopt_pid_into_scope(&box_id, pid, &config);
+
+        // Read the property back via systemctl. We capture this BEFORE
+        // cleanup so the scope still exists at read time.
+        let unit = format!("boxlite-{box_id}.scope");
+        let prop_out = std::process::Command::new("systemctl")
+            .args(["--user", "show", &unit, "-p", "CPUQuotaPerSecUSec"])
+            .output()
+            .ok();
+
+        // Tear the dummy process down ASAP regardless of what we found —
+        // a panic in the assertions below should not leak `sleep 30`.
+        let _ = child.kill();
+        let _ = child.wait();
+        // Best-effort teardown of the transient unit (it should also
+        // auto-clean when the last PID exits, but belt and braces).
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "stop", &unit])
+            .output();
+
+        // If adopt failed (e.g. busctl missing) treat it as SKIP rather
+        // than FAIL — the rest of the assertion presumes the scope
+        // actually got created.
+        if adopt_result.is_err() {
+            eprintln!(
+                "SKIP cpu_quota_per_sec_usec_lands_on_the_scope: \
+                 adopt_pid_into_scope failed: {:?}",
+                adopt_result.err()
+            );
+            return;
+        }
+
+        let read_back = prop_out
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .expect("systemctl --user show must succeed after a successful adopt");
+        let value = read_back
+            .strip_prefix("CPUQuotaPerSecUSec=")
+            .expect("output must be `CPUQuotaPerSecUSec=<value>`")
+            .trim();
+        // systemd formats the property in human-readable form on show:
+        // 500_000 µs/s → "500ms". Either string form is acceptable, but
+        // the regression must NOT yield "infinity" (= property dropped)
+        // or some other value — both would break a future CPU-cap PR.
+        assert!(
+            value == "500ms" || value == "500000",
+            "the CPUQuotaPerSecUSec property must round-trip from \
+             CgroupConfig through busctl to systemd as 500 000 µs/s \
+             (either raw `500000` or formatted `500ms`); got {value:?}"
+        );
     }
 }

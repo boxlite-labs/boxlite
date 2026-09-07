@@ -125,7 +125,8 @@ impl<'a> ShimSpawner<'a> {
                 &self.options.network,
                 NetworkSpec::Enabled { .. }
             ))
-            .with_detach(detach);
+            .with_detach(detach)
+            .with_vm_memory_mib(self.options.memory_mib);
 
         if let Some(ref setup) = child_setup {
             builder = builder.with_preserved_fd(setup.raw_fd(), watchdog::PIPE_FD);
@@ -161,6 +162,24 @@ impl<'a> ShimSpawner<'a> {
             tracing::error!("{}", err_msg);
             BoxliteError::Engine(err_msg)
         })?;
+
+        // 7b. Rootless host cgroup: adopt the just-spawned shim into a systemd
+        // scope carrying the resource limits. Done here (not via pre_exec or an
+        // up-front cgroup) because a rootless process can't migrate itself
+        // across the root-owned user.slice — and doing it post-spawn keeps the
+        // shim's PID identity that the watchdog and recovery rely on. No-op for
+        // root and when no limit is configured.
+        //
+        // Fails closed: if the scope cannot carry the limits, the shim is
+        // already running, so kill it before returning rather than leaking an
+        // uncapped VM. `SecurityOptions::allow_unlimited_host_resources` is the
+        // opt-out and is checked inside `place_shim_in_scope`.
+        #[cfg(target_os = "linux")]
+        if let Err(e) = jail.place_shim_in_scope(child.id()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
 
         // 8. Write config to stdin, then close (shim reads until EOF).
         // The child is already spawned and will read from stdin, so this is a

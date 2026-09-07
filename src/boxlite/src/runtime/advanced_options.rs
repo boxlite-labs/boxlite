@@ -172,6 +172,25 @@ pub struct SecurityOptions {
     /// This is not the guest-networking switch; use `network.mode` for that.
     /// The shim's AF_UNIX control plane is granted separately.
     ///
+    /// Allow a box to start when the host cannot enforce its per-box cgroup
+    /// limits.
+    ///
+    /// `THREAT_MODEL.md` lists resource fairness — "one guest cannot starve
+    /// others", enforced by cgroups and rlimits — under *Guaranteed*
+    /// properties, not best-effort. A guaranteed property must not degrade
+    /// silently, so the default is to refuse the box rather than run it
+    /// without a ceiling. This mirrors the bwrap user-namespace preflight,
+    /// which fails closed and points the operator at
+    /// `SecurityOptions::disabled()`.
+    ///
+    /// Set this only where the limits genuinely cannot be had and an
+    /// unconfined box is acceptable — a headless container with no systemd, a
+    /// CI image with no `busctl`. Development and CI only: it turns an
+    /// enforced ceiling into a logged warning.
+    ///
+    /// Default: false.
+    pub allow_unlimited_host_resources: bool,
+
     /// Default: true (needed for gvproxy VM networking).
     pub network_enabled: bool,
 }
@@ -244,6 +263,7 @@ impl Default for SecurityOptions {
             },
             sandbox_profile: None,
             network_enabled: default_network_enabled(),
+            allow_unlimited_host_resources: false,
         }
     }
 }
@@ -275,6 +295,10 @@ impl SecurityOptions {
             resource_limits: ResourceLimits::default(),
             sandbox_profile: None,
             network_enabled: default_network_enabled(),
+            // `disabled()` means every sub-protection is off, so it must also
+            // stop refusing boxes on a host that cannot enforce cgroup limits
+            // — otherwise the opt-out would be stricter than the default.
+            allow_unlimited_host_resources: true,
         }
     }
 
@@ -1128,5 +1152,38 @@ mod resolved_security_tests {
         );
 
         assert!(error.to_string().contains("cannot be combined"));
+    }
+
+    /// The escape hatch must be opt-in: a caller that asked for nothing gets
+    /// the guaranteed property, not a box that quietly runs unconfined.
+    /// `THREAT_MODEL.md` lists resource fairness under *Guaranteed*, so this
+    /// default is the security posture, not a preference.
+    #[test]
+    fn unlimited_host_resources_is_off_by_default() {
+        assert!(
+            !SecurityOptions::default().allow_unlimited_host_resources,
+            "a default box must refuse to start when its cgroup limits cannot be enforced"
+        );
+        assert!(
+            !SecurityOptions::enabled().allow_unlimited_host_resources,
+            "enabled() is the default profile and must agree with it"
+        );
+    }
+
+    /// `disabled()` turns every sub-protection off, so it has to turn this one
+    /// off too. If it did not, the documented opt-out would be *stricter* than
+    /// the default — a box would start unsandboxed but still be refused for
+    /// lacking a cgroup.
+    #[test]
+    fn disabled_profile_allows_unlimited_host_resources() {
+        let disabled = SecurityOptions::disabled();
+        assert!(
+            disabled.allow_unlimited_host_resources,
+            "disabled() must not be stricter than default() on host resources"
+        );
+        assert!(
+            !disabled.jailer_enabled,
+            "sanity: disabled() really is the off profile"
+        );
     }
 }

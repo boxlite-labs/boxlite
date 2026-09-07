@@ -4,7 +4,7 @@
 //! namespace isolation, bind mounts, and environment sanitization.
 
 use super::{Sandbox, SandboxContext};
-use crate::jailer::{bwrap, cgroup};
+use crate::jailer::bwrap;
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 use std::process::Command;
 
@@ -29,7 +29,7 @@ impl Sandbox for BwrapSandbox {
         bwrap::is_available()
     }
 
-    fn setup(&self, ctx: &SandboxContext) -> BoxliteResult<()> {
+    fn setup(&self, _ctx: &SandboxContext) -> BoxliteResult<()> {
         // Preflight: verify bwrap can create user namespaces before proceeding.
         if bwrap::is_available()
             && let Err(diagnostic) = bwrap::can_create_user_namespace()
@@ -44,18 +44,9 @@ impl Sandbox for BwrapSandbox {
             return Err(BoxliteError::Config(diagnostic.into_client()));
         }
 
-        let cgroup_config = cgroup::CgroupConfig::from(ctx.resource_limits);
-
-        match cgroup::setup_cgroup(ctx.id, &cgroup_config) {
-            Ok(path) => {
-                tracing::info!(id = %ctx.id, path = %path.display(), "Cgroup created");
-            }
-            Err(e) => {
-                tracing::warn!(id = %ctx.id, error = %e,
-                    "Cgroup setup failed (continuing without cgroup limits)");
-            }
-        }
-
+        // Host cgroup setup is handled by the Jailer (see Jailer::prepare),
+        // decoupled from the bwrap user-namespace path so resource limits
+        // apply even when process-isolation sandboxing is disabled.
         Ok(())
     }
 
@@ -155,16 +146,8 @@ impl Sandbox for BwrapSandbox {
         // Replace the command with bwrap-wrapped version.
         *cmd = bwrap_cmd.build(std::path::Path::new(&binary), &args);
 
-        // Add cgroup join as a pre_exec hook (async-signal-safe).
-        if let Some(cgroup_procs) = cgroup::build_cgroup_procs_path(ctx.id) {
-            use std::os::unix::process::CommandExt;
-            unsafe {
-                cmd.pre_exec(move || {
-                    let _ = cgroup::add_self_to_cgroup_raw(&cgroup_procs);
-                    Ok(())
-                });
-            }
-        }
+        // Cgroup join is added by the Jailer's pre_exec hook (see
+        // Jailer::command), decoupled from the bwrap sandbox.
     }
 
     fn name(&self) -> &'static str {

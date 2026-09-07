@@ -685,7 +685,7 @@ impl<S: Sandbox> Jailer<S> {
         // user.slice (EACCES), so limits are applied after spawn by adopting the
         // shim PID into a systemd scope — see place_shim_in_scope().
         if !cgroup::is_root() {
-            return;
+            return Ok(());
         }
         match cgroup::setup_cgroup(&self.box_id, &config) {
             Ok(path) => {

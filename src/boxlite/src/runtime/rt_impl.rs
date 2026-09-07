@@ -824,12 +824,12 @@ impl RuntimeImpl {
                     // particular, VMM stop may be running in Tokio's blocking
                     // pool; cancelling the outer future must not skip the PID,
                     // state, cache, and event cleanup that follows it.
-                    let stop_task = tokio::spawn(async move { box_impl.stop().await });
-                    match tokio::time::timeout(duration, stop_task).await {
+                    let mut stop_task = tokio::spawn(async move { box_impl.stop().await });
+                    match tokio::time::timeout(duration, &mut stop_task).await {
                         Ok(result) => result.map_err(|e| {
                             BoxliteError::Internal(format!("Box stop task failed: {}", e))
                         }),
-                        Err(stop_task) => {
+                        Err(_) => {
                             // Do not detach teardown when the deadline expires. The
                             // stop task owns the persisted-state and PID cleanup.
                             match stop_task.await {

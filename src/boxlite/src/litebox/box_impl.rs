@@ -53,7 +53,7 @@ pub type SharedBoxImpl = Arc<BoxImpl>;
 /// Separated from BoxImpl to allow operations like `info()` without initializing LiveState.
 pub(crate) struct LiveState {
     // VM process control
-    handler: std::sync::Mutex<Box<dyn VmmHandler>>,
+    handler: Arc<std::sync::Mutex<Box<dyn VmmHandler>>>,
     guest_session: GuestSession,
 
     /// Host-side network control backend (gvproxy ServicesMux client), owned
@@ -94,7 +94,7 @@ impl LiveState {
         #[cfg(target_os = "linux")] bind_mount: Option<BindMountHandle>,
     ) -> Self {
         Self {
-            handler: std::sync::Mutex::new(handler),
+            handler: Arc::new(std::sync::Mutex::new(handler)),
             guest_session,
             network: network.map(Arc::from),
             published_ports,
@@ -725,10 +725,20 @@ impl BoxImpl {
                 tracing::warn!(box_id = %self.config.id, "Guest shutdown timed out after 10s");
             }
 
-            // Stop handler
-            if let Ok(mut handler) = live.handler.lock() {
-                handler.stop()?;
-            }
+            // `VmmHandler::stop` performs a bounded, synchronous graceful-stop
+            // poll. Run it in Tokio's blocking region so the sleep does not
+            // park the async worker that is stopping this box. In particular,
+            // runtime shutdown stops boxes concurrently and must retain enough
+            // workers for the other boxes to make progress.
+            let handler = Arc::clone(&live.handler);
+            tokio::task::spawn_blocking(move || {
+                let mut handler = handler
+                    .lock()
+                    .map_err(|e| BoxliteError::Internal(format!("handler lock poisoned: {}", e)))?;
+                handler.stop()
+            })
+            .await
+            .map_err(|e| BoxliteError::Internal(format!("VMM stop task failed: {}", e)))??;
         }
         // If live_state() failed (vmm_attach said Absent — shim is gone),
         // or status wasn't Running, fall through to cleanup.

@@ -816,10 +816,31 @@ impl RuntimeImpl {
 
         // Stop all boxes concurrently
         let stop_futures = active_boxes.iter().map(|box_impl| {
+            let box_impl = Arc::clone(box_impl);
             let box_id = box_impl.id().to_string();
             async move {
                 let result = if let Some(duration) = timeout_duration {
-                    tokio::time::timeout(duration, box_impl.stop()).await
+                    // Keep the stop future alive after the shutdown deadline. In
+                    // particular, VMM stop may be running in Tokio's blocking
+                    // pool; cancelling the outer future must not skip the PID,
+                    // state, cache, and event cleanup that follows it.
+                    let mut stop_task = tokio::spawn(async move { box_impl.stop().await });
+                    match tokio::time::timeout(duration, &mut stop_task).await {
+                        Ok(result) => result.map_err(|e| {
+                            BoxliteError::Internal(format!("Box stop task failed: {}", e))
+                        }),
+                        Err(_) => {
+                            // Do not detach teardown when the deadline expires. The
+                            // stop task owns the persisted-state and PID cleanup.
+                            match stop_task.await {
+                                Ok(_) => Err(BoxliteError::Internal("stop timed out".into())),
+                                Err(e) => Err(BoxliteError::Internal(format!(
+                                    "Box stop task failed after timeout: {}",
+                                    e
+                                ))),
+                            }
+                        }
+                    }
                 } else {
                     // Infinite timeout
                     Ok(box_impl.stop().await)
@@ -1008,7 +1029,24 @@ impl RuntimeImpl {
                     if let Some(pid) = state.pid {
                         tracing::info!(box_id = %id, pid = pid, "Force stopping box process tree");
                         let mut handler = ShimHandler::from_pid(pid, config.id.clone());
-                        let _ = handler.stop();
+                        let mut stop = || handler.stop();
+                        // `remove_box` is also used by async runtime paths. Keep
+                        // the synchronous VMM grace-period poll off their Tokio
+                        // worker, while retaining direct-call support for the
+                        // synchronous API.
+                        match tokio::runtime::Handle::try_current() {
+                            Ok(handle)
+                                if matches!(
+                                    handle.runtime_flavor(),
+                                    tokio::runtime::RuntimeFlavor::MultiThread
+                                ) =>
+                            {
+                                tokio::task::block_in_place(stop)?;
+                            }
+                            _ => {
+                                stop()?;
+                            }
+                        }
                     }
                     // Update status to stopped and save
                     state.set_status(BoxStatus::Stopped);
@@ -2814,6 +2852,34 @@ mod tests {
         assert!(runtime.box_manager.box_by_id(&config.id).unwrap().is_none());
 
         child.wait().ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_force_remove_from_current_thread_runtime_saves_state_and_deletes_box() {
+        let (runtime, _dir) = create_test_runtime();
+        let (pid, child) = spawn_dummy_process();
+        let _child = ChildGuard(child);
+        let config = test_box_config_in_layout(false, &runtime);
+        let mut state = BoxState::new();
+        state.set_status(BoxStatus::Running);
+        state.set_pid(Some(pid));
+        runtime
+            .box_manager
+            .add_box(&config, &state)
+            .expect("Failed to add box");
+
+        runtime
+            .remove_box(&config.id, true)
+            .expect("Force remove should work on a current-thread runtime");
+
+        assert!(
+            !crate::util::is_process_alive(pid),
+            "Force remove should stop the live process"
+        );
+        assert!(
+            runtime.box_manager.box_by_id(&config.id).unwrap().is_none(),
+            "Force remove should delete the box from the database"
+        );
     }
 
     /// Write a two-line `shim.pid` whose start-time matches the live PID

@@ -492,9 +492,11 @@ pub(crate) struct PySecret {
     pub(crate) hosts: Vec<String>,
 
     /// The placeholder string that appears in guest HTTP headers.
-    /// Defaults to ``<BOXLITE_SECRET:{name}>`` if not set explicitly.
+    /// When not supplied at construction time, defaults to
+    /// ``<BOXLITE_SECRET:{name}>``. Always holds the effective value;
+    /// never ``None``.
     #[pyo3(get, set)]
-    pub(crate) placeholder: Option<String>,
+    pub(crate) placeholder: String,
 }
 
 #[pymethods]
@@ -502,6 +504,7 @@ impl PySecret {
     #[new]
     #[pyo3(signature = (name, value, hosts=vec![], placeholder=None))]
     fn new(name: String, value: String, hosts: Vec<String>, placeholder: Option<String>) -> Self {
+        let placeholder = placeholder.unwrap_or_else(|| format!("<BOXLITE_SECRET:{}>", name));
         Self {
             name,
             value,
@@ -511,10 +514,12 @@ impl PySecret {
     }
 
     /// Return the effective placeholder string.
+    ///
+    /// Equivalent to reading ``.placeholder`` directly; kept for
+    /// backwards-compatibility with code that called ``get_placeholder()``
+    /// before ``.placeholder`` was guaranteed to hold the effective value.
     fn get_placeholder(&self) -> String {
-        self.placeholder
-            .clone()
-            .unwrap_or_else(|| format!("<BOXLITE_SECRET:{}>", self.name))
+        self.placeholder.clone()
     }
 
     fn __repr__(&self) -> String {
@@ -522,7 +527,7 @@ impl PySecret {
             "Secret(name={:?}, hosts={:?}, placeholder={:?}, value=[REDACTED])",
             self.name,
             self.hosts,
-            self.get_placeholder(),
+            self.placeholder,
         )
     }
 }
@@ -753,16 +758,15 @@ impl TryFrom<PyBoxOptions> for BoxOptions {
             }
         }
 
-        // Convert Python secrets to Rust secrets
+        // Convert Python secrets to Rust secrets. `s.placeholder` is always
+        // the effective value (computed eagerly in PySecret::new).
         opts.secrets = py_opts
             .secrets
             .into_iter()
             .map(|s| boxlite::runtime::options::Secret {
-                name: s.name.clone(),
+                name: s.name,
                 hosts: s.hosts,
-                placeholder: s
-                    .placeholder
-                    .unwrap_or_else(|| format!("<BOXLITE_SECRET:{}>", s.name)),
+                placeholder: s.placeholder,
                 value: s.value,
             })
             .collect();

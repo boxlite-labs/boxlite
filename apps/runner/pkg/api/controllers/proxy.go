@@ -143,22 +143,27 @@ func handleWebSocketTerminal(ctx *gin.Context, r *runner.Runner, boxId string, l
 	// the terminal handler returns so the ticker doesn't leak.
 	keepaliveCtx, cancelKeepalive := context.WithCancel(ctx.Request.Context())
 	defer cancelKeepalive()
-	go runTerminalKeepalive(keepaliveCtx, ws, &writeMu, logger)
 
 	shellCmd, shellArgs := shellutil.DefaultInteractiveShell()
 	execution, err := r.Boxlite.StartExecution(ctx.Request.Context(), boxId, shellCmd, shellArgs, wsWriter, wsWriter, true)
 	if err != nil {
 		logger.Warn("failed to start terminal execution", "box", boxId, "error", err)
-		writeMu.Lock()
-		_ = ws.WriteControl(
+		_ = writeWSControl(
+			ws,
+			&writeMu,
 			websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseInternalServerErr, err.Error()),
-			time.Now().Add(terminalWriteDeadline),
+			terminalWriteDeadline,
 		)
-		writeMu.Unlock()
 		return
 	}
 	defer execution.Close()
+
+	activityToucher := newBoxActivityToucher(boxId, logger)
+	configurePongLiveness(keepaliveCtx, ws, 3*terminalKeepaliveInterval, activityToucher.Touch)
+	go runWebSocketKeepalive(keepaliveCtx, ws, &writeMu, terminalKeepaliveInterval, terminalWriteDeadline, func(err error) {
+		logger.Debug("terminal keepalive ping failed", "error", err)
+	})
 
 	// Read from WebSocket and write to execution stdin.
 	for {
@@ -178,34 +183,6 @@ func handleWebSocketTerminal(ctx *gin.Context, r *runner.Runner, boxId string, l
 	}
 }
 
-// runTerminalKeepalive sends a WebSocket Ping every terminalKeepaliveInterval
-// to keep the connection alive through any intermediate hop with an idle
-// timer. Mirrors apps/runner/pkg/api/controllers/boxlite_exec_attach.go's
-// runKeepalive — see that file's commentary on AWS ALB HTTP 408 troubleshooting.
-//
-// Exits cleanly when ctx is cancelled or when a ping write fails.
-func runTerminalKeepalive(ctx context.Context, conn *websocket.Conn, writeMu *sync.Mutex, logger *slog.Logger) {
-	ticker := time.NewTicker(terminalKeepaliveInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			writeMu.Lock()
-			deadline := time.Now().Add(terminalWriteDeadline)
-			err := conn.WriteControl(websocket.PingMessage, nil, deadline)
-			writeMu.Unlock()
-			if err != nil {
-				if ctx.Err() == nil {
-					logger.Debug("terminal keepalive ping failed", "error", err)
-				}
-				return
-			}
-		}
-	}
-}
-
 // wsOutputWriter implements io.Writer by sending text messages over WebSocket.
 // All writes are serialized through `mu` because gorilla/websocket forbids
 // concurrent writers and the keepalive goroutine writes Pings on the same conn.
@@ -215,12 +192,7 @@ type wsOutputWriter struct {
 }
 
 func (w *wsOutputWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if err := w.conn.SetWriteDeadline(time.Now().Add(terminalWriteDeadline)); err != nil {
-		return 0, err
-	}
-	if err := w.conn.WriteMessage(websocket.TextMessage, p); err != nil {
+	if err := writeWSMessage(w.conn, w.mu, websocket.TextMessage, p, terminalWriteDeadline); err != nil {
 		return 0, err
 	}
 	return len(p), nil

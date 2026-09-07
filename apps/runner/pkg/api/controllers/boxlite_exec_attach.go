@@ -156,7 +156,7 @@ func BoxliteExecAttach(ctx *gin.Context) {
 		return
 	}
 
-	runAttachLoop(ctx.Request.Context(), conn, target)
+	runAttachLoop(ctx.Request.Context(), conn, target, boxId)
 }
 
 // runAttachLoop owns the WebSocket lifecycle: spawns reader/writer/keepalive
@@ -167,8 +167,15 @@ func BoxliteExecAttach(ctx *gin.Context) {
 // unbounded allocation.
 const maxAttachFrameBytes = 1 * 1024 * 1024 // 1 MiB
 
-func runAttachLoop(parentCtx context.Context, conn *websocket.Conn, exec attachExec) {
+func runAttachLoop(parentCtx context.Context, conn *websocket.Conn, exec attachExec, boxID string) {
 	conn.SetReadLimit(maxAttachFrameBytes)
+
+	loopCtx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+	activityToucher := newBoxActivityToucher(boxID, nil)
+	// Snapshot the interval once for this session. Tests mutate the package var
+	// around setup/teardown; reading it inside goroutines would race with cleanup.
+	interval := keepaliveInterval()
 
 	// Detect a dead client via Pong liveness: a tiny Ping write fits in
 	// the kernel send buffer and returns success even when the peer is
@@ -176,14 +183,8 @@ func runAttachLoop(parentCtx context.Context, conn *websocket.Conn, exec attachE
 	// require a Pong (or any frame) within pongWait, otherwise the
 	// reader's ReadMessage trips its ReadDeadline and the loop tears
 	// down — releasing the single-attach slot for the next client.
-	pongWait := 3 * keepaliveInterval()
-	_ = conn.SetReadDeadline(time.Now().Add(pongWait))
-	conn.SetPongHandler(func(string) error {
-		return conn.SetReadDeadline(time.Now().Add(pongWait))
-	})
-
-	loopCtx, cancel := context.WithCancel(parentCtx)
-	defer cancel()
+	pongWait := 3 * interval
+	configurePongLiveness(loopCtx, conn, pongWait, activityToucher.Touch)
 
 	var (
 		writeMu   sync.Mutex     // serializes ALL writes to the WebSocket
@@ -254,7 +255,7 @@ func runAttachLoop(parentCtx context.Context, conn *websocket.Conn, exec attachE
 	sideWg.Add(1)
 	go func() {
 		defer sideWg.Done()
-		runKeepalive(loopCtx, conn, &writeMu, fail)
+		runWebSocketKeepalive(loopCtx, conn, &writeMu, interval, wsWriteDeadline, fail)
 	}()
 
 	// Wait for either Done (clean exit) or context cancellation (failure
@@ -402,42 +403,10 @@ func handleControlFrame(conn *websocket.Conn, writeMu *sync.Mutex, exec attachEx
 	}
 }
 
-func runKeepalive(ctx context.Context, conn *websocket.Conn, writeMu *sync.Mutex, fail func(error)) {
-	// Snapshot the interval once at goroutine start. Tests mutate the
-	// package var around setup/teardown; reading it inside the loop
-	// would race with their cleanup defers.
-	interval := keepaliveInterval()
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			writeMu.Lock()
-			deadline := time.Now().Add(wsWriteDeadline)
-			err := conn.WriteControl(websocket.PingMessage, nil, deadline)
-			writeMu.Unlock()
-			if err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				fail(fmt.Errorf("ping write: %w", err))
-				return
-			}
-		}
-	}
-}
-
 // --- thread-safe write helpers (gorilla/websocket forbids concurrent writes) ---
 
 func writeBinaryFrame(conn *websocket.Conn, mu *sync.Mutex, payload []byte) error {
-	mu.Lock()
-	defer mu.Unlock()
-	if err := conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline)); err != nil {
-		return err
-	}
-	return conn.WriteMessage(websocket.BinaryMessage, payload)
+	return writeWSMessage(conn, mu, websocket.BinaryMessage, payload, wsWriteDeadline)
 }
 
 func writeJSONFrame(conn *websocket.Conn, mu *sync.Mutex, msg any) error {
@@ -445,12 +414,7 @@ func writeJSONFrame(conn *websocket.Conn, mu *sync.Mutex, msg any) error {
 	if err != nil {
 		return err
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if err := conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline)); err != nil {
-		return err
-	}
-	return conn.WriteMessage(websocket.TextMessage, payload)
+	return writeWSMessage(conn, mu, websocket.TextMessage, payload, wsWriteDeadline)
 }
 
 func writeErrorFrame(conn *websocket.Conn, mu *sync.Mutex, message string) error {
@@ -458,10 +422,7 @@ func writeErrorFrame(conn *websocket.Conn, mu *sync.Mutex, message string) error
 }
 
 func writeCloseFrame(conn *websocket.Conn, mu *sync.Mutex, code int, reason string) error {
-	mu.Lock()
-	defer mu.Unlock()
-	deadline := time.Now().Add(wsWriteDeadline)
-	return conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), deadline)
+	return writeWSControl(conn, mu, websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), wsWriteDeadline)
 }
 
 func channelName(c byte) string {

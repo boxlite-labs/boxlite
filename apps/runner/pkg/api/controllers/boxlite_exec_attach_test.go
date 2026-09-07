@@ -488,6 +488,60 @@ func TestBoxliteExecAttach_KeepalivePing(t *testing.T) {
 	}
 }
 
+func TestBoxliteExecAttach_PongRefreshesBoxActivity(t *testing.T) {
+	restore := setKeepaliveIntervalForTest(50 * time.Millisecond)
+	defer restore()
+
+	activityRequests := make(chan string, 1)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/box/box/last-activity" {
+			http.NotFound(w, r)
+			return
+		}
+		activityRequests <- r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer api.Close()
+
+	t.Setenv("BOXLITE_API_URL", api.URL)
+	t.Setenv("BOXLITE_RUNNER_TOKEN", "runner-token")
+
+	stub := newStubAttachExec()
+	cleanup := withStubExec(t, "exec-activity", stub)
+	defer cleanup()
+
+	srv := newAttachServer(t)
+	defer srv.Close()
+
+	conn, _, err := dialAttach(t, srv, "exec-activity")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	conn.SetPingHandler(func(appData string) error {
+		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
+	})
+
+	readErr := make(chan error, 1)
+	go func() {
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, _, err := conn.ReadMessage()
+		readErr <- err
+	}()
+
+	select {
+	case auth := <-activityRequests:
+		if auth != "Bearer runner-token" {
+			t.Fatalf("expected runner auth header, got %q", auth)
+		}
+	case err := <-readErr:
+		t.Fatalf("client read returned before activity refresh: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner did not refresh box activity after websocket pong")
+	}
+}
+
 func TestValidateInbandSignal_RejectsKillStopCont(t *testing.T) {
 	for _, sig := range []int{9, 17, 18, 19, 23} {
 		if err := validateInbandSignal(sig); err == nil {

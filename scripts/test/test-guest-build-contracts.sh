@@ -20,7 +20,7 @@ while [ "$#" -gt 0 ]; do
 done
 case "$profile" in release|debug) ;; *) echo "ERROR: unsupported profile: $profile" >&2; exit 2 ;; esac
 case "$test_case" in
-    all|cleanup|failure-leaves-history-untouched|guest-mode|historical-content|missing-readelf|unsafe-guest-symlink) ;;
+    all|build-output|cleanup|failure-leaves-history-untouched|guest-mode|historical-content|missing-readelf|unsafe-guest-symlink) ;;
     *) echo "ERROR: unsupported guest build contract case: $test_case" >&2; exit 2 ;;
 esac
 if [ -z "$target" ]; then target=$(bash "$root/scripts/util.sh" --target); fi
@@ -208,11 +208,7 @@ check_unsafe_guest_symlink() {
     saved_guest=""
 }
 
-check_cleanup_failure() {
-    local fixture_root="$tmp/cleanup-repo" fixture_bin="$tmp/cleanup-bin"
-    local headers="$tmp/cleanup-headers" cleanup_env="$tmp/fail-cleanup.bash"
-    local fixture_target
-
+prepare_guest_tools_fixture() {
     mkdir -p "$fixture_root/scripts/build" \
         "$fixture_root/src/deps/e2fsprogs-sys/vendor/e2fsprogs/config" \
         "$fixture_bin" "$headers/asm" "$headers/linux"
@@ -245,6 +241,68 @@ check_cleanup_failure() {
         "$fixture_bin/make" "$fixture_bin/${target%%-*}-linux-musl-gcc" "$fixture_bin/cc"
     : > "$headers/asm/unistd.h"
     : > "$headers/linux/audit.h"
+}
+
+check_build_output() {
+    local fixture_root="$tmp/output-repo" fixture_bin="$tmp/output-bin"
+    local headers="$tmp/output-headers" fixture_target phase status expected
+    prepare_guest_tools_fixture
+    cat >> "$fixture_root/src/deps/e2fsprogs-sys/vendor/e2fsprogs/configure" <<'EOF'
+echo 'configure stdout'
+echo 'configure stderr' >&2
+if [ "$FAIL_PHASE" = configure ]; then exit 41; fi
+EOF
+    cat > "$fixture_bin/make" <<'EOF'
+#!/bin/bash
+case "$*" in
+    *mke2fs.static*) phase=mke2fs ;;
+    *resize2fs.static*) phase=resize2fs ;;
+    *) phase=libs ;;
+esac
+echo "$phase stdout"
+echo "$phase stderr" >&2
+if [ "$FAIL_PHASE" = "$phase" ]; then exit 42; fi
+EOF
+    for phase in success configure libs mke2fs resize2fs; do
+        rm -rf -- "$fixture_target"
+        status=0
+        FAIL_PHASE="$phase" CLEANUP_TEST_HEADERS="$headers" BUILD_CC=cc TMPDIR="$tmp" \
+            PATH="$fixture_bin:$PATH" bash "$fixture_root/scripts/build/build-guest-deps.sh" \
+            --target "$target" --profile "$profile" >"$tmp/build.out" 2>"$tmp/build.err" || status=$?
+        if [ "$phase" = success ]; then
+            [ "$status" -eq 0 ] || fail "successful build returned $status"
+            if grep -Eq '(configure|libs|mke2fs|resize2fs) (stdout|stderr)' "$tmp/build.out" "$tmp/build.err"; then
+                fail "successful guest tools build leaked configure or make output"
+            fi
+            grep -Fq 'Guest e2fsprogs tools built:' "$tmp/build.out" || fail "missing success summary"
+            [ -s "$fixture_target/mke2fs" ] && [ -s "$fixture_target/resize2fs" ] || fail "tools were not published"
+            continue
+        fi
+        expected=42
+        if [ "$phase" = configure ]; then expected=41; fi
+        [ "$status" -eq "$expected" ] || fail "$phase failure returned $status instead of $expected"
+        for expected in configure "$phase"; do
+            grep -Fxq "$expected stdout" "$tmp/build.err" || fail "$phase failure lost $expected stdout"
+            grep -Fxq "$expected stderr" "$tmp/build.err" || fail "$phase failure lost $expected stderr"
+        done
+        case "$phase" in
+            configure) expected=libs ;;
+            libs) expected=mke2fs ;;
+            mke2fs) expected=resize2fs ;;
+            resize2fs) expected='Guest e2fsprogs tools built:' ;;
+        esac
+        if grep -Fq "$expected" "$tmp/build.out" "$tmp/build.err"; then
+            fail "build continued after $phase failed"
+        fi
+        [ ! -e "$fixture_target/mke2fs" ] && [ ! -e "$fixture_target/resize2fs" ] || fail "failed build published tools"
+    done
+}
+
+check_cleanup_failure() {
+    local fixture_root="$tmp/cleanup-repo" fixture_bin="$tmp/cleanup-bin"
+    local headers="$tmp/cleanup-headers" cleanup_env="$tmp/fail-cleanup.bash"
+    local fixture_target
+    prepare_guest_tools_fixture
     printf '%s\n' \
         'rm() {' \
         '  case "$*" in' \
@@ -277,6 +335,7 @@ case "$test_case" in
     missing-readelf) check_missing_readelf ;;
     unsafe-guest-symlink) check_unsafe_guest_symlink ;;
     cleanup) check_cleanup_failure ;;
+    build-output) check_build_output ;;
     all)
         check_historical_content
         check_failure_leaves_history_untouched
@@ -284,6 +343,7 @@ case "$test_case" in
         check_missing_readelf
         check_unsafe_guest_symlink
         check_cleanup_failure
+        check_build_output
         ;;
 esac
 

@@ -1191,6 +1191,20 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@aws-sdk/s3-request-presigner@npm:3.1048.0":
+  version: 3.1048.0
+  resolution: "@aws-sdk/s3-request-presigner@npm:3.1048.0"
+  dependencies:
+    "@aws-sdk/core": "npm:^3.974.11"
+    "@aws-sdk/signature-v4-multi-region": "npm:^3.996.27"
+    "@aws-sdk/types": "npm:^3.973.8"
+    "@smithy/core": "npm:^3.24.2"
+    "@smithy/types": "npm:^4.14.1"
+    tslib: "npm:^2.6.2"
+  checksum: 10c0/0e62f1f08d99a5a257d6e26816e5298d40d659995b31257017afba424ab5e89049bb34899b5bb932e4306ebd703376b2c5e5bef36ce75c5de2c3a5990b846e88
+  languageName: node
+  linkType: hard
+
 "@aws-sdk/signature-v4-multi-region@npm:^3.996.26, @aws-sdk/signature-v4-multi-region@npm:^3.996.27":
   version: 3.996.27
   resolution: "@aws-sdk/signature-v4-multi-region@npm:3.996.27"
@@ -17033,6 +17047,7 @@ __metadata:
     "@aws-sdk/credential-provider-node": "npm:^3.901.0"
     "@aws-sdk/credential-providers": "npm:^3.901.0"
     "@aws-sdk/lib-storage": "npm:^3.798.0"
+    "@aws-sdk/s3-request-presigner": "npm:3.1048.0"
     "@babel/preset-env": "npm:^7.22.0"
     "@babel/preset-typescript": "npm:^7.22.0"
     "@clickhouse/client": "npm:^1.16.0"

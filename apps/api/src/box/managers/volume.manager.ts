@@ -16,6 +16,7 @@ import { Redis } from 'ioredis'
 import { RedisLockProvider } from '../common/redis-lock.provider'
 import { TypedConfigService } from '../../config/typed-config.service'
 import { deleteS3Bucket } from '../../common/utils/delete-s3-bucket'
+import { createS3Client } from '../../common/utils/s3-client.factory'
 
 import { TrackableJobExecutions } from '../../common/interfaces/trackable-job-executions'
 import { TrackJobExecution } from '../../common/decorators/track-job-execution.decorator'
@@ -44,35 +45,8 @@ export class VolumeManager
     private readonly redisLockProvider: RedisLockProvider,
     private readonly schedulerRegistry: SchedulerRegistry,
   ) {
-    if (!this.configService.get('s3.endpoint')) {
-      return
-    }
-
-    const endpoint = this.configService.getOrThrow('s3.endpoint')
-    const region = this.configService.getOrThrow('s3.region')
-    const accessKeyId = this.configService.get('s3.accessKey')
-    const secretAccessKey = this.configService.get('s3.secretKey')
     this.skipTestConnection = this.configService.get('skipConnections')
-
-    // Both-or-neither: a lone key is a typo'd pair, and silently falling back
-    // to the SDK default chain would mask the misconfig.
-    if ((accessKeyId && !secretAccessKey) || (!accessKeyId && secretAccessKey)) {
-      throw new Error('S3_ACCESS_KEY and S3_SECRET_KEY must be set together')
-    }
-    // MinIO cannot use the SDK default chain — fail fast at boot with a clear
-    // message instead of a generic auth error from the connection probe.
-    if (endpoint.includes('minio') && !accessKeyId) {
-      throw new Error('MinIO requires S3_ACCESS_KEY and S3_SECRET_KEY to be configured')
-    }
-
-    this.s3Client = new S3Client({
-      endpoint: endpoint.startsWith('http') ? endpoint : `http://${endpoint}`,
-      region,
-      // Static keys for S3-compatible deployments (MinIO); unset on AWS,
-      // where the SDK default chain supplies the ECS task-role credentials.
-      ...(accessKeyId && secretAccessKey ? { credentials: { accessKeyId, secretAccessKey } } : {}),
-      forcePathStyle: true,
-    })
+    this.s3Client = createS3Client(this.configService)
   }
 
   async onModuleInit() {

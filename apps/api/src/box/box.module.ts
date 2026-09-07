@@ -23,6 +23,7 @@ import { WarmPool } from './entities/warm-pool.entity'
 import { PreviewController } from './controllers/preview.controller'
 import { VolumeController } from './controllers/volume.controller'
 import { VolumeService } from './services/volume.service'
+import { VolumeFilesService } from './services/volume-files.service'
 import { VolumeManager } from './managers/volume.manager'
 import { Volume } from './entities/volume.entity'
 import { VolumeSubscriber } from './subscribers/volume.subscriber'
@@ -68,6 +69,7 @@ import { BoxMigrationJobReceiver } from './services/box-migration-job-receiver.s
     BoxLookupCacheInvalidationService,
     RedisLockProvider,
     VolumeService,
+    VolumeFilesService,
     VolumeManager,
     VolumeSubscriber,
     RunnerSubscriber,
@@ -102,6 +104,7 @@ import { BoxMigrationJobReceiver } from './services/box-migration-job-receiver.s
     RunnerService,
     RedisLockProvider,
     VolumeService,
+    VolumeFilesService,
     VolumeManager,
     BoxRepository,
     RunnerAdapterFactory,

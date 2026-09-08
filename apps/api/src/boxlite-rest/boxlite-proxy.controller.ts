@@ -215,19 +215,28 @@ export class BoxliteProxyController {
     // dead. Whitelist STARTED rather than blacklist STOPPED: a box that's
     // still CREATING/STARTING/ERROR/ARCHIVED/etc. isn't reachable either.
     //
-    // No auto-resume here, even for autoResume boxes: wake-on-CONNECT is
-    // out of scope for POL-214 and tracked separately.
     const box = await this.boxService.findOneByIdOrName(boxId, authContext.organizationId)
-
-    if (box.state !== BoxState.STARTED) {
-      throw new ConflictException(`Box ${boxId} is not running (state: ${box.state})`)
-    }
 
     // POL-205: tunnel URLs expose the box to the public internet. Require the
     // caller to have explicitly opted in by setting public: true on the box.
-    // A private box should be accessed via the authenticated API, not a tunnel.
+    // A private box should be accessed via the authenticated API, not a
+    // tunnel. Checked before the state gate below so a private box is never
+    // woken (ensureReady is a real resume, not a free status read) only to
+    // be rejected here anyway.
     if (!box.public) {
       throw new ConflictException(`Box ${boxId} is not public; set public: true before opening a tunnel`)
+    }
+
+    // POL-352: mirror proxyToRunner's policy — a stopped box that opted into
+    // autoResume gets woken here rather than rejected, since minting the
+    // tunnel URI is the caller's only touchpoint before the CONNECT itself
+    // (which has no box row to check against). ensureReady throws a 408 if
+    // the box never reaches STARTED within its timeout.
+    if (box.state !== BoxState.STARTED) {
+      if (!box.autoResume) {
+        throw new ConflictException(`Box ${boxId} is not running (state: ${box.state})`)
+      }
+      await this.autoResume.ensureReady(box.id, authContext.organization)
     }
 
     const uri = await this.boxService.getNetworkTunnelUrl(boxId, authContext.organizationId, port)

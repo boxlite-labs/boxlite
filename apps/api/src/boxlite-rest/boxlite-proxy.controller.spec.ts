@@ -5,7 +5,7 @@
  */
 
 import { EventEmitter } from 'node:events'
-import { ForbiddenException } from '@nestjs/common'
+import { ForbiddenException, RequestTimeoutException } from '@nestjs/common'
 import { createProxyMiddleware } from 'http-proxy-middleware'
 import { BoxliteProxyController } from './boxlite-proxy.controller'
 
@@ -132,15 +132,33 @@ describe('BoxliteProxyController', () => {
     expect(boxService.getNetworkTunnelUrl).not.toHaveBeenCalled()
   })
 
-  it('rejects a tunnel request for a stopped box with 409, without auto-resuming it', async () => {
-    // Wake-on-CONNECT is explicitly out of scope for POL-214 (tracked
-    // separately) — a stopped box stays stopped and is rejected, even when
-    // box.autoResume is on.
+  it('rejects a stopped, autoResume, private box without waking it', async () => {
+    // The visibility gate must run before the resume: waking a box only to
+    // reject it here for being private wastes a real resume (and briefly
+    // makes a private box's state observable) for a request that was always
+    // going to be denied.
     const { controller, boxService, autoResume } = makeHarness()
     boxService.findOneByIdOrName.mockResolvedValue({
       id: 'box-uuid',
       runnerId: 'runner-1',
       autoResume: true,
+      state: 'stopped',
+      public: false,
+    })
+
+    await expect(controller.proxyNetworkTunnel(activeAuth as never, 'public-box', 3000)).rejects.toMatchObject({
+      status: 409,
+    })
+    expect(autoResume.ensureReady).not.toHaveBeenCalled()
+    expect(boxService.getNetworkTunnelUrl).not.toHaveBeenCalled()
+  })
+
+  it('rejects a tunnel request for a stopped, non-autoResume box with 409', async () => {
+    const { controller, boxService, autoResume } = makeHarness()
+    boxService.findOneByIdOrName.mockResolvedValue({
+      id: 'box-uuid',
+      runnerId: 'runner-1',
+      autoResume: false,
       state: 'stopped',
     })
 
@@ -148,6 +166,44 @@ describe('BoxliteProxyController', () => {
       status: 409,
     })
     expect(autoResume.ensureReady).not.toHaveBeenCalled()
+    expect(boxService.getNetworkTunnelUrl).not.toHaveBeenCalled()
+  })
+
+  it('wakes a stopped autoResume box before minting the tunnel URI (POL-352)', async () => {
+    const { controller, boxService, autoResume } = makeHarness()
+    boxService.findOneByIdOrName.mockResolvedValue({
+      id: 'box-uuid',
+      runnerId: 'runner-1',
+      autoResume: true,
+      state: 'stopped',
+      public: true,
+    })
+
+    const result = await controller.proxyNetworkTunnel(activeAuth as never, 'public-box', 3000)
+
+    expect(autoResume.ensureReady).toHaveBeenCalledWith('box-uuid', activeAuth.organization)
+    expect(boxService.getNetworkTunnelUrl).toHaveBeenCalledWith('public-box', 'org-1', 3000)
+    // Order matters: minting the URI before the box is actually STARTED
+    // would hand out an address that CONNECTs into a still-stopped box.
+    expect(autoResume.ensureReady.mock.invocationCallOrder[0]).toBeLessThan(
+      boxService.getNetworkTunnelUrl.mock.invocationCallOrder[0],
+    )
+    expect(result).toEqual({ uri: 'https://3000-box.proxy.test' })
+  })
+
+  it('propagates the resume timeout instead of minting a tunnel URI', async () => {
+    const { controller, boxService, autoResume } = makeHarness()
+    boxService.findOneByIdOrName.mockResolvedValue({
+      id: 'box-uuid',
+      runnerId: 'runner-1',
+      autoResume: true,
+      state: 'stopped',
+      public: true,
+    })
+    const timeout = new RequestTimeoutException('Timed out waiting to resume box box-uuid')
+    autoResume.ensureReady.mockRejectedValue(timeout)
+
+    await expect(controller.proxyNetworkTunnel(activeAuth as never, 'public-box', 3000)).rejects.toBe(timeout)
     expect(boxService.getNetworkTunnelUrl).not.toHaveBeenCalled()
   })
 

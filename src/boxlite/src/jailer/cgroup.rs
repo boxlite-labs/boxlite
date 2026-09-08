@@ -117,6 +117,18 @@ pub struct CgroupConfig {
     pub pids_max: Option<u64>,
 }
 
+impl CgroupConfig {
+    /// True if any cgroup limit is set. When false, creating a cgroup buys
+    /// nothing — callers should skip cgroup setup entirely.
+    pub fn has_limits(&self) -> bool {
+        self.memory_max.is_some()
+            || self.memory_high.is_some()
+            || self.cpu_weight.is_some()
+            || self.cpu_max.is_some()
+            || self.pids_max.is_some()
+    }
+}
+
 /// Check if cgroup v2 is available and unified hierarchy is used.
 pub fn is_cgroup_v2_available() -> bool {
     // Check if cgroup2 is mounted

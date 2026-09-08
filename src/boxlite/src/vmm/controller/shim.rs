@@ -165,6 +165,24 @@ impl ShimHandler {
         #[allow(unreachable_code)]
         Ok(())
     }
+
+    /// Remove the host cgroup after the shim has stopped.
+    ///
+    /// A detached shim is reaped by init, not by us, so it can briefly remain a
+    /// zombie after `graceful_stop` returns — keeping the cgroup non-empty and
+    /// `rmdir` returning EBUSY. Retry until the kernel clears the membership.
+    /// Non-fatal: at worst an empty cgroup dir lingers.
+    #[cfg(target_os = "linux")]
+    fn remove_host_cgroup(&self) {
+        const MAX_ATTEMPTS: u32 = 20;
+        for _ in 0..MAX_ATTEMPTS {
+            match crate::jailer::cgroup::remove_cgroup(self.box_id.as_str()) {
+                Ok(()) => return,
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
+        tracing::debug!(box_id = %self.box_id, "Host cgroup removal skipped (still busy)");
+    }
 }
 
 impl VmmHandlerTrait for ShimHandler {
@@ -183,6 +201,8 @@ impl VmmHandlerTrait for ShimHandler {
         // qcow2 corruption). Best-effort and idempotent.
         let result = self.graceful_stop();
         crate::jailer::reap_box(&self.box_id);
+        #[cfg(target_os = "linux")]
+        self.remove_host_cgroup();
         result
     }
 

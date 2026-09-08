@@ -407,10 +407,23 @@ pub struct Jailer<S: Sandbox> {
     pub(crate) additional_path_access: Vec<PathAccess>,
     /// Whether the shim runs a network backend and needs its AF_UNIX endpoints.
     pub(crate) network_backend_enabled: bool,
+    /// VM guest memory in MiB, used to derive the host cgroup memory limit.
+    ///
+    /// Read only on Linux — `setup_host_cgroup` and `cgroup_config` are
+    /// `#[cfg(target_os = "linux")]` — so the field is genuinely dead on
+    /// macOS and `-D warnings` would fail the build without this.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) vm_memory_mib: Option<u32>,
 }
 
 impl<S: Sandbox> Jail for Jailer<S> {
     fn prepare(&self) -> BoxliteResult<()> {
+        // Host cgroup limits are independent of process-isolation sandboxing:
+        // creating the cgroup only writes to /sys/fs/cgroup and needs no user
+        // namespace, so it runs even when jailer_enabled is false.
+        #[cfg(target_os = "linux")]
+        self.setup_host_cgroup()?;
+
         if !self.security.jailer_enabled {
             return Ok(());
         }
@@ -505,10 +518,16 @@ impl<S: Sandbox> Jail for Jailer<S> {
             tracing::info!("Jailer disabled, running shim without sandbox isolation");
         }
 
+        // Join the host cgroup before the common hook so all subsequent
+        // resource use is accounted to it. Independent of jailer_enabled,
+        // matching the cgroup creation in prepare().
+        #[cfg(target_os = "linux")]
+        self.add_cgroup_join_hook(&mut cmd);
+
         // Pre-exec hook: PID file, FD preservation, FD cleanup, rlimits. The
         // PID file goes first on purpose — see `pre_exec`'s module docs.
-        // Sandbox-specific pre_exec hooks (cgroup, Landlock) are already added
-        // by sandbox.apply() above — Command supports multiple pre_exec closures.
+        // Sandbox-specific pre_exec hooks (Landlock) are already added by
+        // sandbox.apply() above — Command supports multiple pre_exec closures.
         let resource_limits = self.security.resource_limits.clone();
         let pid_writer = self.pid_file_writer();
         pre_exec::add_pre_exec_hook(
@@ -620,6 +639,100 @@ impl<S: Sandbox> Jailer<S> {
     fn pid_file_writer(&self) -> Option<crate::util::PidFileWriter> {
         crate::util::PidFileWriter::at(&self.layout.pid_file_path()).ok()
     }
+
+    /// Build the host cgroup config: explicit `resource_limits` plus default
+    /// DoS limits (pids.max, memory.max derived from VM memory). These defaults
+    /// populate only the cgroup — never the rlimit pre_exec hook — so they
+    /// can't trigger RLIMIT_AS/NPROC/CPU, which would break or kill the VM.
+    #[cfg(target_os = "linux")]
+    fn cgroup_config(&self) -> cgroup::CgroupConfig {
+        use crate::runtime::constants::vm_defaults::DEFAULT_MEMORY_MIB;
+
+        /// Default host process cap. Baseline box uses ~22 host tasks (libkrun
+        /// vCPUs + gvproxy + tokio); 1024 leaves wide headroom while still
+        /// catching a runaway thread/fork leak in the VMM stack.
+        const DEFAULT_HOST_PIDS_MAX: u64 = 1024;
+
+        let limits = &self.security.resource_limits;
+        let mut config = cgroup::CgroupConfig::from(limits);
+
+        // memory.max: explicit override wins; otherwise 2× VM RAM + 512 MiB.
+        // Guest RAM is hard-capped at VM size by libkrun, so this only fires on
+        // VMM-side leaks — a deliberately loose cap that never kills a healthy box.
+        if config.memory_max.is_none() {
+            let vm_mib = self.vm_memory_mib.unwrap_or(DEFAULT_MEMORY_MIB) as u64;
+            config.memory_max = Some(vm_mib * 2 * 1024 * 1024 + 512 * 1024 * 1024);
+        }
+        // pids.max: explicit override wins; otherwise the default cap.
+        if config.pids_max.is_none() {
+            config.pids_max = Some(DEFAULT_HOST_PIDS_MAX);
+        }
+        config
+    }
+
+    /// Create the host cgroup and write resource limits. Failure is non-fatal:
+    /// a box that can't be cgroup-limited (e.g. no systemd user delegation) is
+    /// still better than no box (matches prior bwrap behavior).
+    #[cfg(target_os = "linux")]
+    /// Create the box's host cgroup and write its limits.
+    ///
+    /// Fails the box when the cgroup cannot be set up. `THREAT_MODEL.md` lists
+    /// resource fairness ("one guest cannot starve others", enforced by
+    /// cgroups and rlimits) under *Guaranteed* properties, not best-effort,
+    /// and a guaranteed property must not degrade silently. This mirrors the
+    /// bwrap user-namespace preflight in `BwrapSandbox::setup`, which also
+    /// fails closed and names its escape hatch in the error.
+    ///
+    /// `SecurityOptions::allow_unlimited_host_resources` is that escape hatch,
+    /// for hosts where the limits genuinely cannot be had — a container with
+    /// no systemd, a CI image with no `busctl`. It downgrades the refusal to a
+    /// loud log rather than removing it.
+    fn setup_host_cgroup(&self) -> BoxliteResult<()> {
+        let config = self.cgroup_config();
+        if !config.has_limits() {
+            return Ok(());
+        }
+        match cgroup::setup_cgroup(&self.box_id, &config) {
+            Ok(path) => {
+                tracing::info!(box_id = %self.box_id, path = %path.display(), "Host cgroup created");
+                Ok(())
+            }
+            Err(e) if self.security.allow_unlimited_host_resources => {
+                // Opted in, so the box starts — but this is the state an
+                // operator must be able to find later, hence error! not warn!.
+                tracing::error!(box_id = %self.box_id, error = %e,
+                    "Host cgroup setup failed; starting WITHOUT per-box limits because \
+                     allow_unlimited_host_resources is set");
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!(box_id = %self.box_id, error = %e,
+                    "Host cgroup setup failed — refusing to start the box unconfined. \
+                     Fix the host cgroup delegation, or set \
+                     SecurityOptions::allow_unlimited_host_resources (development only).");
+                Err(e.into())
+            }
+        }
+    }
+
+    /// Add the async-signal-safe cgroup-join hook to the command. No-op when
+    /// no limit is configured (no cgroup was created in prepare()).
+    #[cfg(target_os = "linux")]
+    fn add_cgroup_join_hook(&self, cmd: &mut Command) {
+        if !self.cgroup_config().has_limits() {
+            return;
+        }
+        if let Some(cgroup_procs) = cgroup::build_cgroup_procs_path(&self.box_id) {
+            use std::os::unix::process::CommandExt;
+            // SAFETY: add_self_to_cgroup_raw uses only async-signal-safe syscalls.
+            unsafe {
+                cmd.pre_exec(move || {
+                    let _ = cgroup::add_self_to_cgroup_raw(&cgroup_procs);
+                    Ok(())
+                });
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -690,6 +803,73 @@ mod tests {
         assert!(!parent.writable, "per-user parent must be read-only");
 
         sockets.remove();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn test_jailer(
+        vm_memory_mib: Option<u32>,
+        security: SecurityOptions,
+    ) -> Jailer<PlatformSandbox> {
+        let dir = tempdir().unwrap();
+        crate::jailer::JailerBuilder::new()
+            .with_box_id("cgroup-test")
+            .with_layout(test_layout(dir.path().to_path_buf()))
+            .with_security(security)
+            .with_vm_memory_mib(vm_memory_mib)
+            .build()
+            .unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_cgroup_config_defaults_scale_with_vm_memory() {
+        // No explicit limits: defaults kick in. memory.max = 2× VM RAM + 512 MiB.
+        let jail = test_jailer(Some(256), SecurityOptions::default());
+        let config = jail.cgroup_config();
+
+        assert_eq!(config.pids_max, Some(1024), "default host pids cap");
+        assert_eq!(
+            config.memory_max,
+            Some(256 * 2 * 1024 * 1024 + 512 * 1024 * 1024),
+            "memory.max derived from 256 MiB VM"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_cgroup_config_defaults_use_vm_default_when_unset() {
+        // No VM memory configured → falls back to DEFAULT_MEMORY_MIB (2048).
+        let jail = test_jailer(None, SecurityOptions::default());
+        let config = jail.cgroup_config();
+
+        assert_eq!(
+            config.memory_max,
+            Some(2048 * 2 * 1024 * 1024 + 512 * 1024 * 1024),
+            "memory.max derived from default 2048 MiB VM"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_cgroup_config_explicit_limits_override_defaults() {
+        // Explicit resource_limits win over the derived defaults.
+        let security = SecurityOptions {
+            resource_limits: crate::runtime::advanced_options::ResourceLimits {
+                max_processes: Some(50),
+                max_memory: Some(100 * 1024 * 1024),
+                ..Default::default()
+            },
+            ..SecurityOptions::default()
+        };
+        let jail = test_jailer(Some(256), security);
+        let config = jail.cgroup_config();
+
+        assert_eq!(config.pids_max, Some(50), "explicit pids override");
+        assert_eq!(
+            config.memory_max,
+            Some(100 * 1024 * 1024),
+            "explicit memory override"
+        );
     }
 
     #[test]

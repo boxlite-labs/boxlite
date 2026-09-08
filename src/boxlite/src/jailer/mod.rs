@@ -321,14 +321,7 @@ fn build_path_access(layout: &BoxFilesystemLayout, volumes: &[VolumeSpec]) -> Ve
     // The in-shim network backend may validate upstream TLS certificates
     // (for example secret-substitution MITM forwarding). Keep host trust
     // stores readable inside the sandbox without granting broader /etc access.
-    for path in system_ca_paths() {
-        if path.exists() {
-            paths.push(PathAccess {
-                path,
-                writable: false,
-            });
-        }
-    }
+    paths.extend(system_ca_path_access(system_ca_paths()));
 
     // User volumes. Directories are shared directly, so grant the VMM access.
     // Single files are staged under shared_dir (granted above), so they need no
@@ -361,6 +354,17 @@ fn system_ca_paths() -> [PathBuf; 7] {
         PathBuf::from("/etc/pki/tls/certs/ca-bundle.crt"),
         PathBuf::from("/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"),
     ]
+}
+
+fn system_ca_path_access(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathAccess> {
+    paths
+        .into_iter()
+        .filter(|path| path.exists() && !path.is_symlink())
+        .map(|path| PathAccess {
+            path,
+            writable: false,
+        })
+        .collect()
 }
 
 /// Jailer provides process isolation for boxlite-shim.
@@ -645,7 +649,7 @@ mod tests {
 
         let existing_ca_paths: Vec<_> = system_ca_paths()
             .into_iter()
-            .filter(|p| p.exists())
+            .filter(|p| p.exists() && !p.is_symlink())
             .collect();
 
         assert_eq!(
@@ -842,7 +846,7 @@ mod tests {
         let layout = test_layout(dir.path().to_path_buf());
         let existing_ca_paths: Vec<_> = system_ca_paths()
             .into_iter()
-            .filter(|p| p.exists())
+            .filter(|p| p.exists() && !p.is_symlink())
             .collect();
 
         if existing_ca_paths.is_empty() {
@@ -862,6 +866,30 @@ mod tests {
                 ca_path.display()
             );
         }
+    }
+
+    #[test]
+    fn test_system_ca_path_access_skips_symlinked_ca_files() {
+        let dir = tempdir().unwrap();
+        let regular = dir.path().join("ca-certificates.crt");
+        let target = dir.path().join("tls-ca-bundle.pem");
+        let symlink = dir.path().join("ca-bundle.crt");
+        std::fs::write(&regular, "regular CA").unwrap();
+        std::fs::write(&target, "symlink target CA").unwrap();
+        std::os::unix::fs::symlink(&target, &symlink).unwrap();
+
+        let paths = system_ca_path_access([regular.clone(), symlink.clone()]);
+
+        assert!(
+            paths
+                .iter()
+                .any(|entry| entry.path == regular && !entry.writable),
+            "regular CA files must remain readable"
+        );
+        assert!(
+            paths.iter().all(|entry| entry.path != symlink),
+            "symlinked CA files must not become bwrap bind destinations"
+        );
     }
 
     #[test]

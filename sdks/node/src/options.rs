@@ -583,6 +583,10 @@ impl TryFrom<JsBoxOptions> for BoxOptions {
             // `tty`; Node has no such caller yet.
             tty: false,
             secrets,
+            // Options the core adds but this SDK does not surface yet default
+            // here, so a new core field is not a build break (Python does the
+            // same). Currently: net_bandwidth, a local-runtime bandwidth cap.
+            ..Default::default()
         })
     }
 }

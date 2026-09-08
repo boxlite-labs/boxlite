@@ -341,6 +341,7 @@ impl NetworkBackend for GvproxyBackend {
             secrets: cfg.secrets.clone(),
             ca_cert_pem: None,
             ca_key_pem: None,
+            net_bandwidth: cfg.net_bandwidth,
         };
 
         // Mint the ephemeral MITM CA when secrets are configured. The cert+key
@@ -593,6 +594,7 @@ mod tests {
             allow_net: vec!["example.com".to_string()],
             secrets: Vec::new(),
             ca_dir: PathBuf::from("/tmp/bl-box/does-not-exist"),
+            net_bandwidth: Default::default(),
         };
         let spec = GvproxyBackend::from_config(&config).spec();
         assert_eq!(spec.socket_path, config.socket_path);
@@ -669,6 +671,7 @@ mod tests {
             allow_net: Vec::new(),
             secrets: Vec::new(),
             ca_dir: dir.path().to_path_buf(),
+            net_bandwidth: Default::default(),
         };
         (
             GvproxyBackend::from_config(&config),
@@ -768,6 +771,7 @@ mod tests {
             allow_net: Vec::new(),
             secrets: vec![test_secret()],
             ca_dir: ca_dir.path().to_path_buf(),
+            net_bandwidth: Default::default(),
         };
         let spec = GvproxyBackend::from_config(&config).spec();
         assert!(
@@ -799,6 +803,7 @@ mod tests {
             allow_net: Vec::new(),
             secrets: vec![test_secret()],
             ca_dir,
+            net_bandwidth: Default::default(),
         };
 
         let spec = GvproxyBackend::from_config(&config).spec();
@@ -1411,6 +1416,7 @@ mod tests {
             allow_net: Vec::new(),
             secrets: Vec::new(),
             ca_dir: dir.path().to_path_buf(),
+            net_bandwidth: Default::default(),
         };
         let target: SocketAddr = "192.168.127.2:8080".parse().unwrap();
         let mut tunnel = GvproxyBackend::from_config(&config)
@@ -1460,6 +1466,7 @@ mod tests {
             allow_net: Vec::new(),
             secrets: Vec::new(),
             ca_dir: dir.path().to_path_buf(),
+            net_bandwidth: Default::default(),
         };
         let target: SocketAddr = "192.168.127.2:8080".parse().unwrap();
         let err = GvproxyBackend::from_config(&config)
@@ -1488,14 +1495,18 @@ mod tests {
 
         // Bind a real gvproxy instance; it derives + serves its control socket
         // (`gvproxy-ctl.sock`) as a sibling of net.sock.
-        let _instance = GvproxyInstance::new(net_sock.clone(), Vec::new(), Vec::new(), None, None)
-            .expect("create gvproxy instance");
+        let _instance = GvproxyInstance::new(
+            crate::net::gvproxy::config::GvproxyConfig::new(net_sock.clone())
+                .with_control_socket_path(super::super::control_socket_path(&net_sock)),
+        )
+        .expect("create gvproxy instance");
 
         let config = NetworkBackendConfig {
             socket_path: net_sock.clone(),
             allow_net: Vec::new(),
             secrets: Vec::new(),
             ca_dir: dir.path().to_path_buf(),
+            net_bandwidth: Default::default(),
         };
         let ctl = GvproxyBackend::from_config(&config);
 
@@ -1545,14 +1556,18 @@ mod tests {
             .tempdir_in("/tmp")
             .unwrap();
         let net_sock = dir.path().join("net.sock");
-        let _instance = GvproxyInstance::new(net_sock.clone(), Vec::new(), Vec::new(), None, None)
-            .expect("create gvproxy instance");
+        let _instance = GvproxyInstance::new(
+            crate::net::gvproxy::config::GvproxyConfig::new(net_sock.clone())
+                .with_control_socket_path(super::super::control_socket_path(&net_sock)),
+        )
+        .expect("create gvproxy instance");
 
         let config = NetworkBackendConfig {
             socket_path: net_sock.clone(),
             allow_net: Vec::new(),
             secrets: Vec::new(),
             ca_dir: dir.path().to_path_buf(),
+            net_bandwidth: Default::default(),
         };
         let backend = GvproxyBackend::from_config(&config);
 

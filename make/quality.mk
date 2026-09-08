@@ -190,13 +190,13 @@ lint\:c:
 fmt\:go:
 	@echo "🔧 Formatting Go code..."
 	@cd sdks/go && go fmt ./...
-	@cd src/deps/libgvproxy-sys/gvproxy-bridge && gofmt -w main.go
+	@cd src/deps/libgvproxy-sys/gvproxy-bridge && gofmt -w .
 
 fmt\:check\:go:
 	@echo "🔍 Checking Go formatting..."
 	@cd sdks/go && test -z "$$(gofmt -l .)" || (gofmt -l . && exit 1)
 	@cd src/deps/libgvproxy-sys/gvproxy-bridge && \
-		test -z "$$(gofmt -l main.go)" || (gofmt -l main.go && exit 1)
+		test -z "$$(gofmt -l .)" || (gofmt -l . && exit 1)
 
 lint\:go:
 	@echo "🔍 Linting Go code (vet)..."

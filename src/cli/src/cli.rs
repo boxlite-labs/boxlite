@@ -8,7 +8,8 @@ use boxlite::experimental::{
     EXPERIMENTAL_FEATURES_ENV, ExperimentalFeature, ExperimentalFeatures, RuntimeBuilder,
 };
 use boxlite::runtime::options::{
-    InboundNetworkConfig, NetworkMode, OutboundNetworkConfig, PortProtocol, PortSpec, VolumeSpec,
+    InboundNetworkConfig, NetBandwidth, NetworkMode, OutboundNetworkConfig, PortProtocol, PortSpec,
+    VolumeSpec,
 };
 use boxlite::{
     BoxCommand, BoxOptions, BoxliteOptions, BoxliteRestOptions, BoxliteRuntime,
@@ -1164,10 +1165,33 @@ pub struct NetworkFlags {
     /// the box).
     #[arg(long = "inbound", value_name = "MODE")]
     pub inbound: Option<String>,
+
+    /// Cap what the box sends, in kilobits/sec (guest to internet). Unset or 0
+    /// leaves it uncapped. Local runtime only. Verified on Linux; on macOS the
+    /// guest link is a datagram socket whose sender behaviour under
+    /// backpressure is unverified, so this may drop frames instead of slowing
+    /// the guest down.
+    #[arg(long = "net-tx-kbps", value_name = "KBPS")]
+    pub net_tx_kbps: Option<u64>,
+
+    /// Cap what reaches the box, in kilobits/sec (internet to guest). Unset or
+    /// 0 leaves it uncapped. Local runtime only. Paced the same way on Linux
+    /// and macOS.
+    #[arg(long = "net-rx-kbps", value_name = "KBPS")]
+    pub net_rx_kbps: Option<u64>,
 }
 
 impl NetworkFlags {
     pub fn apply_to(&self, opts: &mut BoxOptions) -> anyhow::Result<()> {
+        // Bandwidth is independent of mode and allowlist, so it is assigned
+        // before the early return below. Folding it into that condition instead
+        // would mean a lone --net-tx-kbps is silently dropped the day someone
+        // adds another flag and forgets to extend the guard.
+        opts.net_bandwidth = NetBandwidth {
+            tx_kbps: self.net_tx_kbps,
+            rx_kbps: self.net_rx_kbps,
+        };
+
         // Leave BoxOptions::default() (outbound Enabled/full access, inbound
         // Enabled/public) untouched when no flag is given, so a bare `run`
         // behaves as before.
@@ -2237,7 +2261,42 @@ mod tests {
             network: network.map(str::to_string),
             allow_net: allow_net.iter().map(|s| s.to_string()).collect(),
             inbound: None,
+            net_tx_kbps: None,
+            net_rx_kbps: None,
         }
+    }
+
+    /// apply_to returns early when no mode or allowlist flag is set. A bandwidth
+    /// cap must survive that path, or `--net-tx-kbps` on its own is dropped with
+    /// no error at all.
+    #[test]
+    fn bandwidth_flags_apply_without_any_other_network_flag() {
+        let mut opts = BoxOptions::default();
+        let mut flags = network_flags(None, &[]);
+        flags.net_tx_kbps = Some(10_000);
+
+        flags.apply_to(&mut opts).expect("apply_to");
+
+        assert_eq!(opts.net_bandwidth.tx_kbps, Some(10_000));
+        assert_eq!(opts.net_bandwidth.rx_kbps, None);
+        // The early return still protects the untouched network defaults.
+        assert!(matches!(
+            opts.network,
+            boxlite::NetworkSpec::Enabled { ref allow_net } if allow_net.is_empty()
+        ));
+    }
+
+    #[test]
+    fn bandwidth_flags_apply_alongside_an_allowlist() {
+        let mut opts = BoxOptions::default();
+        let mut flags = network_flags(None, &["example.com"]);
+        flags.net_tx_kbps = Some(1_000);
+        flags.net_rx_kbps = Some(2_000);
+
+        flags.apply_to(&mut opts).expect("apply_to");
+
+        assert_eq!(opts.net_bandwidth.tx_kbps, Some(1_000));
+        assert_eq!(opts.net_bandwidth.rx_kbps, Some(2_000));
     }
 
     #[test]

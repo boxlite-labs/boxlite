@@ -10,6 +10,7 @@ fn test_config(socket_path: PathBuf) -> NetworkBackendConfig {
         allow_net: Vec::new(),
         secrets: Vec::new(),
         ca_dir: PathBuf::from("/tmp/test-ca"),
+        net_bandwidth: Default::default(),
     }
 }
 
@@ -24,6 +25,7 @@ fn spec_carries_unique_socket_path_across_serde() {
         secrets: Vec::new(),
         ca_cert_pem: None,
         ca_key_pem: None,
+        net_bandwidth: Default::default(),
     };
 
     // socket_path survives serde — this is how it crosses to the shim.

@@ -48,35 +48,20 @@ pub struct GvproxyInstance {
 }
 
 impl GvproxyInstance {
-    /// Create a new gvproxy instance with the given socket path.
+    /// Create a gvproxy instance from a fully-built config.
+    ///
+    /// Takes the assembled config rather than the individual pieces so the
+    /// signature stops growing as gvproxy gains settings; [`Self::from_config`]
+    /// is what maps a [`NetworkBackendSpec`] onto it.
     ///
     /// This automatically initializes the logging bridge on first use.
     ///
-    /// # Arguments
-    ///
-    /// * `socket_path` - Caller-provided Unix socket path (must be unique per box)
-    pub(crate) fn new(
-        socket_path: PathBuf,
-        allow_net: Vec<String>,
-        secrets: Vec<super::config::GvproxySecretConfig>,
-        ca_cert_pem: Option<&str>,
-        ca_key_pem: Option<&str>,
-    ) -> BoxliteResult<Self> {
+    /// [`NetworkBackendSpec`]: super::super::NetworkBackendSpec
+    pub(crate) fn new(config: super::config::GvproxyConfig) -> BoxliteResult<Self> {
         // Initialize logging callback (one-time setup)
         logging::init_logging();
 
-        // Derive gvproxy's control socket as a sibling of the data socket, so the
-        // path is never plumbed through neutral config/layout/socket types.
-        let control_socket_path = super::control_socket_path(&socket_path);
-        let mut config = super::config::GvproxyConfig::new(socket_path.clone())
-            .with_control_socket_path(control_socket_path)
-            .with_allow_net(allow_net)
-            .with_secrets(secrets);
-
-        if let (Some(cert), Some(key)) = (ca_cert_pem, ca_key_pem) {
-            config = config.with_ca(cert.to_string(), key.to_string());
-        }
-
+        let socket_path = config.socket_path.clone();
         let id = ffi::create_instance(&config)?;
 
         tracing::info!(id, ?socket_path, "Created GvproxyInstance");
@@ -102,13 +87,21 @@ impl GvproxyInstance {
         spec: &super::super::NetworkBackendSpec,
     ) -> BoxliteResult<(Self, super::super::NetworkBackendEndpoint)> {
         let secrets = spec.secrets.iter().map(Into::into).collect();
-        let instance = Self::new(
-            spec.socket_path.clone(),
-            spec.allow_net.clone(),
-            secrets,
-            spec.ca_cert_pem.as_deref(),
-            spec.ca_key_pem.as_deref(),
-        )?;
+
+        // Derive gvproxy's control socket as a sibling of the data socket, so the
+        // path is never plumbed through neutral config/layout/socket types.
+        let control_socket_path = super::control_socket_path(&spec.socket_path);
+        let mut config = crate::net::gvproxy::config::GvproxyConfig::new(spec.socket_path.clone())
+            .with_control_socket_path(control_socket_path)
+            .with_allow_net(spec.allow_net.clone())
+            .with_secrets(secrets)
+            .with_rate_limit(spec.net_bandwidth);
+
+        if let (Some(cert), Some(key)) = (spec.ca_cert_pem.as_deref(), spec.ca_key_pem.as_deref()) {
+            config = config.with_ca(cert.to_string(), key.to_string());
+        }
+
+        let instance = Self::new(config)?;
 
         let connection_type = if cfg!(target_os = "macos") {
             super::super::ConnectionType::UnixDgram
@@ -218,8 +211,10 @@ mod tests {
     #[ignore] // Requires libgvproxy.dylib to be available
     fn test_gvproxy_create_destroy() {
         let socket_path = PathBuf::from("/tmp/test-gvproxy-instance.sock");
-        let instance =
-            GvproxyInstance::new(socket_path.clone(), Vec::new(), Vec::new(), None, None).unwrap();
+        let instance = GvproxyInstance::new(crate::net::gvproxy::config::GvproxyConfig::new(
+            socket_path.clone(),
+        ))
+        .unwrap();
 
         // Socket path matches what we provided
         assert_eq!(instance.socket_path(), socket_path);
@@ -233,10 +228,14 @@ mod tests {
         let path1 = PathBuf::from("/tmp/test-gvproxy-1.sock");
         let path2 = PathBuf::from("/tmp/test-gvproxy-2.sock");
 
-        let instance1 =
-            GvproxyInstance::new(path1.clone(), Vec::new(), Vec::new(), None, None).unwrap();
-        let instance2 =
-            GvproxyInstance::new(path2.clone(), Vec::new(), Vec::new(), None, None).unwrap();
+        let instance1 = GvproxyInstance::new(crate::net::gvproxy::config::GvproxyConfig::new(
+            path1.clone(),
+        ))
+        .unwrap();
+        let instance2 = GvproxyInstance::new(crate::net::gvproxy::config::GvproxyConfig::new(
+            path2.clone(),
+        ))
+        .unwrap();
 
         assert_ne!(instance1.id(), instance2.id());
         assert_ne!(instance1.socket_path(), instance2.socket_path());

@@ -33,7 +33,7 @@ func mitmAndForward(guestConn net.Conn, hostname string, destAddr string, ca *Bo
 
 	upstreamTransport := &http.Transport{
 		ForceAttemptHTTP2: true,
-		TLSClientConfig:  resolveUpstreamTLS(hostname, upstreamTLSConfig...),
+		TLSClientConfig:   resolveUpstreamTLS(hostname, upstreamTLSConfig...),
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			return (&net.Dialer{Timeout: upstreamDialTimeout}).DialContext(ctx, network, destAddr)
 		},
@@ -134,4 +134,3 @@ func (t *secretTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	return t.inner.RoundTrip(req)
 }
-

@@ -200,6 +200,10 @@ impl CreateBoxRequest {
             disk_size_gb: options.disk_size_gb,
             working_dir: options.working_dir.clone(),
             env,
+            // net_bandwidth is intentionally NOT carried on the wire. Shaping is
+            // done by the local gvproxy bridge; a remote server enforces its own
+            // network policy, so there is no field for a client to set. The
+            // matching refusal lives in BoxOptions::sanitize_remote.
             network: Some(CreateBoxNetworkSpec::from_options(
                 &options.network,
                 &options.inbound_network,
@@ -1012,6 +1016,28 @@ mod tests {
         assert!(
             !json.contains("security"),
             "wire form must NOT carry any security knob; got: {json}"
+        );
+    }
+
+    /// Bandwidth shaping is done by the local gvproxy bridge, so the wire form
+    /// has no field for it and a local value must not leak into the request.
+    #[test]
+    fn test_create_box_request_never_carries_net_bandwidth() {
+        use crate::runtime::options::{BoxOptions, NetBandwidth, RootfsSpec};
+
+        let opts = BoxOptions {
+            rootfs: RootfsSpec::Image("alpine:latest".into()),
+            net_bandwidth: NetBandwidth {
+                tx_kbps: Some(10_000),
+                rx_kbps: Some(20_000),
+            },
+            ..Default::default()
+        };
+        let req = CreateBoxRequest::from_options(&opts, None);
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            !json.contains("bandwidth") && !json.contains("kbps"),
+            "wire form must NOT carry a bandwidth cap; got: {json}"
         );
     }
 

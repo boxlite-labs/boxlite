@@ -343,6 +343,15 @@ pub struct BoxOptions {
     /// Remote runtimes reject port mappings; use a box network tunnel for
     /// portable local/remote access to a guest service.
     pub ports: Vec<PortSpec>,
+    /// Bandwidth cap for the box's network interface.
+    ///
+    /// A sibling of `network` rather than a field inside it, for the same
+    /// reason `ports` is: the object-shaped `NetworkConfig` types are the REST
+    /// wire form and deny unknown fields, while this is local-only. It is also
+    /// bidirectional, so it belongs to neither the outbound nor the inbound
+    /// half.
+    #[serde(default)]
+    pub net_bandwidth: NetBandwidth,
     /// Automatically remove the box when stopped.
     ///
     /// Deprecated: use [`BoxOptions::auto_delete`]. When `auto_delete` is set,
@@ -534,6 +543,7 @@ impl Default for BoxOptions {
             rootfs: RootfsSpec::default(),
             volumes: Vec::new(),
             network: NetworkSpec::default(),
+            net_bandwidth: NetBandwidth::default(),
             inbound_network: NetworkSpec::default(),
             ports: Vec::new(),
             auto_remove: default_auto_remove(),
@@ -599,6 +609,15 @@ impl BoxOptions {
         if matches!(self.network, NetworkSpec::Disabled) && !self.ports.is_empty() {
             return Err(boxlite_shared::errors::BoxliteError::InvalidArgument(
                 "ports require network.outbound.mode=\"enabled\"".to_string(),
+            ));
+        }
+
+        self.net_bandwidth.validate()?;
+        if matches!(self.network, NetworkSpec::Disabled) && !self.net_bandwidth.is_unlimited() {
+            return Err(boxlite_shared::errors::BoxliteError::InvalidArgument(
+                "net_bandwidth requires network.outbound.mode=\"enabled\" — there is \
+                 no interface to shape when the network is disabled"
+                    .to_string(),
             ));
         }
 
@@ -914,6 +933,62 @@ impl NetworkConfig {
             outbound: outbound.into(),
             inbound: inbound.into(),
         }
+    }
+}
+
+/// Bandwidth cap for a box's network interface, in kilobits per second.
+///
+/// Directions are named from the box's point of view, matching Firecracker's
+/// net device: `tx` is what the box sends, `rx` is what reaches it. Which side
+/// opened the connection does not matter — an inbound port forward's traffic is
+/// charged the same as an outbound request's.
+///
+/// Shaping happens below IP in the gvproxy bridge, so one budget per direction
+/// covers TCP, UDP, ICMP and ARP together; there is no per-protocol split.
+///
+/// `None` or `0` in a direction leaves that direction unlimited, the same
+/// convention Firecracker, Kata and Cloud Hypervisor use. Each direction must
+/// fit within the bridge's token bucket limit; larger values are rejected.
+/// Local runtime only:
+/// a remote server owns its own network policy, so the REST wire types carry no
+/// field for this and `sanitize_remote` rejects it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct NetBandwidth {
+    /// Guest to internet, kilobits per second.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_kbps: Option<u64>,
+    /// Internet to guest, kilobits per second.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rx_kbps: Option<u64>,
+}
+
+impl NetBandwidth {
+    // The bridge caps bucket size at (1<<62)/1000 bytes. With a 100ms refill,
+    // size = floor(kbps * 125 / 10); this is the largest kbps that fits.
+    pub(crate) const MAX_KBPS: u64 = 368_934_881_474_191;
+
+    fn validate(&self) -> BoxliteResult<()> {
+        for (field, kbps) in [("tx_kbps", self.tx_kbps), ("rx_kbps", self.rx_kbps)] {
+            if let Some(kbps) = kbps
+                && kbps > Self::MAX_KBPS
+            {
+                return Err(boxlite_shared::errors::BoxliteError::InvalidArgument(
+                    format!(
+                        "net_bandwidth.{field} must be at most {} kbps (got {kbps})",
+                        Self::MAX_KBPS
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// True when neither direction is capped. A `Some(0)` counts as uncapped,
+    /// so callers that pass a flag through unconditionally do not have to
+    /// special-case zero.
+    pub fn is_unlimited(&self) -> bool {
+        matches!(self.tx_kbps, None | Some(0)) && matches!(self.rx_kbps, None | Some(0))
     }
 }
 
@@ -1256,6 +1331,108 @@ mod tests {
             !advanced.as_object().unwrap().contains_key("capabilities"),
             "unspecified capabilities must omit the key, not serialize null: {advanced}"
         );
+    }
+
+    /// There is no interface to shape when the network is off, so the pair must
+    /// be rejected rather than silently ignored — the same rule `ports` follows.
+    #[test]
+    fn box_options_sanitize_rejects_bandwidth_without_a_network() {
+        let mut opts = BoxOptions {
+            network: NetworkSpec::Disabled,
+            net_bandwidth: NetBandwidth {
+                tx_kbps: Some(10_000),
+                rx_kbps: None,
+            },
+            ..Default::default()
+        };
+
+        let error = opts
+            .sanitize()
+            .expect_err("a bandwidth cap with the network disabled must be rejected");
+        assert!(
+            error.to_string().contains("net_bandwidth"),
+            "error should name the offending option, got: {error}"
+        );
+    }
+
+    /// A zero is the documented spelling of "no cap", so it must not collide
+    /// with `network: Disabled` the way a real cap does.
+    #[test]
+    fn box_options_sanitize_allows_zero_bandwidth_without_a_network() {
+        let mut opts = BoxOptions {
+            network: NetworkSpec::Disabled,
+            net_bandwidth: NetBandwidth {
+                tx_kbps: Some(0),
+                rx_kbps: Some(0),
+            },
+            ..Default::default()
+        };
+
+        opts.sanitize()
+            .expect("a zero cap is not a cap and must not conflict with a disabled network");
+    }
+
+    /// The common case still has to pass: a cap alongside an enabled network.
+    #[test]
+    fn box_options_sanitize_accepts_bandwidth_with_a_network() {
+        let mut opts = BoxOptions {
+            net_bandwidth: NetBandwidth {
+                tx_kbps: Some(10_000),
+                rx_kbps: Some(20_000),
+            },
+            ..Default::default()
+        };
+
+        opts.sanitize()
+            .expect("a cap with the default enabled network must be accepted");
+    }
+
+    #[test]
+    fn box_options_sanitize_accepts_bandwidth_up_to_bridge_maximum() {
+        for kbps in [None, Some(0), Some(NetBandwidth::MAX_KBPS)] {
+            let mut opts = BoxOptions {
+                net_bandwidth: NetBandwidth {
+                    tx_kbps: kbps,
+                    rx_kbps: kbps,
+                },
+                ..Default::default()
+            };
+
+            opts.sanitize_common().unwrap();
+            opts.sanitize_persisted().unwrap();
+            opts.sanitize().unwrap();
+        }
+    }
+
+    #[test]
+    fn box_options_sanitize_rejects_bandwidth_above_bridge_maximum() {
+        for field in ["tx_kbps", "rx_kbps"] {
+            for kbps in [NetBandwidth::MAX_KBPS + 1, u64::MAX] {
+                let mut opts = BoxOptions {
+                    net_bandwidth: NetBandwidth {
+                        tx_kbps: (field == "tx_kbps").then_some(kbps),
+                        rx_kbps: (field == "rx_kbps").then_some(kbps),
+                    },
+                    ..Default::default()
+                };
+
+                for result in [
+                    opts.sanitize_common(),
+                    opts.sanitize_persisted(),
+                    opts.sanitize(),
+                ] {
+                    let error = result.expect_err("oversized bandwidth must fail before startup");
+                    assert!(matches!(
+                        error,
+                        boxlite_shared::errors::BoxliteError::InvalidArgument(_)
+                    ));
+                    let message = error.to_string();
+                    assert!(message.contains(&format!("net_bandwidth.{field}")));
+                    assert!(message.contains(&kbps.to_string()));
+                    assert!(message.contains(&NetBandwidth::MAX_KBPS.to_string()));
+                }
+            }
+        }
     }
 
     #[test]

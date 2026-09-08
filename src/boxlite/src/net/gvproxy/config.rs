@@ -97,6 +97,64 @@ pub struct GvproxyConfig {
     /// PEM-encoded MITM CA private key (PKCS8 format, consumed by Go).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca_key_pem: Option<String>,
+
+    /// Per-direction bandwidth cap for the guest link. Absent means unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<GvproxyRateLimit>,
+}
+
+/// Token buckets handed to the Go bridge, one per direction. Field names match
+/// `RateLimitConfig` in gvproxy-bridge/shaper.go; the two must stay in sync.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GvproxyRateLimit {
+    /// Internet to guest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rx: Option<GvproxyTokenBucket>,
+    /// Guest to internet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx: Option<GvproxyTokenBucket>,
+}
+
+/// Firecracker's bucket shape: a capacity in bytes and the time to refill it.
+/// Sustained rate is `size * 1000 / refill_time_ms` bytes per second.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GvproxyTokenBucket {
+    pub size: u64,
+    pub refill_time_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub one_time_burst: Option<u64>,
+}
+
+/// Refill period for a derived bucket. Fixed at 100ms: short enough to keep the
+/// burst small, long enough that the shaper is not waking on every frame.
+const RATE_LIMIT_REFILL_MS: u64 = 100;
+
+impl From<crate::runtime::options::NetBandwidth> for GvproxyRateLimit {
+    fn from(bw: crate::runtime::options::NetBandwidth) -> Self {
+        Self {
+            rx: bucket_from_kbps(bw.rx_kbps),
+            tx: bucket_from_kbps(bw.tx_kbps),
+        }
+    }
+}
+
+/// Kilobits per second to a token bucket. `None` and `0` both mean unlimited,
+/// so this is the one place the user-facing unit is converted.
+///
+/// `size` is not floored here even though the bridge floors bucket *capacity* at
+/// one maximum frame. The bridge derives the sustained rate from this exact
+/// (size, refill_time_ms) pair and keeps the capacity floor in a separate field,
+/// so raising `size` to that floor would not enlarge the burst — it would raise
+/// the rate itself, silently lifting every cap below ~5.2 Mbit/s.
+fn bucket_from_kbps(kbps: Option<u64>) -> Option<GvproxyTokenBucket> {
+    let kbps = kbps.filter(|k| *k > 0)?;
+    // kbit/s -> byte/s is * 1000 / 8, i.e. * 125.
+    let bytes_per_sec = kbps.saturating_mul(125);
+    Some(GvproxyTokenBucket {
+        size: bytes_per_sec / (1000 / RATE_LIMIT_REFILL_MS),
+        refill_time_ms: RATE_LIMIT_REFILL_MS,
+        one_time_burst: None,
+    })
 }
 
 /// Secret configuration for gvproxy MITM proxy.
@@ -139,6 +197,7 @@ impl std::fmt::Debug for GvproxyConfig {
                 "ca_key_pem",
                 &self.ca_key_pem.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("rate_limit", &self.rate_limit)
             .finish()
     }
 }
@@ -187,6 +246,7 @@ fn defaults_with_socket_path(socket_path: PathBuf) -> GvproxyConfig {
         secrets: Vec::new(),
         ca_cert_pem: None,
         ca_key_pem: None,
+        rate_limit: None,
     }
 }
 
@@ -290,6 +350,17 @@ impl GvproxyConfig {
     /// Set secrets for MITM proxy injection.
     pub fn with_secrets(mut self, secrets: Vec<GvproxySecretConfig>) -> Self {
         self.secrets = secrets;
+        self
+    }
+
+    /// Set the per-direction bandwidth cap. An unlimited value is left off the
+    /// wire entirely rather than serialized as an empty object.
+    pub fn with_rate_limit(mut self, bandwidth: crate::runtime::options::NetBandwidth) -> Self {
+        self.rate_limit = if bandwidth.is_unlimited() {
+            None
+        } else {
+            Some(bandwidth.into())
+        };
         self
     }
 
@@ -569,5 +640,119 @@ mod tests {
             HOST_HOSTNAME,
             format!("{}.{}", record.name, zone.name.trim_end_matches('.'))
         );
+    }
+
+    #[test]
+    fn kbps_converts_to_a_bucket_at_the_configured_rate() {
+        use crate::runtime::options::NetBandwidth;
+
+        // 10 Mbit/s = 1_250_000 B/s; one 100ms refill period is 125_000 bytes.
+        let limit: GvproxyRateLimit = NetBandwidth {
+            tx_kbps: Some(10_000),
+            rx_kbps: None,
+        }
+        .into();
+
+        let tx = limit.tx.expect("tx bucket");
+        assert_eq!(tx.refill_time_ms, 100);
+        assert_eq!(tx.size, 125_000);
+        // size * 1000 / refill_time_ms is the rate the bridge derives.
+        assert_eq!(tx.size * 1000 / tx.refill_time_ms, 1_250_000);
+        assert!(limit.rx.is_none(), "an unset direction stays unlimited");
+    }
+
+    #[test]
+    fn maximum_bandwidth_maps_to_bridge_bucket_limit() {
+        use crate::runtime::options::{BoxOptions, NetBandwidth};
+
+        // Independent wire bound enforced by TokenBucketConfig.validate in shaper.go.
+        const BRIDGE_MAX_BUCKET_BYTES: u64 = (1_u64 << 62) / 1000;
+
+        let opts = BoxOptions {
+            net_bandwidth: NetBandwidth {
+                tx_kbps: Some(NetBandwidth::MAX_KBPS),
+                rx_kbps: Some(NetBandwidth::MAX_KBPS),
+            },
+            ..Default::default()
+        };
+        opts.sanitize_common().unwrap();
+        let limit: GvproxyRateLimit = opts.net_bandwidth.into();
+
+        for bucket in [limit.tx.unwrap(), limit.rx.unwrap()] {
+            assert_eq!(bucket.size, BRIDGE_MAX_BUCKET_BYTES);
+            assert_eq!(bucket.refill_time_ms, RATE_LIMIT_REFILL_MS);
+        }
+    }
+
+    /// The bridge reads the sustained rate back out of (size, refill_time_ms), so
+    /// a slow cap must serialize its true 100ms window even when that is far
+    /// below one maximum frame. Flooring it here would raise the rate instead of
+    /// the burst and lift every cap under ~5.2 Mbit/s to that floor.
+    #[test]
+    fn slow_rates_keep_their_configured_rate() {
+        use crate::runtime::options::NetBandwidth;
+
+        let limit: GvproxyRateLimit = NetBandwidth {
+            tx_kbps: Some(64), // 8000 B/s; a 100ms window is only 800 bytes
+            rx_kbps: None,
+        }
+        .into();
+
+        let tx = limit.tx.expect("tx bucket");
+        assert_eq!(tx.size, 800);
+        assert_eq!(
+            tx.size * 1000 / tx.refill_time_ms,
+            8000,
+            "rate must survive"
+        );
+    }
+
+    #[test]
+    fn zero_and_none_both_mean_unlimited() {
+        use crate::runtime::options::NetBandwidth;
+
+        for bw in [
+            NetBandwidth::default(),
+            NetBandwidth {
+                tx_kbps: Some(0),
+                rx_kbps: Some(0),
+            },
+        ] {
+            assert!(bw.is_unlimited());
+            let config = GvproxyConfig::new(test_socket_path()).with_rate_limit(bw);
+            assert!(
+                config.rate_limit.is_none(),
+                "an unlimited cap must not reach the wire at all"
+            );
+        }
+    }
+
+    /// The Go side reads these keys by name (gvproxy-bridge/shaper.go). A rename
+    /// on either side silently disables shaping, so pin the shape.
+    #[test]
+    fn rate_limit_serializes_with_the_keys_the_bridge_reads() {
+        use crate::runtime::options::NetBandwidth;
+
+        let config = GvproxyConfig::new(test_socket_path()).with_rate_limit(NetBandwidth {
+            tx_kbps: Some(10_000),
+            rx_kbps: Some(20_000),
+        });
+        let json: serde_json::Value = serde_json::to_value(&config).unwrap();
+
+        let limit = &json["rate_limit"];
+        assert_eq!(limit["tx"]["size"], 125_000);
+        assert_eq!(limit["tx"]["refill_time_ms"], 100);
+        assert_eq!(limit["rx"]["size"], 250_000);
+        assert!(
+            limit["tx"].get("one_time_burst").is_none(),
+            "an unset burst must be omitted, not sent as null"
+        );
+    }
+
+    #[test]
+    fn default_config_omits_rate_limit_from_the_wire() {
+        let json: serde_json::Value =
+            serde_json::to_value(GvproxyConfig::new(test_socket_path())).unwrap();
+        assert!(json.get("rate_limit").is_none());
     }
 }

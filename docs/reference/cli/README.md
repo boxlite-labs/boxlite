@@ -816,6 +816,18 @@ Used by `run` and `create` (defined in `src/cli/src/cli.rs`).
 | `--network <enabled\|disabled>` | Outbound mode; default `enabled`. Disabled mode creates no network interface. |
 | `--allow-net HOST` | Restrict TCP/UDP egress to exact hosts, `*.example.com`, IPs, or CIDRs; repeatable, implies enabled networking, and is incompatible with `--network disabled`. Hostname-only rules deny UDP unless an IP/CIDR is also allowed. |
 | `--inbound <enabled\|disabled>` | Inbound mode; default `enabled` (services exposed by the box are reachable). |
+| `--net-tx-kbps KBPS` | Cap what the box sends (guest to internet), in kilobits/sec. `0` or unset leaves it uncapped. |
+| `--net-rx-kbps KBPS` | Cap what reaches the box (internet to guest), in kilobits/sec. `0` or unset leaves it uncapped. |
+
+Bandwidth caps are enforced below IP by the local gvproxy bridge, so a single
+budget per direction covers TCP, UDP, ICMP and ARP together, and inbound
+port-forward traffic counts against the same budget as outbound requests —
+the cap is on the box's interface, not on a connection's direction.
+Directions are named from the box's point of view, matching Firecracker.
+Remote runtimes reject these flags: the server owns its own network policy.
+Verified on Linux; on macOS the guest link is a datagram socket whose sender
+behaviour under backpressure is not yet verified, so `--net-tx-kbps` may drop
+frames there instead of slowing the guest.
 
 ### `ManagementFlags`
 

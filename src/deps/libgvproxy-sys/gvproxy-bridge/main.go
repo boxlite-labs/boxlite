@@ -196,6 +196,10 @@ type GvproxyConfig struct {
 	// forwarding / DNS / DHCP leases / stats / cam) to a host unix socket the
 	// boxlite core dials. Empty => the services API is not exposed.
 	ControlSocketPath string `json:"control_socket_path,omitempty"`
+
+	// RateLimit, when set, shapes the guest link in both directions. Absent or
+	// zero-sized in a direction means that direction is unlimited. See shaper.go.
+	RateLimit *RateLimitConfig `json:"rate_limit,omitempty"`
 }
 
 // GvproxyInstance tracks a running gvisor-tap-vsock instance
@@ -312,6 +316,13 @@ func gvproxy_create(configJSON *C.char, errOut **C.char) C.longlong {
 	var config GvproxyConfig
 	if err := json.Unmarshal([]byte(goJSON), &config); err != nil {
 		logrus.WithError(err).Error("Failed to parse gvproxy config")
+		setErr(err)
+		return -1
+	}
+
+	// Reject a bad rate limit outright rather than letting part of it apply.
+	if err := config.RateLimit.Validate(); err != nil {
+		logrus.WithError(err).Error("Invalid gvproxy rate limit config")
 		setErr(err)
 		return -1
 	}
@@ -530,7 +541,7 @@ func gvproxy_create(configJSON *C.char, errOut **C.char) C.longlong {
 				logrus.WithFields(logrus.Fields{"id": id, "remote": wrappedConn.RemoteAddr().String()}).Info("VFKit connection accepted")
 
 				// Handle the VFKit protocol with the wrapped connection
-				if err := vn.AcceptVfkit(ctx, wrappedConn); err != nil {
+				if err := vn.AcceptVfkit(ctx, wrapConn(wrappedConn, 0, config.RateLimit)); err != nil {
 					if ctx.Err() == nil {
 						logrus.WithFields(logrus.Fields{"error": err, "id": id}).Error("AcceptVfkit error")
 					}
@@ -556,7 +567,7 @@ func gvproxy_create(configJSON *C.char, errOut **C.char) C.longlong {
 				listener.Close()
 
 				// Handle the Qemu protocol
-				if err := vn.AcceptQemu(ctx, acceptedConn); err != nil {
+				if err := vn.AcceptQemu(ctx, wrapConn(acceptedConn, 4, config.RateLimit)); err != nil {
 					if ctx.Err() == nil {
 						logrus.WithFields(logrus.Fields{"error": err, "id": id}).Error("AcceptQemu error")
 					}

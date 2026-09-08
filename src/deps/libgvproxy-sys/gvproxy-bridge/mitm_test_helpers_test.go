@@ -25,12 +25,12 @@ func newTestCA(t *testing.T) *BoxCA {
 	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	now := time.Now()
 	template := &x509.Certificate{
-		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: "BoxLite Test CA"},
-		NotBefore:    now.Add(-1 * time.Minute),
-		NotAfter:     now.Add(24 * time.Hour),
-		IsCA:         true,
-		KeyUsage:     x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "BoxLite Test CA"},
+		NotBefore:             now.Add(-1 * time.Minute),
+		NotAfter:              now.Add(24 * time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
 		MaxPathLen:            0,
 	}

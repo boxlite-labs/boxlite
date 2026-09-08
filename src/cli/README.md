@@ -348,6 +348,8 @@ silently restarting it, because restarting would run the command a second time.
 | `--network <enabled\|disabled>` | | Outbound network mode (default `enabled`) |
 | `--allow-net HOST` | | Restrict egress to an exact host, wildcard domain, IP, or CIDR; repeatable and implies enabled networking |
 | `--inbound <enabled\|disabled>` | | Inbound network mode (default `enabled`) |
+| `--net-tx-kbps KBPS` | | Cap what the box sends, in kilobits/sec; `0` or unset is uncapped. Local runtime only; verified on Linux |
+| `--net-rx-kbps KBPS` | | Cap what reaches the box, in kilobits/sec; `0` or unset is uncapped. Local runtime only; verified on Linux |
 | `--name NAME` | | Name the box |
 | `--detach` | `-d` | Run in background, print box ID |
 | `--rm` | | Remove the box when it stops; conflicts with lifecycle deadlines and is ignored with `--detach` |
@@ -408,6 +410,8 @@ default, and `exec` still starts it on demand.
 | `--network <enabled\|disabled>` | | Outbound network mode (default `enabled`) |
 | `--allow-net HOST` | | Restrict egress to an exact host, wildcard domain, IP, or CIDR; repeatable and implies enabled networking |
 | `--inbound <enabled\|disabled>` | | Inbound network mode (default `enabled`) |
+| `--net-tx-kbps KBPS` | | Cap what the box sends, in kilobits/sec; `0` or unset is uncapped. Local runtime only; verified on Linux |
+| `--net-rx-kbps KBPS` | | Cap what reaches the box, in kilobits/sec; `0` or unset is uncapped. Local runtime only; verified on Linux |
 | `--auto-stop DURATION` | | Stop the box after this much inactivity; `0` disables; requires a REST server |
 | `--auto-delete DURATION` | | Delete the box this long after it stops; `0` disables; requires a REST server |
 | `--no-auto-resume` | | Ask a REST server to refuse implicit resume after a box has run; first boot is unaffected, and the embedded runtime records but does not enforce it |

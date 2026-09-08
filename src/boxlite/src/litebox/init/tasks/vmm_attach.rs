@@ -37,9 +37,11 @@ impl PipelineTask<InitCtx> for VmmAttachTask {
             let ctx = ctx.lock().await;
             // Reattach still owns a control backend for the box's live gvproxy.
             let network = match &ctx.config.options.network {
-                NetworkSpec::Enabled { allow_net } => {
-                    Some((allow_net.clone(), ctx.config.options.secrets.clone()))
-                }
+                NetworkSpec::Enabled { allow_net } => Some((
+                    allow_net.clone(),
+                    ctx.config.options.secrets.clone(),
+                    ctx.config.options.net_bandwidth,
+                )),
                 NetworkSpec::Disabled => None,
             };
             (ctx.runtime.clone(), ctx.config.id.clone(), network)
@@ -98,12 +100,13 @@ impl PipelineTask<InitCtx> for VmmAttachTask {
         // live gvproxy. No wire spec is produced on reattach; PortPublishTask
         // uses this client to adopt or repair forwards before LiveState is
         // returned.
-        let network_backend = network.and_then(|(allow_net, secrets)| {
+        let network_backend = network.and_then(|(allow_net, secrets, net_bandwidth)| {
             let config = NetworkBackendConfig {
                 socket_path: layout.net_backend_socket_path(),
                 allow_net,
                 secrets,
                 ca_dir: layout.ca_dir(),
+                net_bandwidth,
             };
             runtime.network_factory.create(&config)
         });

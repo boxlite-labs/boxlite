@@ -57,6 +57,17 @@ func startNetwork(t *testing.T, allowNet []string) *guestTap {
 
 	cfg := testGvproxyConfig()
 	cfg.AllowNet = allowNet
+	return startNetworkWith(t, cfg)
+}
+
+// startNetworkWith is startNetwork's body, taking the whole config so a test can
+// set cfg.RateLimit and exercise the shaper on the same path gvproxy_create
+// uses. Note net.Pipe is synchronous and unbuffered: it can show pacing and RX
+// queueing, but it cannot show the TX socket-buffer backpressure chain, because
+// there is no buffer to fill.
+func startNetworkWith(t *testing.T, cfg GvproxyConfig) *guestTap {
+	t.Helper()
+
 	// Mirror gvproxy_create: only resolve hostname rules when an allow_net is
 	// present. An empty allow_net is the common case and needs no resolution;
 	// the nil zones/maps are safe because buildDNSZones and newAllowNetFilter
@@ -85,7 +96,7 @@ func startNetwork(t *testing.T, allowNet []string) *guestTap {
 
 	guestSide, stackSide := net.Pipe()
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { _ = vn.AcceptQemu(ctx, stackSide) }()
+	go func() { _ = vn.AcceptQemu(ctx, wrapConn(stackSide, 4, cfg.RateLimit)) }()
 	t.Cleanup(func() {
 		cancel()
 		_ = guestSide.Close()

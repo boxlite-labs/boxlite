@@ -33,6 +33,7 @@ import { BoxState } from '../box/enums/box-state.enum'
 import { BoxDesiredState } from '../box/enums/box-desired-state.enum'
 import { BoxResponseDto, ListBoxesResponseDto } from './dto/box-response.dto'
 import { CreateBoxDto } from './dto/create-box.dto'
+import { unknownFieldExceptionFactory } from './pipes/unknown-field-hint'
 import { boxToBoxResponse, createBoxToCreateBox } from './mappers/box-to-box.mapper'
 import { Audit, MASKED_AUDIT_VALUE, TypedRequest } from '../audit/decorators/audit.decorator'
 import { AuditAction } from '../audit/enums/audit-action.enum'
@@ -60,7 +61,19 @@ import { CommerceBoxLimitService } from './commerce-box-limit.service'
 //
 // `whitelist` alone only strips unknown fields; `forbidNonWhitelisted` is what
 // turns a stripped field into a 400. Both are required.
-@UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true }))
+//
+// `exceptionFactory` only rewrites whitelist violations, adding `hint` (the
+// closest valid field at that level) and `allowed` (every valid field there).
+// Stopping the request was the security fix; naming the right field is what
+// keeps a one-letter typo from costing the caller a debugging session.
+@UsePipes(
+  new ValidationPipe({
+    transform: true,
+    whitelist: true,
+    forbidNonWhitelisted: true,
+    exceptionFactory: unknownFieldExceptionFactory(CreateBoxDto),
+  }),
+)
 @ApiBearerAuth()
 export class BoxliteBoxController {
   private readonly logger = new Logger(BoxliteBoxController.name)

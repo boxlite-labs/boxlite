@@ -9,7 +9,7 @@
 mod common;
 
 use boxlite::runtime::advanced_options::{AdvancedBoxOptions, SecurityOptions};
-use boxlite::runtime::options::BoxOptions;
+use boxlite::runtime::options::{BoxOptions, NetworkSpec};
 use common::box_test::BoxTestBase;
 use std::path::PathBuf;
 
@@ -240,6 +240,7 @@ async fn host_network_grants_off_box_starts_and_executes() {
     };
     let options = BoxOptions {
         advanced,
+        network: NetworkSpec::Disabled,
         ..common::alpine_opts()
     };
     let t = BoxTestBase::with_home(jh.home, options).await;

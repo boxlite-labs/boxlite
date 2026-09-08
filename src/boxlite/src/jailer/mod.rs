@@ -111,6 +111,178 @@ pub(crate) fn reap_box(_box_id: &crate::runtime::id::BoxID) -> bool {
     false
 }
 
+/// A captured process, identified by pid *and* its `/proc` start-time.
+///
+/// The pair is a stable process identity: the kernel recycles pid *numbers*, so
+/// a bare pid captured at teardown can, seconds later, name an unrelated process.
+/// `start_time` (`/proc/<pid>/stat` field 22, monotonic clock-ticks since boot)
+/// distinguishes the original from a recycled pid, so a later signal can refuse
+/// to fire at the wrong process — see [`signal_live`].
+#[derive(Clone, Copy)]
+// Only the Linux reap path reads these; elsewhere `collect_descendants` returns
+// an empty tree and the signal helpers are no-ops, so the fields are untouched.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct Proc {
+    pub pid: u32,
+    pub start_time: u64,
+}
+
+/// Parse `(ppid, start_time)` from `/proc/<pid>/stat` contents.
+///
+/// Layout is `pid (comm) state ppid ... starttime ...`; `comm` can contain
+/// spaces and parens, so fields are read from AFTER the last `)`, where they
+/// are (0-based) `state=0, ppid=1, ..., starttime=19`.
+#[cfg(target_os = "linux")]
+fn parse_stat(stat: &str) -> Option<(u32, u64)> {
+    let (_, after) = stat.rsplit_once(')')?;
+    let mut fields = after.split_whitespace();
+    let ppid = fields.nth(1)?.parse::<u32>().ok()?; // consumes indices 0,1
+    let start_time = fields.nth(17)?.parse::<u64>().ok()?; // now at index 2; 2+17 = 19
+    Some((ppid, start_time))
+}
+
+/// Current `start_time` of `pid`, or `None` if it has no readable stat (exited).
+#[cfg(target_os = "linux")]
+fn current_start_time(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parse_stat(&stat).map(|(_, start_time)| start_time)
+}
+
+/// Collect every descendant of `root_pid` from `/proc` (depth-first), each
+/// with its start-time so later signals can verify identity.
+///
+/// Captured at teardown *before* the launcher is signalled: a detached box's
+/// tree is `outer bwrap (launcher) -> inner bwrap (PID-ns init) -> shim/libkrun
+/// VM (+ gvproxy)`, and once the launcher exits its children are reparented, so
+/// they can no longer be found by walking from `root_pid`. Snapshotting the tree
+/// first lets the caller reap it directly when `cgroup.kill` is unavailable.
+#[cfg(target_os = "linux")]
+pub(crate) fn collect_descendants(root_pid: u32) -> Vec<Proc> {
+    use std::collections::HashMap;
+
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut start_times: HashMap<u32, u64> = HashMap::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        let Some((ppid, start_time)) = parse_stat(&stat) else {
+            continue;
+        };
+        children.entry(ppid).or_default().push(pid);
+        start_times.insert(pid, start_time);
+    }
+
+    let mut descendants = Vec::new();
+    let mut stack = vec![root_pid];
+    while let Some(parent) = stack.pop() {
+        if let Some(kids) = children.get(&parent) {
+            for &kid in kids {
+                let start_time = start_times.get(&kid).copied().unwrap_or(0);
+                descendants.push(Proc {
+                    pid: kid,
+                    start_time,
+                });
+                stack.push(kid);
+            }
+        }
+    }
+    descendants
+}
+
+/// See the Linux variant. No `/proc` process tree to walk here.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn collect_descendants(_root_pid: u32) -> Vec<Proc> {
+    Vec::new()
+}
+
+/// Send `signal` to each captured process still alive *under its original
+/// identity*. A process whose pid is gone, or whose pid now carries a different
+/// start-time (recycled to an unrelated process), is skipped — so the reap can
+/// never fire at a bystander that happens to reuse the number.
+///
+/// A residual TOCTOU remains between the start-time check and the `kill` (the
+/// pid could be recycled in that window), but it narrows the exposure from the
+/// multi-second teardown to a single syscall gap; pidfd would close it fully at
+/// the cost of a per-pid open kept across teardown.
+#[cfg(target_os = "linux")]
+fn signal_live(procs: &[Proc], signal: i32) {
+    for p in procs {
+        if current_start_time(p.pid) != Some(p.start_time) {
+            continue;
+        }
+        // SAFETY: `libc::kill` is a thin FFI wrapper over the kill(2) syscall
+        // with no memory-safety contract to uphold; the start-time check above
+        // is what keeps it from signalling a recycled pid.
+        unsafe {
+            libc::kill(p.pid as i32, signal);
+        }
+    }
+}
+
+/// `SIGTERM` the captured tree and wait up to `timeout` for it to exit.
+///
+/// The graceful step of the non-cgroup reap: for a detached box the inner shim
+/// is in its own session, so the launcher's shutdown never reaches it — this is
+/// its only chance to catch a signal and flush libkrun's virtio-blk buffers
+/// before the hard kill. Reaping the VM mid-flush risks qcow2 corruption.
+///
+/// Do not "fix" this to signal leaf-first. For a jailed box the captured tree
+/// is rooted at the box's PID-namespace init — bwrap's `do_init` (vendored
+/// `bubblewrap.c:598`), which installs no signal handler at all. A namespace
+/// init receives only those signals it has installed a handler for; an
+/// ancestor namespace's signals are otherwise discarded by the kernel,
+/// SIGKILL and SIGSTOP excepted (`man 7 pid_namespaces`). So this SIGTERM is
+/// a no-op against it: the init cannot exit here and take the still-flushing
+/// shim down with it, whichever order it is signalled in. That same immunity
+/// is why [`reap_pids`] escalates to SIGKILL. Without the jailer there is no
+/// namespace and no init, and the ordinary signal semantics apply.
+#[cfg(target_os = "linux")]
+pub(crate) fn terminate_and_wait(procs: &[Proc], timeout: std::time::Duration) {
+    signal_live(procs, libc::SIGTERM);
+    let deadline = std::time::Instant::now() + timeout;
+    while procs
+        .iter()
+        .any(|p| current_start_time(p.pid) == Some(p.start_time))
+    {
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// See the Linux variant. No `/proc` process tree to signal here.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn terminate_and_wait(_procs: &[Proc], _timeout: std::time::Duration) {}
+
+/// `SIGKILL` every captured process still alive under its original identity —
+/// the non-cgroup reap floor.
+///
+/// Given a box's descendant tree captured by [`collect_descendants`], killing
+/// the inner bwrap (the PID-namespace init) makes the kernel tear down the whole
+/// namespace, reaping the shim/libkrun VM even on rootless hosts with no usable
+/// cgroup. Idempotent: a pid already reaped (e.g. by `cgroup.kill` or the
+/// preceding SIGTERM) fails the identity check and is skipped.
+#[cfg(target_os = "linux")]
+pub(crate) fn reap_pids(procs: &[Proc]) {
+    signal_live(procs, libc::SIGKILL);
+}
+
+/// See the Linux variant.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn reap_pids(_procs: &[Proc]) {}
+
 // Volume specification (convenience re-export)
 pub use crate::runtime::options::VolumeSpec;
 
@@ -1270,5 +1442,193 @@ mod tests {
             error.contains("failed to create sockets dir") || error.contains("Not a directory"),
             "socket setup failure should be reported before command construction: {error}"
         );
+    }
+
+    /// `comm` (field 2) can contain spaces and `)`, so ppid/starttime must be
+    /// read from AFTER the LAST `)`. This locks the field offsets (ppid = index
+    /// 1, starttime = index 19) against a `comm` crafted to break naive parsing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_stat_reads_fields_after_last_paren() {
+        // comm = "weird )( name"; the real state/ppid/... follow the final ')'.
+        let stat =
+            "1234 (weird )( name) S 42 1234 1234 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 987654 rest";
+        let (ppid, start_time) = parse_stat(stat).expect("parse_stat should succeed");
+        assert_eq!(ppid, 42, "ppid must be the field after the last ')'");
+        assert_eq!(
+            start_time, 987654,
+            "starttime must be index 19 after the last ')'"
+        );
+    }
+
+    /// `collect_descendants` must find a real spawned child and capture its
+    /// `/proc` start-time. Pid comes from `spawn()` and start-time from an
+    /// independent `current_start_time` read, so the assertion isn't tautological.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn collect_descendants_captures_child_with_start_time() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        let expected = wait_visible(pid);
+
+        let found = collect_descendants(std::process::id())
+            .into_iter()
+            .find(|p| p.pid == pid);
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let found = found.expect("collect_descendants must find the spawned child");
+        assert_eq!(
+            found.start_time, expected,
+            "captured start_time must match the child's /proc start-time"
+        );
+    }
+
+    /// The pid-reuse guard: `reap_pids` must NOT signal a pid whose captured
+    /// start-time no longer matches (the number was recycled), and MUST reap it
+    /// under the correct identity.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reap_pids_respects_start_time_identity() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        let real = wait_visible(pid);
+
+        // Same pid, wrong start-time → treated as a recycled pid → not signalled.
+        reap_pids(&[Proc {
+            pid,
+            start_time: real.wrapping_add(1),
+        }]);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            matches!(child.try_wait(), Ok(None)),
+            "reap_pids killed a pid whose start-time did not match (recycled-pid guard failed)"
+        );
+
+        // Correct identity → SIGKILL.
+        reap_pids(&[Proc {
+            pid,
+            start_time: real,
+        }]);
+        let status = child.wait().expect("wait child");
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGKILL),
+            "reap_pids must SIGKILL the pid under its captured identity"
+        );
+    }
+
+    /// The graceful step must deliver SIGTERM — never a bare SIGKILL — so a
+    /// detached shim gets to run its shutdown handler and flush libkrun's
+    /// virtio-blk buffers before any hard kill. It must also stay bounded when a
+    /// process ignores SIGTERM, with `reap_pids` as the escalation.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminate_and_wait_sigterms_before_reap_pids_escalates() {
+        use std::os::unix::process::ExitStatusExt;
+
+        // Honours SIGTERM: the graceful step alone must end it, and the recorded
+        // death signal proves SIGTERM — not SIGKILL — is what reached it.
+        let mut soft = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let soft_proc = Proc {
+            pid: soft.id(),
+            start_time: wait_visible(soft.id()),
+        };
+        terminate_and_wait(&[soft_proc], std::time::Duration::from_millis(300));
+        let status = soft.wait().expect("wait soft");
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGTERM),
+            "graceful step must deliver SIGTERM so the shim can flush before any hard kill"
+        );
+
+        // Ignores SIGTERM: the wait must be bounded by the grace period rather
+        // than hanging, the process must survive it, and reap_pids must escalate.
+        // The inner `sleep 0.1` keeps the shell alive without leaving a
+        // long-lived orphan once the shell is killed.
+        let mut stubborn = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("trap '' TERM; while :; do sleep 0.1; done")
+            .spawn()
+            .expect("spawn stubborn");
+        let stubborn_proc = Proc {
+            pid: stubborn.id(),
+            start_time: wait_visible(stubborn.id()),
+        };
+        // `/proc` appears at fork, before the shell has run `trap` — signalling
+        // in that window would kill it and silently invert what this asserts.
+        wait_sigterm_ignored(stubborn.id());
+
+        let grace = std::time::Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        terminate_and_wait(&[stubborn_proc], grace);
+        let waited = started.elapsed();
+
+        assert!(
+            waited >= grace,
+            "must honour the full grace period before escalating, waited {waited:?}"
+        );
+        assert!(
+            waited < grace * 10,
+            "wait must stay bounded by the timeout, waited {waited:?}"
+        );
+        assert!(
+            matches!(stubborn.try_wait(), Ok(None)),
+            "a SIGTERM-ignoring process must survive the graceful step"
+        );
+
+        reap_pids(&[stubborn_proc]);
+        let status = stubborn.wait().expect("wait stubborn");
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGKILL),
+            "reap_pids must escalate to SIGKILL once the grace period is spent"
+        );
+    }
+
+    /// Poll until `pid` actually ignores SIGTERM — `SigIgn` in
+    /// `/proc/<pid>/status` carries the bit for signal N at position N-1. Waiting
+    /// on that observable state (rather than sleeping) makes the SIGTERM-proof
+    /// half of the test deterministic.
+    #[cfg(target_os = "linux")]
+    fn wait_sigterm_ignored(pid: u32) {
+        let sigterm_bit = 1u64 << (libc::SIGTERM as u64 - 1);
+        for _ in 0..500 {
+            if let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status"))
+                && let Some(mask) = status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("SigIgn:"))
+                    .and_then(|hex| u64::from_str_radix(hex.trim(), 16).ok())
+                && mask & sigterm_bit != 0
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("pid {pid} never installed its SIGTERM trap");
+    }
+
+    /// Poll until `pid` is visible in `/proc`, returning its start-time.
+    #[cfg(target_os = "linux")]
+    fn wait_visible(pid: u32) -> u64 {
+        for _ in 0..500 {
+            if let Some(st) = current_start_time(pid) {
+                return st;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("child pid {pid} never became visible in /proc");
     }
 }

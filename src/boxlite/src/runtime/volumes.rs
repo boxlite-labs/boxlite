@@ -8,8 +8,8 @@
 //! The trait is `#[async_trait]` like the other capability backends
 //! ([`ImageBackend`](crate::runtime::images::ImageBackend),
 //! [`AuthBackend`](crate::runtime::auth::AuthBackend)) so REST backends can
-//! perform network calls. The concrete backend is not implemented yet — every
-//! operation currently returns `Unsupported`.
+//! perform network calls. `LocalRuntime` backs it with `LocalNamedVolumeStore`;
+//! the REST runtime forwards to `/v1/volumes`.
 
 use std::sync::Arc;
 
@@ -20,8 +20,8 @@ use crate::volumes::VolumeInfo;
 
 /// Internal trait for named-volume management.
 ///
-/// Implemented by both `LocalRuntime` and the REST runtime. Both return
-/// `Unsupported` until a managed volume backend is wired up.
+/// Implemented by `LocalRuntime` (over `LocalNamedVolumeStore`) and the REST
+/// runtime (over `/v1/volumes`). A volume is addressed by id or by name.
 #[async_trait]
 pub(crate) trait VolumeBackend: Send + Sync {
     /// Create a volume, returning its server-assigned metadata (including id).
@@ -31,10 +31,10 @@ pub(crate) trait VolumeBackend: Send + Sync {
     /// List all volumes.
     async fn list_volumes(&self) -> BoxliteResult<Vec<VolumeInfo>>;
 
-    /// Get metadata for a single volume by id.
+    /// Get metadata for a single volume by id or name.
     async fn get_volume(&self, id: &str) -> BoxliteResult<VolumeInfo>;
 
-    /// Remove a volume by id. `force` makes a missing volume a no-op.
+    /// Remove a volume by id or name. `force` makes a missing volume a no-op.
     async fn remove_volume(&self, id: &str, force: bool) -> BoxliteResult<()>;
 }
 
@@ -65,12 +65,12 @@ impl VolumeHandle {
         self.backend.list_volumes().await
     }
 
-    /// Get metadata for a single volume by id.
+    /// Get metadata for a single volume by id or name.
     pub async fn get(&self, id: &str) -> BoxliteResult<VolumeInfo> {
         self.backend.get_volume(id).await
     }
 
-    /// Remove a volume by id. With `force`, a missing volume is a no-op.
+    /// Remove a volume by id or name. With `force`, a missing volume is a no-op.
     pub async fn remove(&self, id: &str, force: bool) -> BoxliteResult<()> {
         self.backend.remove_volume(id, force).await
     }

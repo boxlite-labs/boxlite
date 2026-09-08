@@ -51,15 +51,17 @@ pub fn resolve_user_volumes(volumes: &[VolumeSpec]) -> BoxliteResult<Vec<Resolve
     let mut resolved = Vec::with_capacity(volumes.len());
 
     for (i, vol) in volumes.iter().enumerate() {
-        // Managed volumes live on the server that owns the volume backend.
-        // Without this the reference falls through to the host-path checks
-        // below and surfaces as "host path does not exist: my-data", which
-        // points the caller at their own filesystem instead of at the
-        // runtime they used.
+        // A reference should already be a directory by now: the local runtime
+        // resolves it against its store at create (`resolve_managed_volumes`,
+        // in `create_inner`), and a REST runtime never sends one this far.
+        // Reaching here means a spec skipped that step, so say that rather
+        // than let it fall through to the host-path checks below and surface
+        // as "host path does not exist: my-data", which points the caller at
+        // their own filesystem.
         if let Some(reference) = &vol.managed_volume {
-            return Err(BoxliteError::Unsupported(format!(
-                "managed volume {reference:?} requires a REST runtime; the local runtime has no \
-                 volume backend to resolve it against"
+            return Err(BoxliteError::Internal(format!(
+                "managed volume {reference:?} reached boot unresolved; it should have been \
+                 resolved to a directory when the box was created"
             )));
         }
 
@@ -402,24 +404,25 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// The local runtime has no volume backend, so a managed volume has to say
-    /// so. Without the guard the reference falls through to the host-path
-    /// checks and reports "host path does not exist: my-data", which sends the
-    /// caller looking for a directory they never asked for.
+    /// Boot never resolves a reference — the runtime does that at create. An
+    /// unresolved one arriving here is a bug in that path, and the error has
+    /// to say so; without the guard it falls through to the host-path checks
+    /// and reports "host path does not exist: my-data", sending the caller
+    /// looking for a directory they never asked for.
     #[test]
-    fn resolve_managed_volume_reports_the_missing_backend() {
+    fn resolve_managed_volume_reports_an_unresolved_reference() {
         let volumes = vec![VolumeSpec::managed_volume("my-data", "/data")];
 
-        let error = resolve_user_volumes(&volumes)
-            .expect_err("the local runtime cannot resolve a managed volume");
+        let error =
+            resolve_user_volumes(&volumes).expect_err("an unresolved reference cannot be mounted");
 
         assert!(
-            matches!(error, BoxliteError::Unsupported(_)),
-            "{error:?} should be Unsupported, not a config error about a path"
+            matches!(error, BoxliteError::Internal(_)),
+            "{error:?} should be Internal, not a config error about a path"
         );
         let message = error.to_string();
         assert!(message.contains("my-data"), "{message}");
-        assert!(message.contains("REST runtime"), "{message}");
+        assert!(message.contains("unresolved"), "{message}");
         assert!(
             !message.contains("host path"),
             "the error must not blame a host path: {message}"

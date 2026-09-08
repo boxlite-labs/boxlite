@@ -7,6 +7,7 @@ use boxlite::experimental::custom_kernel::{KernelFormat, KernelOptions, configur
 use boxlite::experimental::{
     EXPERIMENTAL_FEATURES_ENV, ExperimentalFeature, ExperimentalFeatures, RuntimeBuilder,
 };
+use boxlite::runtime::id::VolumeIDMint;
 use boxlite::runtime::options::{
     InboundNetworkConfig, NetworkMode, OutboundNetworkConfig, PortProtocol, PortSpec, VolumeSpec,
 };
@@ -1283,23 +1284,6 @@ pub struct VolumeFlags {
     pub volume: Vec<String>,
 }
 
-/// Resolve base directory for anonymous volumes: explicit home, or BOXLITE_HOME, or ~/.boxlite, or temp dir.
-fn anonymous_volume_base(home: Option<&std::path::Path>) -> std::path::PathBuf {
-    home.map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var("BOXLITE_HOME")
-                .ok()
-                .map(std::path::PathBuf::from)
-        })
-        .or_else(|| {
-            dirs::home_dir().map(|mut p| {
-                p.push(".boxlite");
-                p
-            })
-        })
-        .unwrap_or_else(std::env::temp_dir)
-}
-
 /// Make a host bind path absolute.
 ///
 /// `volumespec` classified this as a path without touching the filesystem, so a
@@ -1321,13 +1305,9 @@ fn resolve_host_path(path: String) -> anyhow::Result<String> {
 }
 
 impl VolumeFlags {
-    /// Apply volume flags to options. Pass `home` for anonymous volume storage (e.g. from GlobalFlags).
-    pub fn apply_to(
-        &self,
-        opts: &mut BoxOptions,
-        home: Option<&std::path::Path>,
-    ) -> anyhow::Result<()> {
-        let base = anonymous_volume_base(home);
+    /// Apply volume flags to options. An anonymous mount gets a freshly minted
+    /// volume id; the runtime creates the volume when the box is created.
+    pub fn apply_to(&self, opts: &mut BoxOptions) -> anyhow::Result<()> {
         for value in self.volume.iter() {
             let mount = crate::volumespec::parse(value)?;
 
@@ -1350,14 +1330,8 @@ impl VolumeFlags {
                 }
 
                 crate::volumespec::MountOrigin::Anonymous => {
-                    // Random id for the directory name (same approach as Podman:
-                    // cryptographically random to avoid collisions under any load).
-                    let unique = ulid::Ulid::new().to_string();
-                    let dir = base.join("volumes").join("anonymous").join(unique);
-                    std::fs::create_dir_all(&dir).map_err(|e| {
-                        anyhow::anyhow!("failed to create anonymous volume dir {:?}: {}", dir, e)
-                    })?;
-                    VolumeSpec::bind_mount(dir.to_string_lossy().into_owned(), mount.guest_path)
+                    let id = VolumeIDMint::mint();
+                    VolumeSpec::managed_volume(id.as_str().to_string(), mount.guest_path)
                 }
             };
 
@@ -2449,7 +2423,7 @@ mod tests {
             ],
         };
         let mut opts = BoxOptions::default();
-        flags.apply_to(&mut opts, None).unwrap();
+        flags.apply_to(&mut opts).unwrap();
         assert_eq!(opts.volumes.len(), 2);
         assert_eq!(opts.volumes[0].host_path, "/host/data");
         assert_eq!(opts.volumes[0].guest_path, "/guest/data");
@@ -2468,7 +2442,7 @@ mod tests {
             ],
         };
         let mut opts = BoxOptions::default();
-        flags.apply_to(&mut opts, None).unwrap();
+        flags.apply_to(&mut opts).unwrap();
         assert_eq!(opts.volumes.len(), 2);
         assert_eq!(opts.volumes[0].host_path, r"C:\host\data");
         assert_eq!(opts.volumes[0].guest_path, "/guest/data");
@@ -2490,7 +2464,7 @@ mod tests {
             ],
         };
         let mut opts = BoxOptions::default();
-        flags.apply_to(&mut opts, None).unwrap();
+        flags.apply_to(&mut opts).unwrap();
 
         assert_eq!(opts.volumes.len(), 2);
         assert_eq!(opts.volumes[0].managed_volume.as_deref(), Some("my-data"));
@@ -2515,7 +2489,7 @@ mod tests {
         let mut opts = BoxOptions::default();
 
         let error = flags
-            .apply_to(&mut opts, None)
+            .apply_to(&mut opts)
             .expect_err("read-only managed volumes must be refused")
             .to_string();
 
@@ -2532,7 +2506,7 @@ mod tests {
             volume: vec!["/host/data:/data:ro".to_string()],
         };
         let mut opts = BoxOptions::default();
-        flags.apply_to(&mut opts, None).unwrap();
+        flags.apply_to(&mut opts).unwrap();
 
         assert_eq!(opts.volumes[0].host_path, "/host/data");
         assert!(opts.volumes[0].read_only);
@@ -2546,31 +2520,49 @@ mod tests {
             volume: vec!["/host/data:/guest/data".to_string()],
         };
         let mut opts = BoxOptions::default();
-        flags.apply_to(&mut opts, None).unwrap();
+        flags.apply_to(&mut opts).unwrap();
 
         assert_eq!(opts.volumes[0].managed_volume, None);
         assert_eq!(opts.volumes[0].host_path, "/host/data");
     }
 
+    /// `-v /data` names a volume the server has never seen: the CLI mints the
+    /// reference and touches nothing on disk — the store creates the volume
+    /// when the box is created.
     #[test]
     fn test_volume_flags_apply_to_anonymous() {
-        let base = std::env::temp_dir();
+        use boxlite::runtime::id::{VolumeID, VolumeIDMint};
+
         let flags = VolumeFlags {
             volume: vec!["/data".to_string(), "/cache:ro".to_string()],
         };
         let mut opts = BoxOptions::default();
-        flags.apply_to(&mut opts, Some(&base)).unwrap();
+        flags.apply_to(&mut opts).unwrap();
         assert_eq!(opts.volumes.len(), 2);
+
+        let ids: Vec<&str> = opts
+            .volumes
+            .iter()
+            .map(|volume| {
+                let id = volume
+                    .managed_volume
+                    .as_deref()
+                    .expect("an anonymous mount is a managed-volume reference");
+                assert!(VolumeID::is_valid(id), "{id:?} must be a volume id");
+                assert_eq!(id.len(), VolumeIDMint::MINT_LENGTH, "{id:?}");
+                assert!(
+                    volume.host_path.is_empty(),
+                    "the CLI must not choose a host path: {:?}",
+                    volume.host_path
+                );
+                id
+            })
+            .collect();
+        assert_ne!(ids[0], ids[1], "each anonymous mount gets its own volume");
         assert_eq!(opts.volumes[0].guest_path, "/data");
-        assert!(
-            opts.volumes[0].host_path.contains("anonymous"),
-            "anonymous volume host_path should contain 'anonymous': {}",
-            opts.volumes[0].host_path
-        );
-        assert!(std::path::Path::new(&opts.volumes[0].host_path).exists());
+        assert!(!opts.volumes[0].read_only);
         assert_eq!(opts.volumes[1].guest_path, "/cache");
         assert!(opts.volumes[1].read_only);
-        assert!(opts.volumes[1].host_path.contains("anonymous"));
     }
 
     // ─── auth subcommand parse tests ───────────────────────────────────────

@@ -457,6 +457,17 @@ impl RuntimeImpl {
             };
         }
 
+        let store = crate::volumes::LocalNamedVolumeStore::new(self.layout.home_dir());
+        let options = tokio::task::spawn_blocking(move || {
+            let mut options = options;
+            resolve_managed_volumes(&store, &mut options)?;
+            Ok::<_, BoxliteError>(options)
+        })
+        .await
+        .map_err(|e| {
+            BoxliteError::Internal(format!("failed to join volume creation task: {e}"))
+        })??;
+
         // Initialize box variables with defaults
         let (config, mut state) = self.init_box_variables(&options, name.clone());
 
@@ -1749,20 +1760,32 @@ fn reject_local_unsupported_options(options: &BoxOptions) -> BoxliteResult<()> {
         ));
     }
 
-    // `resolve_user_volumes` catches this too, but only once boot is under way
-    // — after the image is pulled and the box record exists. Fail here instead,
-    // mirroring `BoxOptions::sanitize_remote`'s mount rules on the REST side.
-    if let Some(volume) = options
-        .volumes
-        .iter()
-        .find_map(|volume| volume.managed_volume.as_deref())
-    {
-        return Err(BoxliteError::Unsupported(format!(
-            "managed volume {volume:?} is only supported by REST runtimes; the local runtime has \
-             no volume backend to resolve it against"
-        )));
-    }
+    Ok(())
+}
 
+/// Replace every managed-volume reference with the directory backing it.
+///
+/// The reference reaches the runtime as `managed_volume` — an id or a name —
+/// and only the store can say where that volume's payload lives. A name the
+/// store has never seen is created here, so `-v my-data:/data` works on first
+/// use the way it does with docker. Runs in `create_inner` only once a new box
+/// is certain, so reusing an existing box or clashing on a name creates
+/// nothing; resolving at create rather than at boot keeps any failure where
+/// the caller still holds the error, instead of part-way through
+/// `resolve_user_volumes`.
+fn resolve_managed_volumes(
+    store: &crate::volumes::LocalNamedVolumeStore,
+    options: &mut BoxOptions,
+) -> BoxliteResult<()> {
+    for volume in &mut options.volumes {
+        let Some(reference) = volume.managed_volume.take() else {
+            continue;
+        };
+        volume.host_path = store
+            .payload_dir(&reference)?
+            .to_string_lossy()
+            .into_owned();
+    }
     Ok(())
 }
 
@@ -1864,35 +1887,59 @@ impl super::images::ImageBackend for LocalRuntime {
     }
 }
 
-// Named-volume operations (separate from RuntimeBackend). The concrete backend
-// is not yet implemented: the local filesystem store was removed in favor of a
-// future managed volume backend, so every operation returns `Unsupported`.
+/// Run one [`LocalNamedVolumeStore`](crate::volumes::LocalNamedVolumeStore) call off the
+/// async runtime.
+///
+/// Every store method is synchronous filesystem IO — `remove` on a
+/// multi-gigabyte volume would pin a tokio worker for the whole
+/// `remove_dir_all` — so it belongs on the blocking pool, like the DB calls
+/// elsewhere in this file. `what` names the operation in the shutdown error.
+async fn run_volume_op<T, F>(runtime: &SharedRuntimeImpl, what: &str, op: F) -> BoxliteResult<T>
+where
+    F: FnOnce(crate::volumes::LocalNamedVolumeStore) -> BoxliteResult<T> + Send + 'static,
+    T: Send + 'static,
+{
+    if runtime.shutdown_token.is_cancelled() {
+        return Err(BoxliteError::Stopped(format!(
+            "Cannot {what}: runtime has been shut down"
+        )));
+    }
+    let store = crate::volumes::LocalNamedVolumeStore::new(runtime.layout.home_dir());
+    tokio::task::spawn_blocking(move || op(store))
+        .await
+        .map_err(|error| {
+            BoxliteError::Internal(format!("failed to join volume store task: {error}"))
+        })?
+}
+
+// Named-volume operations (separate from RuntimeBackend). Each volume is a
+// directory under `{home}/volumes/`, managed by `LocalNamedVolumeStore`.
 #[async_trait::async_trait]
 impl super::volumes::VolumeBackend for LocalRuntime {
-    async fn create_volume(
-        &self,
-        _name: Option<&str>,
-    ) -> BoxliteResult<crate::volumes::VolumeInfo> {
-        Err(volumes_unsupported())
+    async fn create_volume(&self, name: Option<&str>) -> BoxliteResult<crate::volumes::VolumeInfo> {
+        let name = name.map(str::to_string);
+        run_volume_op(&self.0, "create volume", move |store| {
+            store.create(name.as_deref())
+        })
+        .await
     }
 
     async fn list_volumes(&self) -> BoxliteResult<Vec<crate::volumes::VolumeInfo>> {
-        Err(volumes_unsupported())
+        run_volume_op(&self.0, "list volumes", |store| store.list()).await
     }
 
-    async fn get_volume(&self, _id: &str) -> BoxliteResult<crate::volumes::VolumeInfo> {
-        Err(volumes_unsupported())
+    async fn get_volume(&self, id: &str) -> BoxliteResult<crate::volumes::VolumeInfo> {
+        let id = id.to_string();
+        run_volume_op(&self.0, "get volume", move |store| store.get(&id)).await
     }
 
-    async fn remove_volume(&self, _id: &str, _force: bool) -> BoxliteResult<()> {
-        Err(volumes_unsupported())
+    async fn remove_volume(&self, id: &str, force: bool) -> BoxliteResult<()> {
+        let id = id.to_string();
+        run_volume_op(&self.0, "remove volume", move |store| {
+            store.remove(&id, force)
+        })
+        .await
     }
-}
-
-/// Error returned by every named-volume operation until a volume backend is
-/// wired up.
-fn volumes_unsupported() -> BoxliteError {
-    BoxliteError::Unsupported("named volumes are not supported yet".to_string())
 }
 
 // ============================================================================
@@ -1976,34 +2023,136 @@ mod tests {
         assert!(sanitize_local_options(&features, options).await.is_ok());
     }
 
-    /// The local runtime has no volume backend. `resolve_user_volumes` also
-    /// refuses a managed volume, but only once boot is under way — after the
-    /// image is pulled and the box record exists. This guard is the whole
-    /// reason the failure is cheap, so it needs its own test: without it every
-    /// suite still passes and the rejection silently moves back to boot time.
+    /// A managed volume names a volume, not a path; the runtime asks its store
+    /// where that volume lives while creating the box and persists the answer,
+    /// so boot never has to know the store exists.
     #[tokio::test]
-    async fn local_runtime_rejects_managed_volumes_before_boot() {
+    async fn create_resolves_managed_volumes_into_the_persisted_config() {
         use crate::runtime::options::VolumeSpec;
 
-        let features = ExperimentalFeatures::default();
-        let host_bind = BoxOptions {
-            volumes: vec![VolumeSpec::bind_mount("/tmp/data", "/data")],
-            ..Default::default()
-        };
-        assert!(sanitize_local_options(&features, host_bind).await.is_ok());
+        let (runtime, _dir) = create_test_runtime();
+        let store = crate::volumes::LocalNamedVolumeStore::new(runtime.layout.home_dir());
+        let volume = store.create(Some("my-data")).expect("create volume");
+        let local = LocalRuntime(runtime.clone());
 
-        let managed = BoxOptions {
-            volumes: vec![VolumeSpec::managed_volume("my-data", "/data")],
-            ..Default::default()
-        };
-        let error = sanitize_local_options(&features, managed)
+        local
+            .create(
+                BoxOptions {
+                    volumes: vec![VolumeSpec::managed_volume("my-data", "/data")],
+                    ..Default::default()
+                },
+                Some("known".to_string()),
+            )
             .await
-            .expect_err("a managed volume has no local backend to resolve against");
+            .expect("a known volume resolves");
+        let (config, _) = runtime.box_manager.lookup_box("known").unwrap().unwrap();
+        assert_eq!(
+            runtime
+                .layout
+                .home_dir()
+                .join("volumes")
+                .join(&volume.id)
+                .join("_data")
+                .to_string_lossy(),
+            config.options.volumes[0].host_path,
+            "the persisted mount points at the volume's payload directory"
+        );
+        assert!(
+            config.options.volumes[0].managed_volume.is_none(),
+            "the reference is consumed once resolved"
+        );
 
-        assert!(matches!(error, BoxliteError::Unsupported(_)), "{error:?}");
-        let message = error.to_string();
-        assert!(message.contains("my-data"), "{message}");
-        assert!(message.contains("REST runtime"), "{message}");
+        local
+            .create(
+                BoxOptions {
+                    volumes: vec![VolumeSpec::managed_volume("fresh-vol", "/data")],
+                    ..Default::default()
+                },
+                Some("fresh".to_string()),
+            )
+            .await
+            .expect("an unknown reference becomes a new volume, as with docker");
+        let fresh = store
+            .get("fresh-vol")
+            .expect("the volume exists afterwards");
+        let (config, _) = runtime.box_manager.lookup_box("fresh").unwrap().unwrap();
+        assert!(
+            config.options.volumes[0]
+                .host_path
+                .ends_with(&format!("{}/_data", fresh.id)),
+            "the new volume backs the mount: {}",
+            config.options.volumes[0].host_path
+        );
+    }
+
+    /// Reusing an existing box ignores the request's options, so it must not
+    /// create the volumes those options name.
+    #[tokio::test]
+    async fn get_or_create_of_an_existing_box_creates_no_volume() {
+        use crate::runtime::options::VolumeSpec;
+
+        let (runtime, _dir) = create_test_runtime();
+        let mut config = test_box_config_in_layout(false, &runtime);
+        config.name = Some("existing".to_string());
+        runtime
+            .box_manager
+            .add_box(&config, &BoxState::new())
+            .unwrap();
+
+        let request = BoxOptions {
+            volumes: vec![VolumeSpec::managed_volume("new-volume", "/data")],
+            ..Default::default()
+        };
+        let (_, created) = LocalRuntime(runtime.clone())
+            .get_or_create(request, Some("existing".to_string()))
+            .await
+            .unwrap();
+        assert!(!created);
+
+        let store = crate::volumes::LocalNamedVolumeStore::new(runtime.layout.home_dir());
+        assert!(matches!(
+            store.get("new-volume"),
+            Err(BoxliteError::NotFound(_))
+        ));
+        assert!(
+            store.list().unwrap().is_empty(),
+            "reuse must not create volumes"
+        );
+    }
+
+    /// A name clash is reported before any volume is touched — docker reserves
+    /// the name before it registers mounts (daemon/create.go:208 vs :249).
+    #[tokio::test]
+    async fn create_with_a_taken_name_creates_no_volume() {
+        use crate::runtime::options::VolumeSpec;
+
+        let (runtime, _dir) = create_test_runtime();
+        let mut config = test_box_config_in_layout(false, &runtime);
+        config.name = Some("taken".to_string());
+        runtime
+            .box_manager
+            .add_box(&config, &BoxState::new())
+            .unwrap();
+
+        let result = LocalRuntime(runtime.clone())
+            .create(
+                BoxOptions {
+                    volumes: vec![VolumeSpec::managed_volume("new-volume", "/data")],
+                    ..Default::default()
+                },
+                Some("taken".to_string()),
+            )
+            .await;
+        match result {
+            Err(BoxliteError::InvalidArgument(_)) => {}
+            Err(other) => panic!("expected a name clash, got {other:?}"),
+            Ok(_) => panic!("a taken name must be rejected"),
+        }
+        let store = crate::volumes::LocalNamedVolumeStore::new(runtime.layout.home_dir());
+        assert!(
+            store.list().unwrap().is_empty(),
+            "a name clash must not create volumes"
+        );
     }
 
     #[test]

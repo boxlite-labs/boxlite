@@ -57,12 +57,12 @@ pub(super) struct CreateBoxRequest {
     /// `build_box_options`, matching the Go SDK's own default.
     #[serde(default)]
     pub secrets: Option<Vec<SecretSpecRequest>>,
-    /// Managed volumes are not supported by `boxlite serve` (no volume
-    /// backend). Accepted here only so a combined secrets+volumes request does
-    /// not fail deserialization on an unrelated field; rejected explicitly in
-    /// `build_box_options` when non-empty.
+    /// Volumes to mount, each naming a volume the server owns. A client never
+    /// names a host path: `CreateVolumeMount` carries no such field and the
+    /// struct denies unknown ones, so a directory on the server's disk cannot
+    /// be smuggled in through a mount request.
     #[serde(default)]
-    pub volumes: Option<Vec<serde_json::Value>>,
+    pub volumes: Option<Vec<CreateVolumeMount>>,
     // `security` / `security_settings` are intentionally absent from
     // the REST wire schema. Sandbox security is the operator's
     // policy, set server-side. Because the struct carries
@@ -173,6 +173,21 @@ pub(super) struct BoxResponse {
 #[derive(Serialize)]
 pub(super) struct ListBoxesResponse {
     pub boxes: Vec<BoxResponse>,
+}
+
+/// One mount in a create-box request: which volume, and where in the box.
+///
+/// Field names are the REST wire contract every client already speaks —
+/// `CreateBoxVolumeSpec` in `boxlite::rest`, the dashboard, the SDK docs —
+/// so `managed_volume`, not a shorter local spelling.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CreateVolumeMount {
+    /// Volume id or name — whatever the caller knows it by.
+    pub managed_volume: String,
+    pub guest_path: String,
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 // ============================================================================

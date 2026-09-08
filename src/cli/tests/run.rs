@@ -611,7 +611,7 @@ fn test_run_with_volume_invalid_format() {
 
 #[test]
 fn test_run_with_volume_anonymous() {
-    // -v /data (anonymous volume): CLI creates a host dir and mounts it at /data
+    // -v /data (anonymous volume): the runtime creates a managed volume for the mount
     let mut ctx = common::boxlite();
     ctx.cmd.args([
         "run",

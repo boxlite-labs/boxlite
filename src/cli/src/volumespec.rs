@@ -13,10 +13,11 @@
 //!   `~`, a `\\` prefix, or `X:` mean a host path. Anything else is a managed
 //!   volume, addressed by id or by name.
 //!
-//! Docker's own failure mode does not carry over. There, a mistyped source
-//! silently creates an empty volume and the caller's data appears to vanish;
-//! boxlite never auto-creates, so an unknown reference is a loud "not found"
-//! from the server (`VolumeService.validateVolumes`).
+//! What an unknown reference does depends on the runtime. The local runtime
+//! creates the volume on first use, as docker does, so `-v data:/app` works
+//! without a prior `volume create`; a REST server answers "not found"
+//! (`VolumeService.validateVolumes`), so a mistyped name cannot silently
+//! create an empty volume there.
 //!
 //! Unlike Docker this classification happens exactly once. Docker re-derives it
 //! daemon-side from an untyped string (`moby/daemon/volume/mounts/linux_parser.go`,

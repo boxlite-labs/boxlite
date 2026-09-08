@@ -333,8 +333,10 @@ fn build_path_access(layout: &BoxFilesystemLayout, volumes: &[VolumeSpec]) -> Ve
     // User volumes. Directories are shared directly, so grant the VMM access.
     // Single files are staged under shared_dir (granted above), so they need no
     // grant here — this also keeps the file's host siblings out of the sandbox.
-    // A managed volume names no host path, so there is nothing to grant; the
-    // local runtime rejects one before boot anyway (`resolve_user_volumes`).
+    // A managed volume names no host path, so there is nothing to grant: the
+    // local runtime has already replaced it with its backing directory at
+    // create (`resolve_managed_volumes`), and one that reaches boot unresolved
+    // is refused by `resolve_user_volumes`.
     for vol in volumes {
         if vol.managed_volume.is_some() {
             continue;

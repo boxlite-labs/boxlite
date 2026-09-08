@@ -1192,14 +1192,6 @@ fn build_box_options(req: &CreateBoxRequest) -> Result<BoxOptions, boxlite::Boxl
     // uniformly. Operators who want a different policy run the
     // server with a different default; clients cannot relax it.
 
-    if let Some(volumes) = &req.volumes
-        && !volumes.is_empty()
-    {
-        return Err(boxlite::BoxliteError::InvalidArgument(
-            "managed volumes are not supported by boxlite serve".into(),
-        ));
-    }
-
     // An empty name or value can never substitute anything. Reject at the
     // boundary so this server agrees with the Cloud API's IsNotEmpty and the
     // runner's per-element `dive` required validation on what a secret is.
@@ -1237,8 +1229,30 @@ fn build_box_options(req: &CreateBoxRequest) -> Result<BoxOptions, boxlite::Boxl
         })
         .unwrap_or_default();
 
+    // Every mount names a volume this server owns; the runtime resolves the
+    // reference to a directory at create. A client cannot reach a host path
+    // through this field — `CreateVolumeMount` has none.
+    let volumes = req
+        .volumes
+        .as_ref()
+        .map(|mounts| {
+            mounts
+                .iter()
+                .map(|mount| {
+                    let mut spec = boxlite::runtime::options::VolumeSpec::managed_volume(
+                        mount.managed_volume.clone(),
+                        mount.guest_path.clone(),
+                    );
+                    spec.read_only = mount.read_only;
+                    spec
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     Ok(BoxOptions {
         rootfs,
+        volumes,
         cpus: req.cpus,
         memory_mib: req.memory_mib,
         disk_size_gb: req.disk_size_gb,
@@ -2080,18 +2094,33 @@ mod tests {
         }
     }
 
+    /// A mount names a volume; the runtime turns that reference into a
+    /// directory. The wire carries no host path, and `deny_unknown_fields`
+    /// is what keeps a client from adding one.
     #[test]
-    fn build_box_options_rejects_nonempty_volumes() {
+    fn build_box_options_carries_volume_mounts_from_the_wire() {
         let req: super::types::CreateBoxRequest = serde_json::from_str(
-            r#"{"image":"alpine:latest","volumes":[{"managed_volume":"v1","guest_path":"/data"}]}"#,
+            r#"{"image":"alpine:latest","volumes":[{"managed_volume":"my-data","guest_path":"/data","read_only":true}]}"#,
         )
-        .expect("body with volumes must deserialize (accepted, then rejected)");
+        .expect("a mount request must deserialize");
 
-        let err = build_box_options(&req).expect_err("non-empty volumes must be rejected");
-        assert!(
-            matches!(err, boxlite::BoxliteError::InvalidArgument(ref msg) if msg.contains("managed volumes")),
-            "unexpected error: {err}"
+        let options = build_box_options(&req).expect("volume mounts are supported");
+        assert_eq!(1, options.volumes.len());
+        assert_eq!(
+            Some("my-data"),
+            options.volumes[0].managed_volume.as_deref()
         );
+        assert_eq!("/data", options.volumes[0].guest_path);
+        assert!(options.volumes[0].read_only);
+        assert!(
+            options.volumes[0].host_path.is_empty(),
+            "a client must not be able to name a host path"
+        );
+
+        let smuggled: Result<super::types::CreateBoxRequest, _> = serde_json::from_str(
+            r#"{"image":"alpine:latest","volumes":[{"managed_volume":"v1","guest_path":"/data","host_path":"/etc"}]}"#,
+        );
+        assert!(smuggled.is_err(), "host_path must not deserialize");
     }
 
     #[test]

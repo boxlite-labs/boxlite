@@ -79,7 +79,6 @@ pub async fn execute(args: RunArgs, global: &GlobalFlags) -> anyhow::Result<i32>
 struct BoxRunner {
     args: RunArgs,
     rt: BoxliteRuntime,
-    home: Option<std::path::PathBuf>,
 }
 
 /// Resolve the flags into box options.
@@ -89,7 +88,6 @@ struct BoxRunner {
 /// `create_box` ends in `rt.create`, which needs a VM.
 fn build_options(
     args: &RunArgs,
-    home: Option<&std::path::Path>,
     rootfs: RootfsSpec,
     command_args: &[String],
 ) -> anyhow::Result<BoxOptions> {
@@ -99,7 +97,7 @@ fn build_options(
     args.boot.apply_to(&mut options);
     args.management.apply_to(&mut options)?;
     args.publish.apply_to(&mut options)?;
-    args.volume.apply_to(&mut options, home)?;
+    args.volume.apply_to(&mut options)?;
     args.network.apply_to(&mut options)?;
     args.process.apply_to(&mut options)?;
 
@@ -133,9 +131,8 @@ fn build_options(
 impl BoxRunner {
     fn new(args: RunArgs, global: &GlobalFlags) -> anyhow::Result<Self> {
         let rt = global.create_runtime()?;
-        let home = global.home.clone();
 
-        Ok(Self { args, rt, home })
+        Ok(Self { args, rt })
     }
 
     async fn run(&mut self, rootfs: RootfsSpec, command_args: Vec<String>) -> anyhow::Result<i32> {
@@ -191,7 +188,7 @@ impl BoxRunner {
         rootfs: RootfsSpec,
         command_args: &[String],
     ) -> anyhow::Result<LiteBox> {
-        let options = build_options(&self.args, self.home.as_deref(), rootfs, command_args)?;
+        let options = build_options(&self.args, rootfs, command_args)?;
 
         let litebox = self
             .rt
@@ -259,7 +256,7 @@ mod tests {
         let (rootfs, command_args) = args.rootfs_and_command().expect("rootfs resolves");
         let command_args = command_args.to_vec();
 
-        let opts = build_options(&args, None, rootfs, &command_args).expect("options build");
+        let opts = build_options(&args, rootfs, &command_args).expect("options build");
 
         assert_eq!(opts.auto_delete, Some(3_600));
         assert!(opts.detach);
@@ -275,7 +272,7 @@ mod tests {
         let (rootfs, command_args) = args.rootfs_and_command().expect("rootfs resolves");
         let command_args = command_args.to_vec();
 
-        let opts = build_options(&args, None, rootfs, &command_args).expect("options build");
+        let opts = build_options(&args, rootfs, &command_args).expect("options build");
 
         assert_eq!(
             opts.auto_delete,

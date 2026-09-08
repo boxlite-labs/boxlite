@@ -78,7 +78,7 @@ impl CreateArgs {
         self.boot.apply_to(&mut options);
         self.management.apply_to(&mut options)?;
         self.publish.apply_to(&mut options)?;
-        self.volume.apply_to(&mut options, global.home.as_deref())?;
+        self.volume.apply_to(&mut options)?;
         self.network.apply_to(&mut options)?;
 
         // A `create`d box is a background box: `create` then `start`/`exec` runs
